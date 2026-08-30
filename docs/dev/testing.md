@@ -22,6 +22,10 @@
 | `tests/elf.rs` | read-only ELF inspection, against the running test binary, a non-ELF file, truncations of a real binary, and the host `beam.smp` |
 | `tests/strip.rs` | stripping a staged root: the exact `beam_lib` one-liner, the four verification failures, the three option shapes, idempotence, and `StagedRoot::refresh` |
 | `tests/report.rs` | the size and dependency account: the rendered table and `needs:` line over a synthetic report, and the measurement over a real staged tree |
+| `tests/trailer.rs` | the 64-byte trailer: the encoding, `None` against every error, the geometry arithmetic, and two never-panic properties |
+| `tests/manifest.rs` | `ginary.json` and `ginary.index.json`: the wire field order, the unknown-key round trip, `check_version`, the `launch` path rules, `created_at`, and the index over a staging root |
+| `tests/payload.rs` | the payload: deterministic packing, the round trip with modes, eight hand-built malicious archives, the two streaming reads, and three never-panic properties |
+| `tests/diag.rs` | the recorder through injected sinks: both output shapes, event order, elapsed time, and the four ways it stays off |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -35,6 +39,10 @@ Run them with `mise run test` (or `cargo test`). `mise run test:fast` runs `carg
 all four runs against fixtures and temporary directories. `tests/assemble.rs` needs no toolchain
 either and could join `test:fast`; `tests/stage_run.rs` is entirely gated, because every test in
 it runs a real `gleam` and a real `erlexec`.
+
+The four A3a targets — `tests/trailer.rs`, `tests/manifest.rs`, `tests/payload.rs` and
+`tests/diag.rs` — need no toolchain at all. Every byte they read is one they wrote, in a
+`tempfile` directory or in memory, and nothing in them spawns a process.
 
 The four A2 targets divide the same way. `tests/beam.rs` and `tests/report.rs` need nothing at
 all. `tests/strip.rs` needs nothing for all but one test — the stub `erl` a `FakeOtp` writes is
@@ -122,6 +130,10 @@ trees rather than fake ones: the first copies a fixture Gleam project and export
 boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that
 neither can hang the suite; it is the test-side counterpart of `src/process.rs`, which it cannot
 call because that function takes neither an environment nor a working directory.
+`tests/common/payload.rs` is what A3a added, and it builds no tree at all in the `FakeOtp` sense:
+it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
+(`staging_tree`), and the two instruments those tests read through, `CountingReader` and
+`SharedSink`. The two policy sections below say why each exists.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -332,8 +344,13 @@ and a hand-written test for each way its input can be short.** A branch a random
 reach in a lifetime of cases — the gzip wrapper `beam::form` unwraps needs two exact magic bytes
 and then a decodable deflate stream — gets a property test of its own with the prefix fixed, and
 hand-built inputs for its failures; a branch covered only by a toolchain-gated test is not
-covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs` and `src/elf.rs` are
-the first two; `trailer`, `payload` and `appfile` join them as they land.
+covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs` and `src/elf.rs` were
+the first two; `src/trailer.rs` and `src/payload.rs` joined them in A3a, with
+`parse_never_panics_on_arbitrary_bytes`, `parse_never_panics_on_the_magic_followed_by_rubbish`,
+`unpack_never_panics_on_arbitrary_bytes`, `read_manifest_never_panics_on_arbitrary_bytes` and
+`read_manifest_never_panics_on_a_zstd_stream_of_rubbish` — the last of those being the branch a
+random vector cannot reach, a well-formed zstd stream whose contents are not a tar archive.
+`appfile` joins them when its property test lands.
 
 | what is fed in | where |
 |---|---|
@@ -353,6 +370,132 @@ the input nobody thought of; the hand-written test says what the answer has to b
 Arithmetic is part of the rule. `offset + len` over a `u32::MAX` length must not overflow a
 `usize` on a 32-bit target, and a size that is subtracted must saturate: a strip that made a file
 bigger is a defect to report, not a panic.
+
+## The malicious-archive policy
+
+A payload is a tar archive read out of a file somebody else may have edited, and `src/payload.rs`
+is the only code in ginary that writes to a path an attacker chose the name of. The rule for its
+tests is therefore stricter than "the error is right":
+
+**every rejection asserts the exact error *and* that nothing appeared outside the destination.**
+`tests/payload.rs` builds a `Destination`: a temporary directory holding one `sentinel.txt` and an
+empty `dest/`, and `Destination::assert_nothing_escaped` re-lists everything outside `dest` after
+the failed `unpack` and requires it to be exactly `["sentinel.txt"]`. A rejection that had already
+written the file it rejected satisfies the error assertion on its own, and that is the failure the
+whole group exists to catch.
+
+**The archives are written by hand.** `tests/common/payload.rs` has `RawTar` and `RawEntry`, which
+lay out the 512-byte `ustar` header field by field and compute the checksum. That is not
+fastidiousness: the `tar` crate refuses to *write* most of what `src/payload.rs` has to refuse to
+*read*, so an archive with `../x`, an absolute path, a symlink, a hard link, a device node, a FIFO
+or a `ustar` prefix cannot be produced by the library being tested with it. Eight archives are
+built that way, one per rejection, plus a directory entry that must be *accepted* — a rule that
+only rejects is not an allowlist.
+
+Because those headers are hand-written, they get the same treatment `FakeOtp`'s generated `.app`
+files get: `the_hand_built_archives_read_back_as_the_entries_they_were_written_as` reads every one
+of them back with the `tar` crate and asserts the paths, the entry types, the `ustar` prefix join
+and one entry body. A header this file wrote wrongly fails there, rather than making four other
+tests pass for a reason nobody chose.
+
+**`unpack_in` returning `false` is an error, not a skip.** The tar crate answers `false` when it
+declines to write an entry into the destination and does not fail, and a silently skipped file in
+an artifact is exactly the outcome this format may not have. `PayloadError::PathEscape` is that
+`false`, and it is separate from `PayloadError::UnsafePath`, which is the check made *before* the
+path is used at all. No archive can produce it: the tar crate answers `false` only for a `..`
+component or a destination with no parent, and `UnsafePath` refuses the first before the entry is
+unpacked, so every hand-built escape in `tests/payload.rs` asserts `UnsafePath`. The variant is
+kept as defence in depth against a tar crate that starts declining for a new reason, and because
+a variant no test can reach is a variant nobody would notice being deleted, the mapping itself is
+pinned by a unit test in `src/payload.rs` — the one place a `bool` can be handed to the code
+directly. `docs/format.md` records the same decision.
+
+**A rejection leaves no completeness marker.** `unpack` writes `<dest>/ginary.json` last, after
+the digest has matched, because the presence of that file is what the cache reads as "this entry
+is finished". `tests/regressions/a3a_a_rejected_payload_left_its_manifest_behind.rs` asserts all
+three halves of that rule: a payload that fails its digest leaves no `ginary.json`, one that
+passes writes it, and a second unpack into the same destination is refused rather than allowed to
+replace it. The third is why the file is created with `create_new` — every other entry is
+unpacked under `set_overwrite(false)`, and one writer that overwrites makes the destination's
+behaviour depend on which entry is reached first.
+
+**Taking an entry out of the loop takes the overwrite rule with it.** Because entry 0 is read
+rather than unpacked, `set_overwrite(false)` no longer applies to its name, and a payload whose
+entry 2 was also called `ginary.json` planted the marker during the loop and then failed the final
+`create_new` with an unattributed `AlreadyExists`. Both front-matter names are reserved at both
+ends now, and `tests/regressions/a3a_a_repeated_front_entry_forged_the_marker.rs` covers the four
+shapes that matter: a repeat of each name, a repeat hidden behind a `./` component — the reader
+compares the path the entry would *land* on, not the raw header field — and a directory entry
+carrying the manifest's name; plus the packing side, where a staging listing naming either file
+is `ReservedName` rather than an artifact ginary itself could not read. The general lesson is
+worth more than the fix: an entry a reader handles specially is an entry the reader's generic
+defences have stopped covering, so it needs its own.
+
+## The `Diag` sink-injection pattern
+
+`src/diag.rs` writes to standard error and to a file, and neither is assertable from inside a test
+process without either capturing global state or spawning a child. It therefore takes its outputs
+as values:
+
+```rust
+pub fn with_sinks(
+    debug: Option<Box<dyn Write + Send>>,
+    trace: Option<Box<dyn Write + Send>>,
+) -> Diag
+```
+
+`Diag::from_env` is the thin wrapper that chooses standard error and the `GINARY_TRACE` file, and
+it is the only part of the module that opens anything — the same split `cache_dir::resolve` and
+`doctor::gather_from` follow, one layer down. `tests/common/payload.rs` supplies `SharedSink`, a
+cloneable `Write` over an `Arc<Mutex<Vec<u8>>>`, so a test holds one half and the recorder the
+other, and reads back either the debug lines or the JSON objects with no environment mutation and
+no child process. `tests/diag.rs` runs entirely on those sinks except for the three tests that are
+*about* `from_env`: that a trace path creates its parent directories, that nothing set creates no
+file, and that a trace file which cannot be opened leaves the run working.
+
+## Fuzzing
+
+`fuzz/` holds four `cargo-fuzz` targets, one per parser that reads bytes ginary did not write.
+They are the coverage-guided half of the never-panic policy above: the proptests state the
+property, the fuzzer looks for the input that breaks it.
+
+| target | entry point | why |
+|---|---|---|
+| `trailer_parse` | `trailer::parse` | the 64 bytes at the end of the running executable |
+| `appfile_terms` | `appfile::parse_terms` | `.app` files from a shipment and an OTP library; the parser recurses |
+| `beam_chunks` | `beam::chunks` | IFF length fields, and the gzip member a stripped module is |
+| `payload_read_manifest` | `payload::read_manifest` | zstd, then tar, then serde, over the payload |
+
+```console
+mise run fuzz:build      # cargo +nightly fuzz build
+mise run fuzz            # each target for 30 seconds, in turn
+```
+
+**`unpack` is deliberately not a target.** It writes to disk and creates directories, so a
+fuzzer would spend its time in the kernel and leave a tree behind after every crash.
+`read_manifest` covers the same zstd, tar and serde layers over the same untrusted bytes;
+`tests/payload.rs` covers the writing half with eight hand-built archives, which is a job for a
+test that can assert *where* nothing was written rather than for a fuzzer.
+
+**Seeds are committed and matter.** Three of the four parsers begin with a magic a fuzzer does
+not guess — `GINARY\0`, `FOR1`/`BEAM`, a zstd frame header — so `fuzz/seeds/<target>/` holds one
+small real input each and the `fuzz` task passes it as a second corpus directory. The generated
+`fuzz/corpus/<target>` is where new inputs go and is not committed. The difference is not
+marginal: `payload_read_manifest` reached 112 edges in 30 seconds without its seed and 1483 with
+it.
+
+`trailer_parse` takes `&[u8]` and splits it itself — 64 bytes of trailer, then eight of file
+length — rather than deriving `Arbitrary` for a tuple, so that a seed file is exactly what the
+end of a real artifact holds.
+
+**`fuzz/` is a workspace of its own.** A libFuzzer target only builds on nightly, and a workspace
+member is compiled by `cargo test`, `cargo clippy --all-targets` and `cargo deny` at the root.
+The `[workspace]` table in `fuzz/Cargo.toml` stops cargo looking upwards, the root manifest does
+not mention the directory, and the gates stay on the stable toolchain `rust-version` names.
+
+**A crash is a RED test.** Minimise it with `cargo +nightly fuzz tmin <target> <artifact>`, add
+the minimised input to `tests/regressions/`, watch it fail, then fix it. The artifact itself
+belongs in the commit as the regression's fixture.
 
 ## Assembly scenarios
 
@@ -421,7 +564,7 @@ to hang a test binary with no diagnosis.
 ## Snapshots
 
 Textual output is asserted with `insta`, and the `.snap` files under `tests/snapshots/` are
-committed and reviewed like any other assertion. Eleven exist:
+committed and reviewed like any other assertion. Twelve exist:
 
 | snapshot | what it pins |
 |---|---|
@@ -437,6 +580,7 @@ committed and reviewed like any other assertion. Eleven exist:
 | `strip__report_table.snap` | the three-line strip table when both halves ran |
 | `strip__report_table_when_nothing_ran.snap` | the same table when one half found nothing and the other was skipped |
 | `report__size_report_text.snap` | the size table, the `needs:` line and the warnings block, over a synthetic report |
+| `manifest__canonical_manifest_json.snap` | the wire field order of `ginary.json`, which is the struct's declaration order and not the alphabetical order `serde_json::Value` imposes |
 
 A snapshot is a contract, not a recording. `cargo insta review` is for reviewing a *deliberate*
 change to output; accepting a snapshot to make a red test pass is the same defect as weakening an
@@ -445,7 +589,7 @@ assertion.
 ## Planned infrastructure
 
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
-`fixture.rs`, `erl.rs` and `bounded.rs`, described above. Still to come:
+`fixture.rs`, `erl.rs`, `bounded.rs` and `payload.rs`, described above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache
@@ -470,8 +614,9 @@ Planned test categories:
   on `cache hit` for the second run, and on per-phase time bounds.
 - **Property tests** — `proptest` over the trailer encoding, the `.app` parser and tar path
   validation. The BEAM and ELF readers already have theirs; see the never-panic policy above.
-- **Fuzzing** — `cargo-fuzz` targets for `trailer`, `appfile`, `beam_chunks`, `elf_inspect` and
-  `payload_unpack`.
+- **Fuzzing** — four targets exist; see the fuzzing section above. `elf_inspect` is the one from
+  the plan's list that does not, because `object` is doing the parsing there and fuzzing it would
+  measure that crate rather than this one.
 - **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job.
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table
@@ -488,13 +633,16 @@ are all installed on the current development machine, and each has a mise task:
 | `mise run cov` | `cargo llvm-cov ... --lcov --output-path target/lcov.info`, then a summary | gated at 90% lines |
 | `mise run mutants` | `cargo mutants` | copies the tree; not `--in-place`; sharded in CI later |
 | `mise run test:nextest` | `cargo nextest run` | nextest does not run doc tests, so it is not a replacement for `mise run test` |
+| `mise run fuzz:build` | `cargo +nightly fuzz build` | builds the four targets; nightly, and outside the gate |
+| `mise run fuzz` | each target for 30 s, in turn | nightly; see the fuzzing section |
 
 The coverage gate is `--fail-under-lines 90`. The 80% branch floor is not enforced yet: branch
 coverage needs a nightly `-Z coverage-options=branch` build, and this crate is measured on
 stable. When that changes, the floor moves from prose into the `cov` task.
 
-`cargo-fuzz` needs a nightly toolchain to build a target; the fuzz targets themselves
-(`trailer`, `appfile`, `payload_unpack`) arrive with the code they cover. `cargo-insta` is
+`cargo-fuzz` needs a nightly toolchain to build a target, which is why `fuzz/` is a workspace of
+its own; `mise run fuzz` and `mise run fuzz:build` are the two tasks, and neither is part of
+`mise run check`. `cargo-insta` is
 installed through mise but has no version pinned for its shim, so `cargo insta` on `PATH` fails
 with `No version is set for shim: cargo-insta`; pin it, or call the binary under
 `~/.local/share/mise/installs/cargo-cargo-insta/1.48/bin/`. The `insta` *crate* is a normal dev

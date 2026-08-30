@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "ginary-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.ginary]
+path = ".."
+
+# `fuzz` is a workspace of its own rather than a member of the root one. A
+# libFuzzer target only builds on nightly, and a member crate is compiled by
+# `cargo test`, `cargo clippy --all-targets` and `cargo deny` at the root; the
+# gates have to stay on the stable toolchain `rust-version` names. The root
+# `Cargo.toml` therefore does not list this directory and this table stops
+# cargo looking upwards for a workspace to join.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "trailer_parse"
+path = "fuzz_targets/trailer_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "appfile_terms"
+path = "fuzz_targets/appfile_terms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "beam_chunks"
+path = "fuzz_targets/beam_chunks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_read_manifest"
+path = "fuzz_targets/payload_read_manifest.rs"
+test = false
+doc = false
+bench = false

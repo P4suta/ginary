@@ -1,0 +1,47 @@
+---
+source: tests/manifest.rs
+expression: json
+---
+{
+  "format_version": 1,
+  "app": "hello",
+  "app_version": "1.2.3",
+  "gleam_version": "1.18.1",
+  "otp_release": 29,
+  "otp_version": "29.0.5",
+  "erts_version": "17.0.5",
+  "target": "linux-x86_64-gnu",
+  "otp_applications": [
+    {
+      "name": "kernel",
+      "vsn": "11.0.3"
+    },
+    {
+      "name": "stdlib",
+      "vsn": "7.0.3"
+    }
+  ],
+  "gleam_applications": [
+    "hello"
+  ],
+  "launch": {
+    "program": "erlexec",
+    "bindir": "erts-17.0.5/bin",
+    "boot": "bin/no_dot_erlang",
+    "pa": [
+      "lib/hello/ebin"
+    ],
+    "eval": "'hello@@main':run('hello')",
+    "erl_flags": [
+      "+B"
+    ]
+  },
+  "native": [
+    {
+      "path": "lib/crypto-5.9.2/priv/lib/crypto.so",
+      "kind": "elf"
+    }
+  ],
+  "created_at": "2026-08-31T00:00:00Z",
+  "ginary_version": "0.1.0"
+}

@@ -956,8 +956,49 @@ fn elf_deps_json_carries_the_documented_keys() {
     );
     assert!(file["interp"].is_string(), "{value}");
     assert!(file["glibc_max"].is_string(), "{value}");
-    assert!(file["is_pie"].is_boolean(), "{value}");
+    assert_eq!(file["is_pie"], Value::from(true));
     assert!(file["stripped"].is_boolean(), "{value}");
+    assert_eq!(
+        file["kind"],
+        Value::from("shared_object"),
+        "a cargo binary is a position-independent executable, and `e_type` \
+         calls that an `ET_DYN` like any other shared object: {value}"
+    );
+
+    // The other half of that mapping: the same file with `e_type` patched to
+    // `ET_EXEC` is the one thing `kind` distinguishes and `interp` does not.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let patched = dir.path().join("non-pie");
+    std::fs::write(
+        &patched,
+        et_exec(&std::fs::read(&binary).expect("the test binary")),
+    )
+    .expect("write the patched binary");
+    let assert = ginary()
+        .args(["elf", "deps", "--json"])
+        .arg(&patched)
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+    let file = &value["files"][0];
+
+    assert_eq!(file["kind"], Value::from("executable"), "{value}");
+    assert_eq!(file["is_pie"], Value::from(false), "{value}");
+}
+
+/// The same ELF with `e_type` set to `ET_EXEC`.
+///
+/// `e_type` is the two bytes at offset 16 of the header, in the file's own
+/// byte order; every target ginary builds for is little-endian, and the
+/// assertion below says so rather than assuming it.
+fn et_exec(elf: &[u8]) -> Vec<u8> {
+    const ELFDATA2LSB: u8 = 1;
+    const ET_EXEC: u16 = 2;
+
+    let mut bytes = elf.to_vec();
+    assert_eq!(bytes[5], ELFDATA2LSB, "a little-endian ELF");
+    bytes[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
+    bytes
 }
 
 #[test]

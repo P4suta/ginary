@@ -37,3 +37,13 @@ mod a2_a_symlinked_priv_reached_an_excluded_directory;
 mod a2_an_unreadable_elf_file_failed_the_whole_stage;
 #[path = "regressions/a2_the_staged_root_became_a_wildcard.rs"]
 mod a2_the_staged_root_became_a_wildcard;
+#[path = "regressions/a3a_a_contiguous_entry_was_extracted.rs"]
+mod a3a_a_contiguous_entry_was_extracted;
+#[path = "regressions/a3a_a_rejected_payload_left_its_manifest_behind.rs"]
+mod a3a_a_rejected_payload_left_its_manifest_behind;
+#[path = "regressions/a3a_a_repeated_front_entry_forged_the_marker.rs"]
+mod a3a_a_repeated_front_entry_forged_the_marker;
+#[path = "regressions/a3a_a_zero_length_payload_looked_truncated.rs"]
+mod a3a_a_zero_length_payload_looked_truncated;
+#[path = "regressions/a3a_the_second_payload_entry_was_never_checked.rs"]
+mod a3a_the_second_payload_entry_was_never_checked;

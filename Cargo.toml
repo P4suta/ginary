@@ -16,10 +16,25 @@ categories = ["command-line-utilities", "development-tools"]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# Hex is the spelling every SHA-256 in the format has: the cache key, the
+# `sha256` field of `ginary.index.json` and both digests of a checksum
+# mismatch. Writing it by hand is four lines that nothing would test.
+hex = "0.4.3"
 object = { version = "0.40.0", default-features = false, features = ["read", "elf", "std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# The payload's checksum, the trailer's `sha256` and every entry of the index.
+sha2 = "0.10.9"
+# The payload is a tar archive. `HeaderMode::Deterministic` and `unpack_in`
+# are the two pieces `src/payload.rs` is built on: the first is what makes two
+# packs of one tree byte-identical, the second is the path check that keeps an
+# entry from escaping the destination.
+tar = "0.4.46"
 thiserror = "2.0.18"
+# The payload's compression. `default-features = false` keeps the multi-threaded
+# encoder and the `zstdmt` C sources out: packing is single-threaded on purpose,
+# because a thread count that varies with the machine varies the output bytes.
+zstd = { version = "0.13.3", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"

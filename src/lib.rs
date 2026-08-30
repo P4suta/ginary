@@ -43,6 +43,16 @@
 //!   the modules, each verified afterwards;
 //! - [`report`] — the size breakdown and the `needs:` line.
 //!
+//! Milestone A3a adds the payload format itself, the four modules an artifact
+//! is made of and read back with:
+//!
+//! - [`trailer`] — the 64 bytes at the end of a packaged application;
+//! - [`manifest`] — `ginary.json` and `ginary.index.json`;
+//! - [`payload`] — the deterministic tar and zstd stream, and its hostile
+//!   reader;
+//! - [`diag`] — `GINARY_DEBUG` and `GINARY_TRACE`, the launcher's only
+//!   observability.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -55,10 +65,14 @@ pub mod beam;
 pub mod cache_dir;
 pub mod cli;
 pub mod closure;
+pub mod diag;
 pub mod doctor;
 pub mod elf;
+pub mod manifest;
 pub mod otp;
+pub mod payload;
 pub mod process;
 pub mod report;
 pub mod strip;
 pub mod target;
+pub mod trailer;

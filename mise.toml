@@ -56,6 +56,33 @@ description = "Mutation testing over the whole crate"
 # arrives with the nightly CI job.
 run = "cargo mutants"
 
+[tasks."fuzz:build"]
+description = "Build every cargo-fuzz target (nightly toolchain)"
+# `fuzz/` is a workspace of its own, so the root gates stay on stable and only
+# this task and `fuzz` need a nightly toolchain. See `docs/dev/testing.md`.
+run = "cargo +nightly fuzz build"
+
+[tasks.fuzz]
+description = "Run each fuzz target for 30 seconds (nightly toolchain)"
+# Sequential rather than parallel: four libFuzzer processes at four gigabytes
+# each is not a thing to start by accident, and a crash is easier to attribute
+# when one target is running on its own.
+#
+# `fuzz/seeds/<target>` is the committed corpus and is passed second, so new
+# inputs land in the generated `fuzz/corpus/<target>` and the seeds stay as
+# they are. Three of the four parsers begin with a magic a fuzzer will not
+# guess — `GINARY\0`, `FOR1`, a zstd frame header — and without those seeds the
+# targets measure the first `if` and nothing else.
+run = """
+set -e
+for target in trailer_parse appfile_terms beam_chunks payload_read_manifest; do
+  echo "fuzz: $target"
+  mkdir -p fuzz/corpus/"$target"
+  cargo +nightly fuzz run "$target" fuzz/corpus/"$target" fuzz/seeds/"$target" \
+    -- -max_total_time=30 -rss_limit_mb=4096
+done
+"""
+
 [tasks.doc]
 description = "Build the API documentation with rustdoc warnings denied"
 env = { RUSTDOCFLAGS = "-Dwarnings" }
