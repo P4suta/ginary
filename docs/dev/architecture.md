@@ -21,7 +21,7 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)* or *(A1b)* exist; the rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)* or *(A1c)* exist; the rest are the plan.
 
 ```
 build side
@@ -34,7 +34,7 @@ build side
   appfile.rs       (A1a) a subset of Erlang terms, enough to read a .app file
   closure.rs       (A1b) transitive closure of `applications` -> AppSet
   native.rs        detects ELF/Mach-O/PE under priv/, matches them to the target
-  assemble.rs      builds the staging root
+  assemble.rs      (A1c) builds the staging root
   strip.rs         `strip` on ELF, `beam_lib:strip_release` on .beam
   report.rs        size and dependency accounting
   manifest.rs      ginary.json
@@ -178,6 +178,76 @@ bundle the wrong closure.
 `inspect_root` is the single point of truth about a runtime: whatever the ERTS came from, the
 real `beam.smp` is read with the `object` crate to derive the target, the linkage and the
 minimum glibc. Nothing downstream trusts the provenance metadata alone.
+
+## The staging root
+
+`assemble::stage(&AppSet, &OtpInfo, &StageOptions, out)` turns that bill of materials into a
+directory. What it writes is the exact tree the payload is made of and the exact tree the
+launcher will find in its cache, so every later phase — strip, report, pack, extract, launch —
+reads this layout and nothing else.
+
+```
+<out>/
+  bin/no_dot_erlang.boot         the only boot script
+  erts-<vsn>/bin/                beam.smp erlexec erl_child_setup inet_gethost
+                                 plus whatever --extra-bin named (heart, epmd)
+  lib/<name>-<vsn>/{ebin,priv}   an application from the OTP library
+  lib/<name>/{ebin,priv}         an application from the shipment
+  ginary.stage.json              what was staged, why, and how big it is
+```
+
+The two `lib` shapes are not cosmetic. An OTP application keeps its version in its directory
+name because that is where `code:lib_dir/1` looks for it; a shipment application does not have
+one, because that is what `gleam export erlang-shipment` writes and what the launcher's `-pa`
+names. Assembly preserves the difference rather than normalising it.
+
+Four rules shape the tree, and each is a test in `tests/assemble.rs` that fails without it.
+
+**The result is atomic.** Staging happens in a sibling `<out>.tmp-<pid>` and is renamed onto
+`out` at the end. `out` therefore either does not exist or is complete, and a failure leaves
+neither a partial `out` nor a temporary tree — the same completion-marker discipline the cache
+uses at the other end of the pipeline.
+
+**Nothing is copied by default.** Under `erts-<vsn>/bin` only `otp::REQUIRED_ERTS_BINARIES` and
+the names in `StageOptions::extra_bins` are staged; every other program that was there is
+recorded, with a one-line reason, in `StagedRoot::excluded_erts_bins()`. Under an application
+only `ebin` and `priv` are staged, `*.appup` is dropped, and `src`, `include`, `doc`,
+`examples`, `c_src` and `mibs` never travel — they are left behind by not being on the
+allowlist, not by a filter, so nothing *inside* `ebin` or `priv` is pruned by name and
+`snmp`'s runtime `priv/mibs/*.bin` survives. Symlinks are dereferenced, under two boundaries
+rather than one: a link to a *file* may point anywhere inside the application, and a link to a
+*directory* may not leave the `ebin` or `priv` it was found in, or `ebin/x -> ../src` would walk
+around a structural rule. A link that crosses its boundary or points at nothing is
+`UnsafeSymlink`, one that points back at a directory containing it is `SymlinkCycle`, and both
+are checked on the `ebin` and `priv` themselves as well as on everything under them — an
+application whose `priv` *is* a link to elsewhere on the build machine is the same defect, and
+`read_dir` follows it without a word. A file whose name is not valid UTF-8 is `NonUtf8Name`: the
+listing is text, and an artifact holding a file its own index cannot name is worse than one that
+was not built.
+
+**The boot file is checked against the tree.** `no_dot_erlang.boot` hardcodes the `kernel` and
+`stdlib` versions it was generated against, as literal `$ROOT/lib/<name>-<vsn>/ebin` byte
+strings that `otp::boot_lib_dirs` reads out. If the staged tree does not hold exactly those
+directories the runtime fails to boot without saying why, so
+`AssembleError::BootReferencesMissingApp` says it here, naming both the version the boot file
+wants and the version the closure resolved.
+
+**The tree describes itself.** `ginary.stage.json` lists every file with its size, its mode and
+its category — `erts_binary`, `boot`, `otp_beam`, `gleam_beam`, `priv`, `app_resource`, `other` —
+sorted by path. It is the precursor of the artifact's `ginary.index.json` and the input to the
+size report. It holds no absolute path and no timestamp, and it does not list itself, because a
+file whose contents depend on its own length cannot be reproduced. Staging the same inputs twice
+therefore produces byte-identical trees, which is the first place the "identical input produces
+identical artifact bytes" invariant is actually testable.
+
+Junk removal is the one place assembly deletes rather than declines to copy:
+`crypto-*/priv/lib/otp_test_engine.so`, an application's `priv/obj/` directory and
+`priv/lib/*.a` are removed after the copy, and each removal is recorded in
+`StagedRoot::junk_removed` with its size, so `--keep-junk` and the report can both say exactly
+what the default cost.
+
+`ginary stage <shipment> --root NAME --out DIR` is the developer window onto all of this, and
+the input to `tests/stage_run.rs`, which boots what it wrote.
 
 ## Launch data flow
 

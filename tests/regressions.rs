@@ -21,3 +21,9 @@ mod a1b_app_file_error_repeated_its_cause;
 mod a1b_app_names_were_used_as_paths;
 #[path = "regressions/a1b_shadowed_otp_ambiguity_aborted_the_closure.rs"]
 mod a1b_shadowed_otp_ambiguity_aborted_the_closure;
+#[path = "regressions/a1c_a_non_utf8_file_name_was_dropped.rs"]
+mod a1c_a_non_utf8_file_name_was_dropped;
+#[path = "regressions/a1c_a_symlinked_directory_looped_or_leaked.rs"]
+mod a1c_a_symlinked_directory_looped_or_leaked;
+#[path = "regressions/a1c_a_symlinked_ebin_or_priv_escaped_the_app.rs"]
+mod a1c_a_symlinked_ebin_or_priv_escaped_the_app;

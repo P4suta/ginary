@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The zero-dependency fixture. It has no hex dependencies at all, so
+# `gleam build` and `gleam export erlang-shipment` run offline, with no
+# manifest to warm and no hex cache to prime. Everything the program does it
+# does through `@external`, because a Gleam project without `gleam_stdlib` has
+# no `io` module.
+#
+# `[tools.ginary]` is deliberately absent: nothing reads it yet, and a table
+# that no code consumes is a claim the tests cannot check.
+
+name = "hello_ffi"
+version = "0.1.0"
+target = "erlang"
+
+[dependencies]

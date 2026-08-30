@@ -376,9 +376,17 @@ impl std::error::Error for ClosureError {
 /// # Errors
 ///
 /// [`ClosureError::AppNotFound`] when a required application is in neither
-/// tree, [`ClosureError::AmbiguousOtpApp`] when the OTP library holds two
-/// versions of one application, and [`ClosureError::AppFile`] when an `.app`
-/// file cannot be read.
+/// tree; [`ClosureError::InvalidAppName`] when a required name cannot be used
+/// as a directory name, before any path is built from it;
+/// [`ClosureError::AmbiguousOtpApp`] when a required application has to come
+/// from the OTP library and the library holds more than one version of it —
+/// a shipment copy ends the lookup, so an application the shipment provides
+/// is a warning rather than an error however many OTP versions sit beside it;
+/// and [`ClosureError::AppFile`] when an `.app` file cannot be read.
+///
+/// Only a *required* application reaches any of these. An optional dependency
+/// that fails to resolve, for any of those reasons, is recorded in
+/// [`AppSet::skipped_optional`] and [`AppSet::warnings`] instead.
 pub fn app_dependency_closure(
     shipment: &Path,
     otp_lib: &Path,

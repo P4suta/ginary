@@ -473,3 +473,255 @@ fn closure_reports_a_missing_application_and_exits_one() {
         assert.get_output().stdout
     );
 }
+
+/// A shipment, an OTP root and an unused output path, for `stage`.
+///
+/// A smaller scenario than `closure_trees`: `stage` is covered in depth by
+/// `tests/assemble.rs`, and what is left for the command line is that the
+/// flags reach the function, the report is printed, and a failure is an exit
+/// code rather than a panic. The runtime carries two spare programs so that
+/// `--extra-bin` and the exclusion list have something to work on, `crypto`
+/// carries one piece of junk so that `--keep-junk` has something to keep, and
+/// `sasl` is in the library and reachable from nothing, so that `--extra` is
+/// the only thing that can put it in the tree.
+fn stage_trees() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let shipment = FakeShipment::new()
+        .app_with("notify", "1.0.0", |app| {
+            app.applications(&["gleam_crypto"])
+                .priv_file("greeting.txt", b"hello from priv\n")
+        })
+        .app("gleam_crypto", "0.4.0", &["crypto"])
+        .build_in(dir.path().join("shipment"));
+    std::fs::create_dir_all(dir.path().join("otp")).expect("the otp root");
+    let otp = FakeOtp::new()
+        .extra_erts_bins(&["epmd", "heart"])
+        .app_with("crypto", "5.9.2", |app| {
+            app.applications(&["kernel", "stdlib"])
+                .priv_file("lib/crypto.so", b"a fake NIF")
+                .priv_file("lib/libcrypto_static.a", b"a fake static archive")
+        })
+        .app("sasl", "4.3", &["kernel", "stdlib"])
+        .build_in(dir.path().join("otp"));
+    let shipment_root = shipment.root.clone();
+    let otp_root = otp.root.clone();
+    let out = dir.path().join("out");
+    (dir, shipment_root, otp_root, out)
+}
+
+/// `ginary stage <shipment> --otp-root <otp> --root notify --out <out>`.
+fn stage_command(shipment: &Path, otp: &Path, out: &Path) -> Command {
+    let mut command = ginary();
+    command
+        .arg("stage")
+        .arg(shipment)
+        .arg("--otp-root")
+        .arg(otp)
+        .args(["--root", "notify"])
+        .arg("--out")
+        .arg(out);
+    command
+}
+
+#[test]
+fn the_help_lists_the_stage_command() {
+    let assert = ginary().arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    assert!(stdout.contains("stage"), "{stdout}");
+}
+
+#[test]
+fn stage_without_an_out_directory_is_a_usage_error() {
+    let (_dir, shipment, otp, _out) = stage_trees();
+
+    ginary()
+        .arg("stage")
+        .arg(&shipment)
+        .arg("--otp-root")
+        .arg(&otp)
+        .args(["--root", "notify"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn stage_writes_the_tree_and_prints_the_totals() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert_eq!(
+        stdout
+            .lines()
+            .next()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>()),
+        Some(vec!["category", "bytes", "files"]),
+        "the default output is the per-category table:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("erts_binary") && stdout.contains("gleam_beam"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("staged ")
+            && line.contains(" files, ")
+            && line.contains(&out.display().to_string())),
+        "the last line names the file count, the byte count and the directory:\n{stdout}"
+    );
+    assert!(
+        out.join("ginary.stage.json").is_file(),
+        "no listing written"
+    );
+    assert!(out.join("bin/no_dot_erlang.boot").is_file());
+    assert!(out.join("lib/notify/ebin/notify.app").is_file());
+}
+
+#[test]
+fn stage_json_carries_the_documented_keys() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--json")
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["erts_vsn"], Value::from("17.0.5"));
+    assert_eq!(value["otp_release"], Value::from(29));
+    assert_eq!(value["otp_version"], Value::from("29.0.5"));
+    assert_eq!(value["root"], Value::from(out.display().to_string()));
+    let apps = value["apps"].as_array().expect("apps is an array");
+    let names: Vec<&str> = apps.iter().filter_map(|app| app["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        ["crypto", "gleam_crypto", "kernel", "notify", "stdlib"]
+    );
+    assert!(
+        value["files"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty()),
+        "{value}"
+    );
+}
+
+#[test]
+fn stage_explain_names_the_binaries_it_left_out() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .args(["--extra-bin", "heart", "--explain"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("excluded erts binaries:"), "{stdout}");
+    assert!(
+        stdout.contains("epmd") && !stdout.contains("\n  heart "),
+        "`heart` was staged with --extra-bin, so it is not an exclusion:\n{stdout}"
+    );
+    assert!(stdout.contains("boot references checked:"), "{stdout}");
+    assert!(out.join("erts-17.0.5/bin/heart").is_file());
+}
+
+#[test]
+fn stage_refuses_a_non_empty_output_directory_and_exits_one() {
+    let (_dir, shipment, otp, out) = stage_trees();
+    std::fs::create_dir_all(&out).expect("the output directory");
+    std::fs::write(out.join("occupied.txt"), b"not mine\n").expect("a file in the way");
+
+    let assert = stage_command(&shipment, &otp, &out).assert().code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stderr.contains("already exists and is not empty"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--force"), "the fix is named: {stderr}");
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "no partial report may be printed"
+    );
+}
+
+#[test]
+fn stage_with_force_replaces_a_non_empty_output_directory() {
+    let (_dir, shipment, otp, out) = stage_trees();
+    std::fs::create_dir_all(&out).expect("the output directory");
+    std::fs::write(out.join("occupied.txt"), b"not mine\n").expect("a file in the way");
+
+    stage_command(&shipment, &otp, &out)
+        .arg("--force")
+        .assert()
+        .success();
+
+    assert!(!out.join("occupied.txt").exists());
+    assert!(out.join("ginary.stage.json").is_file());
+}
+
+#[test]
+fn stage_with_keep_junk_keeps_the_files_the_default_deletes() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    stage_command(&shipment, &otp, &out)
+        .arg("--keep-junk")
+        .assert()
+        .success();
+
+    assert!(
+        out.join("lib/crypto-5.9.2/priv/lib/libcrypto_static.a")
+            .is_file(),
+        "--keep-junk has to reach StageOptions::remove_junk, or the file is gone"
+    );
+    assert!(out.join("lib/crypto-5.9.2/priv/lib/crypto.so").is_file());
+}
+
+#[test]
+fn stage_without_keep_junk_removes_the_same_files_and_says_so() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--explain")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        !out.join("lib/crypto-5.9.2/priv/lib/libcrypto_static.a")
+            .exists(),
+        "the default is to remove the junk"
+    );
+    assert!(
+        stdout.contains("junk removed:") && stdout.contains("libcrypto_static.a"),
+        "a removal is a reported decision, not a silent one:\n{stdout}"
+    );
+}
+
+#[test]
+fn stage_with_an_extra_application_stages_it_beside_the_closure() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .args(["--extra", "sasl"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        out.join("lib/sasl-4.3/ebin/sasl.app").is_file(),
+        "--extra has to reach the closure the staging is built from:\n{stdout}"
+    );
+}
+
+#[test]
+fn stage_without_the_extra_application_leaves_it_out() {
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    stage_command(&shipment, &otp, &out).assert().success();
+
+    assert!(
+        !out.join("lib/sasl-4.3").exists(),
+        "nothing reaches the tree that the closure did not ask for"
+    );
+}

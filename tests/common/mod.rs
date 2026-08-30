@@ -9,7 +9,10 @@
 
 #![allow(dead_code)]
 
+pub mod bounded;
+pub mod erl;
 pub mod fake_otp;
+pub mod fixture;
 pub mod script;
 pub mod snapshot;
 pub mod tools;

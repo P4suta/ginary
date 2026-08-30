@@ -15,7 +15,9 @@
 | `tests/appfile.rs` | the `.app` reader: the term grammar, `Term`'s re-serialisation, `AppResource`, the error positions, and every fixture under `tests/fixtures/app/` |
 | `tests/otp.rs` | `inspect_root` against fake roots that are whole and broken, `boot_lib_dirs`, and `discover` with and without an override |
 | `tests/closure.rs` | the closure over fake shipment and OTP trees: seeds, edges, resolution order, determinism, the three errors, `explain` and `chain`, two property tests, and one gated run over a real shipment |
-| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, and the `otp` field `doctor` now reports |
+| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, `stage` as a table, JSON, `--explain`, `--force` and its two usage errors, and the `otp` field `doctor` now reports |
+| `tests/assemble.rs` | the staging root over fake trees: the exact layout, every exclusion, junk removal, modes, symlinks, the error paths, the listing, and determinism |
+| `tests/stage_run.rs` | toolchain-gated: stage the `hello_ffi` fixture against the host OTP and boot it through `erlexec` |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -26,7 +28,9 @@ Run them with `mise run test` (or `cargo test`). `mise run test:fast` runs `carg
 --bins --test smoke_cli --test regressions`, named explicitly because it is the subset that
 *requires* no external toolchain. `tests/appfile.rs`, `tests/otp.rs`, `tests/closure.rs` and
 `tests/cli.rs` are outside it because each holds a handful of gated tests, even though the bulk of
-all four runs against fixtures and temporary directories.
+all four runs against fixtures and temporary directories. `tests/assemble.rs` needs no toolchain
+either and could join `test:fast`; `tests/stage_run.rs` is entirely gated, because every test in
+it runs a real `gleam` and a real `erlexec`.
 
 The library and binary targets spawn only fake shell scripts in temporary directories, never a
 program from the machine's `PATH`. Four integration targets do reach it, each for a stated
@@ -37,6 +41,7 @@ reason:
 | `tests/smoke_cli.rs` | `ginary doctor` probes whatever `gleam`, `erl`, `strip` and `docker` are there | none has to be present or to succeed; a hanging probe costs `doctor::PROBE_TIMEOUT` (10 s) before it is killed |
 | `tests/cli.rs` | the same, plus the `otp` field, which runs the ambient `erl` | the two `otp` assertions are gated on `require_tools(&["erl"])` |
 | `tests/otp.rs`, `tests/appfile.rs`, `tests/closure.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
+| `tests/stage_run.rs` | `gleam export erlang-shipment`, `otp::discover(None)`, and the `erlexec` of the staged tree | every test is gated on `require_tools(&["gleam", "erl"])`; the launched runtime gets `env_clear()`, an empty `PATH` directory and a `HOME` inside the test's temporary tree, and both children run under a deadline — `fixture::EXPORT_BUDGET` (180 s) and `erl::RUN_BUDGET` (60 s) — with stdin on the null device |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
@@ -101,6 +106,11 @@ third builder: it writes an executable `/bin/sh` stub, which is how a test puts 
 on a `PATH` of its own. `tests/common/snapshot.rs` is the fourth helper, and exists because those
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
 with a placeholder, longest path first, so a snapshot pins the sentence rather than the machine.
+`tests/common/fixture.rs` and `tests/common/erl.rs` are the two A1c added, and they work on real
+trees rather than fake ones: the first copies a fixture Gleam project and exports it, the second
+boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that
+neither can hang the suite; it is the test-side counterpart of `src/process.rs`, which it cannot
+call because that function takes neither an environment nor a working directory.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -137,9 +147,20 @@ property the builder can write, parsed, and asserted field by field. A defect in
 Erlang therefore fails here rather than three milestones later. Names that are not bare atoms
 (`my-app`) are quoted on the way out for the same reason.
 
+Assembly needed three more things from the builder, and each is the smallest addition that keeps
+the "no API for an invalid tree" rule intact. `FakeOtp::extra_erts_bins` puts spare programs in
+`erts-<vsn>/bin`, because a runtime holding only the four required binaries cannot show that
+assembly refuses the rest. `fake_otp::make_executable` is the counterpart of
+`make_non_executable`, so a test can prove a NIF's execute bit survives the copy. And
+`fake_otp::boot_bytes_for` writes boot-file bytes naming any `<name>-<vsn>` directories at all,
+which is how a test builds the one mismatch assembly exists to catch — a boot file carried over
+from a different OTP installation.
+
 To test a *broken* root, build a whole one and break it: `fs::remove_file`, `fs::create_dir` for
 a second `erts-*`, or `fake_otp::make_non_executable`. The builder deliberately has no API for
-producing an invalid tree, so nothing can be broken by accident.
+producing an invalid tree, so nothing can be broken by accident. `tests/assemble.rs` follows the
+same rule for the things a `FakeApp` cannot describe: the `.appup`, the six excluded directories
+and the three symlinks are all written by hand, in the open, by the test that needs them.
 
 ## Closure scenarios
 
@@ -187,6 +208,31 @@ evaporate silently on every machine but one.
 
 ## Fixture policy
 
+Two kinds of fixture live under `tests/fixtures/`: `.app` files that a parser reads, and whole
+Gleam projects that a toolchain builds.
+
+### `tests/fixtures/hello_ffi/` — the zero-dependency project
+
+`hello_ffi` is a real Gleam project with **no hex dependencies at all**. That is the whole point
+of it: `gleam build` and `gleam export erlang-shipment` run offline, behind a committed
+`manifest.toml` that locks zero packages, so nothing has to be resolved from hex, there is no
+cache for CI to warm, and nothing can fail because a package server is slow.
+A project without `gleam_stdlib` has no `io` module, so every observable thing it does happens in
+`src/hello_ffi_ffi.erl` through `@external`, which is a feature rather than a workaround: the
+four things a staged root has to get right are exactly the four the FFI touches.
+
+| what it does | what it proves about the staged root |
+|---|---|
+| `init:get_plain_arguments()`, printed as `args=<joined>` | everything after `-extra` reached the application unchanged |
+| reads `code:priv_dir(hello_ffi)/greeting.txt` | `priv` was staged beside `ebin` and the code path found it |
+| prints `cwd=<file:get_cwd()>` | the process started where it was told to, not where the runtime lives |
+| `halt(N)` on the first argument, `erlang:error(boom)` on `--crash` | exit codes propagate, and a crash reaches Gleam's `hello_ffi@@main`, which prints `runtime error` and exits 1 |
+
+`build/` is git-ignored through the existing `tests/fixtures/*/build/` pattern, and
+`FixtureProject::copy` skips it, so no test ever builds the fixture in place.
+
+### `tests/fixtures/app/`
+
 `tests/fixtures/app/` holds two kinds of file and `tests/fixtures/app/README.md` records which is
 which and where each copied file came from.
 
@@ -203,6 +249,70 @@ are the point. The README names the source directory and the version of every on
 The two are complementary. The copies keep the coverage on a machine with no Erlang; the gated
 `parses_every_app_in_host_otp` walks the live OTP root and asserts every `.app` in it parses,
 which is coverage the copies cannot give.
+
+## Assembly scenarios
+
+`tests/assemble.rs` builds one six-application scenario and asserts against it from every angle.
+Three applications come from a `FakeShipment` and three from a `FakeOtp`, which is the smallest
+tree that shows both staged layouts (`lib/<name>` and `lib/<name>-<vsn>`), both `.beam`
+categories, a `priv` on each side, and every kind of file assembly refuses to copy. The runtime
+carries six spare programs in its `bin` so the exclusion list has something to exclude, and
+`crypto` carries one real NIF beside three pieces of junk.
+
+The rule the whole file follows: **a test names the paths it expects, in full and in order.** An
+assertion that only checks that a few expected files are present cannot see a file that should
+not have been copied, and an allowlist whose failures are invisible is not an allowlist. The
+`EXPECTED_TREE` constant at the top of the file is the contract; twenty-odd tests then take it
+apart.
+
+| scenario | what it pins |
+|---|---|
+| layout | the twenty-two paths of the staged tree, exactly, sorted |
+| exclusions | a `.appup` beside an `.app` is dropped; `src`, `include`, `doc`, `examples`, `c_src` and `mibs` never appear at the top level of an application, which is the rule the module has — a `priv/mibs/*.bin` beside them *is* staged, because nothing inside `ebin` or `priv` is pruned by name |
+| junk | the three removals and their exact byte counts, in path order, with the real NIF beside them untouched; `--keep-junk` records nothing and keeps all three |
+| modes | every staged file's mode equals its source's, the NIF stays executable, the data file does not become one, and the listing's `mode` agrees with the tree |
+| boot | a boot file naming `kernel-1.0` against a staged `kernel-11.0.3` is `BootReferencesMissingApp` naming *both*; the versions actually checked are reported |
+| erts bin | a missing required binary names the path it searched; `--extra-bin heart epmd` stages six programs; an extra that is not there is an error, not a skip; every program left behind is listed with the reason `assemble::excluded_reason` gives, and an extra that *was* staged is not also listed as excluded |
+| output | a non-empty `out` is refused and left untouched; an empty one is accepted; `--force` replaces rather than merges; a failure leaves neither `out` nor an `<out>.tmp-*` |
+| symlinks | a link inside the application is copied as a plain file with the target's bytes; one that escapes the application directory and one that dangles are both `UnsafeSymlink` (`tests/regressions/a1c_*` add the three the first review found: an `ebin` or a `priv` that is *itself* a link out of the application, a link to a directory outside the subtree being copied, and a link that loops) |
+| accounting | the per-category totals sum to `total_bytes()`, which equals a walk of the tree with the listing excluded; nine named paths are checked against the category the size report will add them to |
+| listing | `ginary.stage.json` round-trips through serde, lists every file sorted by path, never lists itself, and names the ERTS version, the release and the OTP version |
+| determinism | staging the same inputs into two directories produces the same paths, the same bytes, the same modes and the same listing |
+
+## The launch contract
+
+`tests/common/erl.rs` holds `run_staged`, and it is not a convenience wrapper. It is a *hermetic
+subset* of the launch contract ADR 0003 records, written down once so that `src/launch.rs` can be
+cross-checked against it in A3: it execs `erts-<vsn>/bin/erlexec` directly, with `env_clear()`
+and five variables — `ROOTDIR`, `BINDIR`, `EMU`, `PROGNAME`, `HOME` — plus an empty-directory
+`PATH` and an `ERL_CRASH_DUMP` inside `HOME`, and an argument vector of
+`-boot <root>/bin/no_dot_erlang -noshell +B -start_epmd false`, one `-pa` per shipment
+application, `-eval "'<app>@@main':run('<app>')"` and `-extra <args...>`.
+
+"Subset" is the load-bearing word. ADR 0003 describes a launcher that *inherits* the environment
+and removes a denylist from it — `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`,
+`ERL_OTP*_FLAGS`, `ERL_ROOTDIR`, `ERL_EPMD_PORT` — and that supplies `HOME` and `ERL_CRASH_DUMP`
+only when the user has not. A test may not inherit the developer's environment and still assert
+anything, so this helper clears it and sets both unconditionally; the ADR's optional `+fnu`,
+`-args_file` and `-config` arguments are absent too, because no staged tree carries them yet. A
+`LaunchPlan` that agrees with this function is therefore not finished: the denylist and the
+"only when unset" rules need their own tests over an inherited environment. Inside the overlap,
+a difference between the two is a defect in one of them, and `tests/stage_run.rs` — which
+actually boots what `stage` wrote — is what says which.
+
+Two details of the overlap are load-bearing rather than cosmetic. `PATH` is an *empty directory*
+and not an absent variable, because a program that finds no `PATH` searches a system default
+rather than nothing. And `ERL_CRASH_DUMP` points into `HOME`, which is why `tests/stage_run.rs`
+asserts that a crashed run left no `erl_crash.dump` in the working directory: dropping a
+megabyte of dump into whatever directory the user was standing in is the kind of thing a
+packaged application must never do.
+
+Neither helper that starts a real program waits forever. `tests/common/bounded.rs` runs both of
+them — `gleam export erlang-shipment` and the staged `erlexec` — with stdin on the null device,
+both pipes drained by threads of their own, and a deadline: `fixture::EXPORT_BUDGET` (180 s) and
+`erl::RUN_BUDGET` (60 s). A child that outlives its budget is killed and named in the panic,
+because the one place in the suite that boots a whole BEAM is the last place that should be able
+to hang a test binary with no diagnosis.
 
 ## Snapshots
 
@@ -225,19 +335,16 @@ assertion.
 
 ## Planned infrastructure
 
-`tests/common/` already holds `tools.rs`, `fake_otp.rs` and `snapshot.rs`, described above. Still
-to come:
+`tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
+`fixture.rs`, `erl.rs` and `bounded.rs`, described above. Still to come:
 
-- **`FixtureProject` and `Artifact`** — copy a fixture into a temporary directory, run
-  `ginary build` once per test binary behind a `OnceLock`, then run the artifact under a
-  scrubbed environment (`env_clear()`, `PATH` pointing at an empty directory, `HOME` and
-  `XDG_CACHE_HOME` in the temporary tree) and return the exit status, stdout, stderr, the cache
-  directory and the trace as structured data.
+- **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
+  artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache
+  directory and the trace as structured data. `FixtureProject` and `run_staged` are the halves
+  of it that A1c needed and therefore already exist.
 
-Two fixtures:
+One more fixture:
 
-- **`hello_ffi`** — no hex dependencies at all, reaching the runtime through `@external`
-  (`init:get_plain_arguments`, `code:priv_dir`, `halt`). It builds offline.
 - **`hello_crypto`** — `gleam_stdlib`, `gleam_erlang`, `gleam_crypto` and `argv`, with a
   committed `manifest.toml`, to exercise the `crypto.so` NIF path. CI warms the hex cache.
 

@@ -1,0 +1,37 @@
+---
+source: tests/assemble.rs
+expression: staged.explain()
+---
+category      bytes  files
+erts_binary   286    4
+boot          74     1
+otp_beam      36     3
+gleam_beam    60     5
+priv          26     2
+app_resource  837    6
+total         1319   21
+
+app           vsn     source    files  bytes
+crypto        5.9.2   otp       3      154
+gleam_crypto  1.4.0   shipment  2      148
+gleam_stdlib  0.62.0  shipment  3      167
+kernel        11.0.3  otp       2      156
+notify        1.0.0   shipment  4      198
+stdlib        8.0.3   otp       2      136
+
+excluded erts binaries:
+  epmd     the port mapper daemon; add it with --extra-bin for a distributed application
+  erl      the shell wrapper; the launcher execs erlexec directly
+  erlc     a build-time tool, never run by a packaged application
+  escript  a build-time tool, never run by a packaged application
+  heart    the heartbeat supervisor; add it with --extra-bin if the application uses it
+  run_erl  a detached-console helper; a packaged application runs in the foreground
+
+junk removed:
+  lib/crypto-5.9.2/priv/lib/libcrypto_static.a (21 bytes)
+  lib/crypto-5.9.2/priv/lib/otp_test_engine.so (18 bytes)
+  lib/crypto-5.9.2/priv/obj (18 bytes)
+
+boot references checked:
+  kernel-11.0.3
+  stdlib-8.0.3

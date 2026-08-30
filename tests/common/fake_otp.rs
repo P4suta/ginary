@@ -253,6 +253,7 @@ pub struct FakeOtp {
     release: u32,
     otp_version: Option<String>,
     start_erl_data: bool,
+    extra_erts_bins: Vec<String>,
     apps: Vec<FakeApp>,
 }
 
@@ -274,6 +275,7 @@ impl FakeOtp {
             release: DEFAULT_RELEASE,
             otp_version: Some(DEFAULT_OTP_VERSION.to_owned()),
             start_erl_data: true,
+            extra_erts_bins: Vec::new(),
             apps: vec![
                 FakeApp::new("kernel", DEFAULT_KERNEL_VSN).mod_callback("kernel"),
                 FakeApp::new("stdlib", DEFAULT_STDLIB_VSN).applications(&["kernel"]),
@@ -306,6 +308,18 @@ impl FakeOtp {
     #[must_use]
     pub fn without_otp_version(mut self) -> Self {
         self.otp_version = None;
+        self
+    }
+
+    /// Adds programs to `erts-<vsn>/bin` beyond the four required ones.
+    ///
+    /// A real ERTS `bin` holds a dozen more — `erl`, `erlc`, `escript`,
+    /// `heart`, `epmd`, `run_erl` — and assembly's whole job there is to copy
+    /// four of them and refuse the rest. A root that holds only the four
+    /// cannot show that.
+    #[must_use]
+    pub fn extra_erts_bins(mut self, names: &[&str]) -> Self {
+        self.extra_erts_bins = owned(names);
         self
     }
 
@@ -343,9 +357,13 @@ impl FakeOtp {
 
         let erts_bin = root.join(format!("erts-{}", self.erts_vsn)).join("bin");
         create_dir_all(&erts_bin);
-        for name in ginary::otp::REQUIRED_ERTS_BINARIES {
+        let bins = ginary::otp::REQUIRED_ERTS_BINARIES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .chain(self.extra_erts_bins.iter().cloned());
+        for name in bins {
             write_executable(
-                &erts_bin.join(name),
+                &erts_bin.join(&name),
                 format!("#!/bin/sh\n# fake {name} written by tests/common/fake_otp.rs\nexit 0\n")
                     .as_bytes(),
             );
@@ -392,20 +410,33 @@ impl FakeOtp {
     /// the surrounding bytes are noise on purpose: a scanner that needs a
     /// well-formed term would pass here and fail on the real file.
     fn boot_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0x83, 0x68, 0x03, 0x64, 0x00, 0x06];
-        bytes.extend_from_slice(b"script");
-        for name in ["kernel", "stdlib"] {
-            let Some(app) = self.apps.iter().find(|app| app.name == name) else {
-                continue;
-            };
-            bytes.push(0x6b);
-            let path = format!("$ROOT/lib/{}-{}/ebin", app.name, app.vsn);
-            bytes.extend_from_slice(&u16::try_from(path.len()).unwrap_or(u16::MAX).to_be_bytes());
-            bytes.extend_from_slice(path.as_bytes());
-        }
-        bytes.extend_from_slice(&[0x6a]);
-        bytes
+        let dirs: Vec<String> = ["kernel", "stdlib"]
+            .into_iter()
+            .filter_map(|name| self.apps.iter().find(|app| app.name == name))
+            .map(|app| format!("{}-{}", app.name, app.vsn))
+            .collect();
+        boot_bytes_for(&dirs.iter().map(String::as_str).collect::<Vec<_>>())
     }
+}
+
+/// Boot-file bytes naming exactly the `<name>-<vsn>` directories given.
+///
+/// [`FakeOtp`] uses it for the boot file it writes, where the versions always
+/// agree with the ones under `lib/`. A test proving that assembly *checks* the
+/// agreement writes its own boot file over that one, naming a version the
+/// library does not hold — which is the shape of the real failure, a boot file
+/// carried over from another OTP installation.
+pub fn boot_bytes_for(dirs: &[&str]) -> Vec<u8> {
+    let mut bytes = vec![0x83, 0x68, 0x03, 0x64, 0x00, 0x06];
+    bytes.extend_from_slice(b"script");
+    for dir in dirs {
+        bytes.push(0x6b);
+        let path = format!("$ROOT/lib/{dir}/ebin");
+        bytes.extend_from_slice(&u16::try_from(path.len()).unwrap_or(u16::MAX).to_be_bytes());
+        bytes.extend_from_slice(path.as_bytes());
+    }
+    bytes.extend_from_slice(&[0x6a]);
+    bytes
 }
 
 /// A written fake OTP root.
@@ -585,6 +616,26 @@ fn write_executable(path: &Path, bytes: &[u8]) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
     }
+}
+
+/// Adds the execute bits to a file, so a test can prove they are preserved.
+///
+/// [`FakeApp::priv_file`] writes a plain file, because most of `priv` is data.
+/// A NIF and anything under `priv/bin` is not, and a staged tree that dropped
+/// the execute bit would fail only when the application ran.
+///
+/// # Panics
+///
+/// If the file's permissions cannot be read or written.
+#[cfg(unix)]
+pub fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut permissions = std::fs::metadata(path)
+        .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions)
+        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
 }
 
 /// Removes the execute bits from a file, so a test can prove they are checked.

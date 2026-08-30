@@ -29,6 +29,11 @@
 //! - [`closure`] — every application an artifact needs, resolved against the
 //!   shipment and the OTP library.
 //!
+//! Milestone A1c adds the module that turns that bill of materials into a
+//! directory:
+//!
+//! - [`assemble`] — the staging root, the exact tree the payload is made of.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -36,6 +41,7 @@
 #![forbid(unsafe_code)]
 
 pub mod appfile;
+pub mod assemble;
 pub mod cache_dir;
 pub mod cli;
 pub mod closure;

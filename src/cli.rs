@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::appfile::{self, AppResource};
+use crate::assemble::{self, StageOptions, StagedRoot};
 use crate::closure::{self, AppSet};
 use crate::doctor;
 use crate::otp;
@@ -27,6 +28,9 @@ pub const APPFILE_FORMAT_VERSION: u32 = 1;
 
 /// Version of the `closure --json` schema.
 pub const CLOSURE_FORMAT_VERSION: u32 = 1;
+
+/// Version of the `stage --json` schema.
+pub const STAGE_FORMAT_VERSION: u32 = 1;
 
 /// Width of the label column in the `appfile parse` table.
 ///
@@ -46,8 +50,8 @@ BEAM runtime into a single executable, so that the people who run a Gleam progra
 not need Erlang installed.
 
 Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version`, `doctor`, `appfile` and `closure`
-only.",
+implemented yet; this version ships `version`, `doctor`, `appfile`, `closure` and
+`stage` only.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -106,6 +110,47 @@ pub enum Command {
         #[arg(long)]
         explain: bool,
     },
+    /// Build the staging root: the exact tree an artifact is made of.
+    ///
+    /// The same closure `ginary closure` prints, copied into a directory
+    /// alongside the four ERTS binaries and the boot file. It is the debugging
+    /// window onto what `ginary build` will pack, and it is what the launcher
+    /// will later extract into its cache.
+    Stage {
+        /// The directory `gleam export erlang-shipment` wrote.
+        #[arg(value_name = "SHIPMENT")]
+        shipment: PathBuf,
+        /// The OTP installation to stage from. Defaults to the one `erl` on
+        /// `PATH` reports.
+        #[arg(long, value_name = "PATH")]
+        otp_root: Option<PathBuf>,
+        /// An application to start from. Repeatable, and required.
+        #[arg(long = "root", value_name = "NAME", required = true)]
+        roots: Vec<String>,
+        /// An extra application to bundle. Repeatable.
+        #[arg(long = "extra", value_name = "NAME")]
+        extra: Vec<String>,
+        /// Where to write the staging root. It must not exist, or must be an
+        /// empty directory, unless `--force` is given.
+        #[arg(long, required = true, value_name = "DIR")]
+        out: PathBuf,
+        /// Replace the output directory if it exists and is not empty.
+        #[arg(long)]
+        force: bool,
+        /// A program to stage from the runtime's `bin` beyond the required
+        /// four, such as `heart` or `epmd`. Repeatable.
+        #[arg(long = "extra-bin", value_name = "NAME")]
+        extra_bins: Vec<String>,
+        /// Keep the files staging would otherwise delete as known-useless.
+        #[arg(long)]
+        keep_junk: bool,
+        /// Print a JSON object instead of a table.
+        #[arg(long, conflicts_with = "explain")]
+        json: bool,
+        /// Print the whole account: sizes, applications, exclusions, junk.
+        #[arg(long)]
+        explain: bool,
+    },
 }
 
 /// A subcommand of `ginary appfile`.
@@ -155,6 +200,16 @@ pub struct ClosureReport {
     /// The applications, the warnings and the skipped optional applications.
     #[serde(flatten)]
     pub apps: AppSet,
+}
+
+/// The payload of `ginary stage --json`.
+#[derive(Debug, Serialize)]
+pub struct StageReport {
+    /// Version of this schema; see [`STAGE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The staged tree and the account of what went into it.
+    #[serde(flatten)]
+    pub staged: StagedRoot,
 }
 
 /// The payload of `ginary version --json`.
@@ -220,7 +275,108 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             *explain,
             out,
         ),
+        Command::Stage {
+            shipment,
+            otp_root,
+            roots,
+            extra,
+            out: dir,
+            force,
+            extra_bins,
+            keep_junk,
+            json,
+            explain,
+        } => write_stage(
+            &StageRequest {
+                shipment,
+                otp_root: otp_root.as_deref(),
+                roots,
+                extra,
+                dir,
+                options: StageOptions {
+                    extra_bins: extra_bins.clone(),
+                    remove_junk: !*keep_junk,
+                    force: *force,
+                },
+            },
+            *json,
+            *explain,
+            out,
+        ),
     }
+}
+
+/// Everything `ginary stage` needs, gathered so the call is readable.
+struct StageRequest<'a> {
+    /// The shipment directory.
+    shipment: &'a Path,
+    /// The OTP root override, if one was given.
+    otp_root: Option<&'a Path>,
+    /// The applications to start from.
+    roots: &'a [String],
+    /// The extra applications to bundle.
+    extra: &'a [String],
+    /// Where the staging root goes.
+    dir: &'a Path,
+    /// How to build it.
+    options: StageOptions,
+}
+
+/// Stages a shipment and writes the result in the requested form.
+///
+/// The closure is computed exactly as `ginary closure` computes it, so a
+/// surprise in the staged tree can be traced back with the other command over
+/// the same arguments.
+fn write_stage(
+    request: &StageRequest<'_>,
+    json: bool,
+    explain: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let otp = otp::discover(request.otp_root)?;
+    let apps =
+        closure::app_dependency_closure(request.shipment, &otp.lib, request.roots, request.extra)?;
+    let staged = assemble::stage(&apps, &otp, &request.options, request.dir)?;
+
+    if json {
+        return write_json(
+            out,
+            &StageReport {
+                format_version: STAGE_FORMAT_VERSION,
+                staged,
+            },
+        );
+    }
+
+    let mut text = if explain {
+        staged.explain()
+    } else {
+        render_stage_table(&staged)
+    };
+    text.push_str(&format!(
+        "\nstaged {} files, {} bytes, into {}\n",
+        staged.files().len(),
+        staged.total_bytes(),
+        staged.root().display()
+    ));
+    out.write_all(text.as_bytes())
+        .context("cannot write the staging report to standard output")
+}
+
+/// Renders the default table: bytes and file count per category.
+fn render_stage_table(staged: &StagedRoot) -> String {
+    let rows: Vec<[String; 3]> = staged
+        .bytes_by_category()
+        .into_iter()
+        .map(|(category, (bytes, files))| {
+            [
+                category.label().to_owned(),
+                bytes.to_string(),
+                files.to_string(),
+            ]
+        })
+        .collect();
+    closure::render_table(["category", "bytes", "files"], &rows)
 }
 
 /// Computes a closure and writes it in the requested form.
