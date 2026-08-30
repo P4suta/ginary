@@ -31,14 +31,18 @@ issue, that test is confirmed to fail, and only then is the code changed.
 mise run check
 ```
 
-which is `mise run lint`, `mise run test` and `mise run doc`, or individually:
+which is `mise run lint`, `mise run test`, `mise run doc` and `mise run deny`, or individually:
 
 ```console
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps
+cargo deny check
 ```
+
+`mise run cov` (coverage, gated at 90% lines), `mise run mutants` and `mise run test:nextest`
+are run on demand rather than on every change; `docs/dev/testing.md` describes them.
 
 Tests that need `gleam`, `erl`, `strip` or `docker` skip themselves when the tool is missing.
 Set `GINARY_REQUIRE_TOOLCHAIN=1` to turn a skip into a failure; CI does.
@@ -46,23 +50,18 @@ Set `GINARY_REQUIRE_TOOLCHAIN=1` to turn a skip into a failure; CI does.
 Never weaken an assurance threshold, delete an assertion or unpin an action SHA to make a gate
 pass.
 
-## Sandbox note: `CARGO_HOME`
+## Note: `CARGO_HOME`
 
-The development sandbox for this project has a read-only `~/.cargo/registry`. `mise.toml` sets
+Use the default `CARGO_HOME` (`~/.cargo`). `mise.toml` no longer overrides it.
 
-```toml
-[env]
-CARGO_HOME = "{{config_root}}/.cache/cargo-home"
-```
-
-so any cargo command run through mise works. When invoking cargo directly, export the same
-value first:
+If `~/.cargo` is read-only — a sandboxed agent, or a shared machine — export a project-local
+one first:
 
 ```console
 export CARGO_HOME="$PWD/.cache/cargo-home"
 ```
 
-`.cache/` is git-ignored. Do not try to disable the sandbox.
+`.cache/` is git-ignored. Do not try to disable a sandbox to get around it.
 
 ## Commits and releases
 

@@ -5,3 +5,4 @@
 erl_crash.dump
 tests/fixtures/*/build/
 *.log
+*.snap.new

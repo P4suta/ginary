@@ -1,0 +1,27 @@
+---
+source: tests/cli.rs
+expression: stdout
+---
+tests/fixtures/app/nested.app
+  name                  nested
+  vsn                   0.3.1
+  description           nested terms
+  applications          kernel, stdlib
+  optional_applications (none)
+  included_applications (none)
+  modules               nested, nested_ffi
+  registered            (none)
+  mod                   no
+  env keys              bin, empty_bin, chars, floats, ints, tree, unit
+
+tests/fixtures/app/quoted.app
+  name                  my-app
+  vsn                   0.1.0
+  description           a "quoted" app
+  applications          kernel, stdlib
+  optional_applications (none)
+  included_applications (none)
+  modules               my-app, my-app@sup
+  registered            my-app_sup
+  mod                   yes
+  env keys              weird key

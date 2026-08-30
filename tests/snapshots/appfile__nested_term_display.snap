@@ -1,0 +1,5 @@
+---
+source: tests/appfile.rs
+expression: rendered
+---
+{application, nested, [{description, "nested terms"}, {vsn, "0.3.1"}, {modules, [nested, nested_ffi]}, {registered, []}, {applications, [kernel, stdlib]}, {env, [{bin, <<"payload">>}, {empty_bin, <<>>}, {chars, [97, 10, 92, 122]}, {floats, [1.5, -2000.0, 0.25]}, {ints, [-1, 0, 42]}, {tree, [[a, b], {c, [d, {e, []}]}, []]}, {unit, {}}]}]}.

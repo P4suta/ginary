@@ -8,3 +8,20 @@ path = ["**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 ginary contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+# Copied verbatim from the Erlang/OTP 29.0.5 distribution so that the `.app`
+# parser is tested against files it did not write. Reformatting them, headers
+# included, would defeat the point, so their licence is declared here instead.
+[[annotations]]
+path = ["tests/fixtures/app/otp/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Ericsson AB and the Erlang/OTP contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Copied verbatim from `gleam export erlang-shipment`. Each file is generated
+# from, and carries the description of, the Gleam package it belongs to.
+[[annotations]]
+path = ["tests/fixtures/app/shipment/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "the gleam_stdlib, gleam_crypto, mist and notify authors"
+SPDX-License-Identifier = "Apache-2.0"

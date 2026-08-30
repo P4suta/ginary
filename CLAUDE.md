@@ -32,19 +32,25 @@ A bug fix without a regression test under `tests/regressions/` is rejected.
 
 ## Gates
 
-`mise run check` is the gate: `lint` (fmt check plus clippy with warnings denied), `test`, and
-`doc` (rustdoc with warnings denied).
+`mise run check` is the gate: `lint` (fmt check plus clippy with warnings denied), `test`,
+`doc` (rustdoc with warnings denied) and `deny` (`cargo deny check`).
 
 ```console
 mise run lint
 mise run test
 mise run test:fast
+mise run test:nextest
 mise run doc
+mise run deny
+mise run cov
+mise run mutants
 ```
 
-`~/.cargo/registry` is read-only in the development sandbox. mise sets
-`CARGO_HOME={{config_root}}/.cache/cargo-home`; when calling cargo directly, export
-`CARGO_HOME="$PWD/.cache/cargo-home"` first. Never attempt to disable the sandbox.
+`cov`, `mutants` and `test:nextest` are the assurance tasks; see
+[docs/dev/testing.md](docs/dev/testing.md).
+
+Use the default `CARGO_HOME`. If `~/.cargo` is read-only (sandboxed agent), export
+`CARGO_HOME=$PWD/.cache/cargo-home`. Never attempt to disable a sandbox.
 
 ## Prohibitions
 

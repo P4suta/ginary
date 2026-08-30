@@ -15,13 +15,24 @@
 //! - [`doctor`] — what the local machine can and cannot do;
 //! - [`cli`] — argument parsing and command dispatch.
 //!
+//! Milestone A1a adds the first two build-side modules and the helper they
+//! share with `doctor`:
+//!
+//! - [`appfile`] — the subset of Erlang term syntax an `.app` file uses;
+//! - [`otp`] — where the host OTP installation is and whether it is usable;
+//! - [`process`] — finding a program on `PATH` and running it under a timeout,
+//!   shared by [`doctor`] and [`otp`].
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod appfile;
 pub mod cache_dir;
 pub mod cli;
 pub mod doctor;
+pub mod otp;
+pub mod process;
 pub mod target;

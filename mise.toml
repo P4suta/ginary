@@ -4,11 +4,6 @@
 gleam = "1.18.1"
 erlang = "29.0.5"
 
-[env]
-# ~/.cargo/registry is read-only in the sandbox this project is developed in, so
-# every cargo invocation gets a project-local CARGO_HOME.
-CARGO_HOME = "{{config_root}}/.cache/cargo-home"
-
 [tasks.fmt]
 description = "Format all Rust sources"
 run = "cargo fmt --all"
@@ -27,12 +22,39 @@ run = "cargo test"
 [tasks."test:fast"]
 description = "Run only the tests that need no external toolchain"
 # Named explicitly rather than as plain `cargo test` minus something: no test in
-# the library, the binary or `tests/smoke_cli.rs` *requires* `gleam`, `erl`,
-# `strip` or `docker`. The smoke test does drive the real `doctor`, which probes
-# whatever is on `PATH`, bounded by `doctor::PROBE_TIMEOUT`; see
-# `docs/dev/testing.md`. When `require_tools` lands in A1 this becomes
-# `cargo test` with the gating doing the skipping.
-run = "cargo test --lib --bins --test smoke_cli"
+# the library, the binary, `tests/smoke_cli.rs` or `tests/regressions.rs`
+# *requires* `gleam`, `erl`, `strip` or `docker`; the regression target runs
+# stub scripts on a `PATH` of its own making. The smoke test does drive the real
+# `doctor`, which probes whatever is on `PATH`, bounded by
+# `doctor::PROBE_TIMEOUT`; see `docs/dev/testing.md`. The remaining targets are
+# outside this task because each holds a handful of `require_tools`-gated tests.
+run = "cargo test --lib --bins --test smoke_cli --test regressions"
+
+[tasks."test:nextest"]
+description = "Run the suite under nextest (no doc tests: nextest does not run them)"
+run = "cargo nextest run"
+
+[tasks.deny]
+description = "Check licences, advisories, bans and sources with cargo-deny"
+run = "cargo deny check"
+
+[tasks.cov]
+description = "Coverage: an lcov report plus a summary, gated at 90% lines"
+# The second invocation re-renders the profile data the first collected, so the
+# suite runs once. Branch coverage needs a nightly `-Z coverage-options=branch`
+# build; until this crate is measured that way the 80% branch floor in
+# `docs/dev/testing.md` is documented but not enforced here.
+run = [
+  "cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info",
+  "cargo llvm-cov report --summary-only --fail-under-lines 90",
+]
+
+[tasks.mutants]
+description = "Mutation testing over the whole crate"
+# No `--in-place`: cargo-mutants copies the tree to a temporary directory, so a
+# killed run cannot leave a mutated source behind. Sharding (`--shard i/n`)
+# arrives with the nightly CI job.
+run = "cargo mutants"
 
 [tasks.doc]
 description = "Build the API documentation with rustdoc warnings denied"
@@ -64,9 +86,10 @@ exit 1
 '''
 
 [tasks.check]
-description = "The pull-request gate: lint, test and doc"
+description = "The pull-request gate: lint, test, doc and deny"
 run = [
   "mise run lint",
   "mise run test",
   "mise run doc",
+  "mise run deny",
 ]

@@ -7,16 +7,27 @@
 //! own flags rather than a shared flag bag.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use crate::appfile::{self, AppResource};
 use crate::doctor;
 use crate::target::Target;
 
 /// Version of the `version --json` schema.
 pub const VERSION_FORMAT_VERSION: u32 = 1;
+
+/// Version of the `appfile parse --json` schema.
+pub const APPFILE_FORMAT_VERSION: u32 = 1;
+
+/// Width of the label column in the `appfile parse` table.
+///
+/// `included_applications` is the longest label, so every value starts in the
+/// same column and the table stays readable when a file is missing a key.
+const APPFILE_LABEL_WIDTH: usize = 21;
 
 /// The ginary command line.
 #[derive(Debug, Parser)]
@@ -30,7 +41,7 @@ BEAM runtime into a single executable, so that the people who run a Gleam progra
 not need Erlang installed.
 
 Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version` and `doctor` only.",
+implemented yet; this version ships `version`, `doctor` and `appfile` only.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -54,6 +65,49 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read OTP application resource files.
+    Appfile {
+        /// What to do with the files.
+        #[command(subcommand)]
+        command: AppfileCommand,
+    },
+}
+
+/// A subcommand of `ginary appfile`.
+#[derive(Debug, Subcommand)]
+pub enum AppfileCommand {
+    /// Parse `.app` files and print what ginary reads from them.
+    ///
+    /// This is the debugging window into the closure computation: when
+    /// `ginary build` cannot find an application, this shows exactly which
+    /// dependencies the `.app` files declare.
+    Parse {
+        /// The `.app` files to read.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Print a JSON object instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The payload of `ginary appfile parse --json`.
+#[derive(Debug, Serialize)]
+pub struct AppfileReport {
+    /// Version of this schema; see [`APPFILE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// One entry per file, in the order the files were given.
+    pub apps: Vec<ParsedApp>,
+}
+
+/// One file's worth of [`AppfileReport`].
+#[derive(Debug, Serialize)]
+pub struct ParsedApp {
+    /// The path as it was given on the command line.
+    pub path: String,
+    /// What the file declares.
+    #[serde(flatten)]
+    pub resource: AppResource,
 }
 
 /// The payload of `ginary version --json`.
@@ -100,7 +154,89 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
     match command {
         Command::Version { json } => write_version(&VersionReport::current(), *json, out),
         Command::Doctor { json } => write_doctor(&doctor::Report::gather(), *json, out),
+        Command::Appfile {
+            command: AppfileCommand::Parse { paths, json },
+        } => write_appfile(paths, *json, out),
     }
+}
+
+/// Reads every `.app` file and writes the result in the requested form.
+///
+/// The first unreadable file stops the command: a partial table followed by an
+/// error would be read as a complete answer.
+fn write_appfile(paths: &[PathBuf], json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let mut apps = Vec::with_capacity(paths.len());
+    for path in paths {
+        let resource = appfile::parse_app_file(path)
+            .with_context(|| format!("cannot read the application file `{}`", path.display()))?;
+        apps.push(ParsedApp {
+            path: path.display().to_string(),
+            resource,
+        });
+    }
+
+    if json {
+        return write_json(
+            out,
+            &AppfileReport {
+                format_version: APPFILE_FORMAT_VERSION,
+                apps,
+            },
+        );
+    }
+
+    let text: String = apps.iter().map(render_app).collect::<Vec<_>>().join("\n");
+    out.write_all(text.as_bytes())
+        .context("cannot write the application files to standard output")
+}
+
+/// Renders one file as a labelled block ending in a newline.
+fn render_app(app: &ParsedApp) -> String {
+    let resource = &app.resource;
+    let mut text = format!("{}\n", app.path);
+    let mut row = |label: &str, value: String| {
+        text.push_str(&format!("  {label:APPFILE_LABEL_WIDTH$} {value}\n"));
+    };
+    row("name", resource.name.clone());
+    row("vsn", resource.vsn.clone());
+    row(
+        "description",
+        resource.description.clone().unwrap_or_else(none),
+    );
+    row("applications", list(&resource.applications));
+    row(
+        "optional_applications",
+        list(&resource.optional_applications),
+    );
+    row(
+        "included_applications",
+        list(&resource.included_applications),
+    );
+    row("modules", list(&resource.modules));
+    row("registered", list(&resource.registered));
+    row(
+        "mod",
+        if resource.has_mod { "yes" } else { "no" }.to_owned(),
+    );
+    row("env keys", list(&resource.env_keys));
+    for warning in &resource.warnings {
+        text.push_str(&format!("  warning: {warning}\n"));
+    }
+    text
+}
+
+/// Renders a list of names, or `(none)` when it is empty.
+fn list(names: &[String]) -> String {
+    if names.is_empty() {
+        none()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// The placeholder for an absent value.
+fn none() -> String {
+    "(none)".to_owned()
 }
 
 /// Writes a version report in the requested form.
@@ -231,6 +367,8 @@ mod tests {
             cache_dir: Some(std::path::PathBuf::from("/home/u/.cache/ginary")),
             cache_dir_source: Some("HOME"),
             cache_dir_error: None,
+            otp: None,
+            otp_error: Some("`erl` is not on PATH".to_owned()),
             tools: ["gleam", "erl", "strip", "docker"]
                 .into_iter()
                 .map(|name| doctor::ToolReport {

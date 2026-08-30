@@ -21,17 +21,17 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)* exist; the rest are the plan.
+Modules marked *(A0)* or *(A1a)* exist; the rest are the plan.
 
 ```
 build side
   config.rs        [tools.ginary] in gleam.toml, merged with CLI flags
   gleam.rs         runs `gleam export erlang-shipment`, enumerates the output
-  otp.rs           discovers the host OTP root, release, ERTS version
+  otp.rs           (A1a) discovers the host OTP root, release, ERTS version
   erts_source.rs   host | directory | tarball | catalogue | docker
   catalog.rs       the signed prebuilt-OTP catalogue
   download.rs      HTTPS fetch with checksum, retry and atomic rename
-  appfile.rs       a subset of Erlang terms, enough to read a .app file
+  appfile.rs       (A1a) a subset of Erlang terms, enough to read a .app file
   closure.rs       transitive closure of `applications` -> AppSet
   native.rs        detects ELF/Mach-O/PE under priv/, matches them to the target
   assemble.rs      builds the staging root
@@ -57,6 +57,7 @@ shared
   cache_dir.rs     (A0) GINARY_CACHE_DIR > XDG_CACHE_HOME > HOME
   doctor.rs        (A0) toolchain and environment probing
   cli.rs           (A0) clap definitions and dispatch
+  process.rs       (A1a) PATH search and a child process under a timeout
   error.rs         exit-code mapping
 ```
 
@@ -96,6 +97,14 @@ gleam.toml [tools.ginary]        CLI flags
                     v
         build/ginary/<app>-<target>[.exe]
 ```
+
+`process.rs` exists because two callers need the same bounded child process and
+neither may hang: `doctor` probes four tools, `otp` asks `erl` for its code root.
+Its reader threads are never joined, so a grandchild that inherited the pipes
+cannot outlive the caller's timeout; only the direct child is killed and reaped.
+Both output streams are returned, because a program that fails writes its
+diagnosis to standard error and nothing at all to standard output.
+Nothing on the launcher path uses it.
 
 `inspect_root` is the single point of truth about a runtime: whatever the ERTS came from, the
 real `beam.smp` is read with the `object` crate to derive the target, the linkage and the

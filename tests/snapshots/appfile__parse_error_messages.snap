@@ -1,0 +1,6 @@
+---
+source: tests/appfile.rs
+expression: rendered
+---
+malformed.app: line 5, column 3: expected `,` or `}`, found `{`
+unsupported_map.app: line 7, column 21: expected a term, found a map (`#{`)
