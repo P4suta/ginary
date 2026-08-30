@@ -30,7 +30,9 @@
 //! [`StageOptions::extra_bins`] are taken; every other program that was there
 //! is recorded, with a reason, in [`StagedRoot::excluded_erts_bins`]. Under an
 //! application only `ebin` and `priv` are taken and `*.appup` is dropped, so
-//! [`EXCLUDED_APP_DIRS`] never travels.
+//! [`EXCLUDED_APP_DIRS`] never travels — not under its own name, and not under
+//! `ebin` or `priv` by way of a symlink, whether the link is inside them or is
+//! one of them.
 //!
 //! **The boot file is checked against the tree.** `no_dot_erlang.boot` names
 //! the `kernel` and `stdlib` versions it was built against, as literal
@@ -337,6 +339,47 @@ impl StagedRoot {
         }
     }
 
+    /// Re-reads the tree and rewrites `ginary.stage.json`.
+    ///
+    /// Stripping rewrites files in place, so every size this struct holds — and
+    /// every size the listing on disk holds — is stale the moment
+    /// `strip::strip` returns. Refreshing re-stats each file in
+    /// [`StagedRoot::files`], recomputes the per-application totals, and writes
+    /// the listing again, so the tree keeps describing itself.
+    ///
+    /// The account that is *not* derived from the tree — the excluded ERTS
+    /// binaries, the junk that was removed, the boot references that were
+    /// checked — is carried over unchanged, because it is a record of what
+    /// staging decided and no later phase can re-derive it.
+    ///
+    /// # Errors
+    ///
+    /// [`AssembleError::Io`] when a staged file cannot be stat'd or the listing
+    /// cannot be written.
+    pub fn refresh(&self) -> Result<Self, AssembleError> {
+        let mut files = self.files.clone();
+        for file in &mut files {
+            file.size = size_of(&self.root.join(&file.path))?;
+        }
+        let mut apps = self.apps.clone();
+        count_apps(&mut apps, &files);
+
+        let listing = StageListing {
+            erts_vsn: self.erts_vsn.clone(),
+            otp_release: self.otp_release,
+            otp_version: self.otp_version.clone(),
+            apps: apps.clone(),
+            files: files.clone(),
+        };
+        write_listing(&self.root.join(LISTING_NAME), &listing)?;
+
+        Ok(Self {
+            apps,
+            files,
+            ..self.clone()
+        })
+    }
+
     /// Renders the whole account: sizes, applications, exclusions, junk, boot.
     ///
     /// This is what `ginary stage --explain` prints, and what
@@ -483,6 +526,29 @@ pub enum AssembleError {
         /// Where it pointed, as resolved as it could be.
         target: PathBuf,
     },
+    /// An application's `ebin` or `priv` is itself a symlink that reaches a
+    /// directory staging deliberately leaves behind.
+    ///
+    /// The exclusion of [`EXCLUDED_APP_DIRS`] is structural, and a structural
+    /// rule a symlink can step around is not a rule. A link to a directory
+    /// found *inside* an `ebin` or a `priv` is held to that `ebin` or `priv`,
+    /// which is what stops `ebin/sources -> ../src`. The `ebin` and the `priv`
+    /// have no enclosing subtree to be held to, so they are held to the
+    /// exclusion directly: an application whose `priv` *is* a link to its own
+    /// `src` would otherwise stage the whole of `src` under another name,
+    /// silently, because the target is inside the application and the weaker
+    /// boundary is satisfied.
+    #[error(
+        "the symlink `{path}` points to `{target}`, which is `{excluded}` or is inside it; `{excluded}` is one of the directories that never travel, so following the link would stage it under another name"
+    )]
+    ExcludedSymlinkTarget {
+        /// The `ebin` or `priv` that was a link.
+        path: PathBuf,
+        /// The directory it resolved to, inside the application.
+        target: PathBuf,
+        /// The excluded directory name the target is, or is inside.
+        excluded: String,
+    },
     /// A symlink in an application points at a directory that contains it.
     ///
     /// Staging dereferences symlinks, so `priv/loop -> .` describes a tree of
@@ -594,7 +660,9 @@ pub fn excluded_reason(name: &str) -> &'static str {
 /// program that has to be staged; [`AssembleError::BootReferencesMissingApp`]
 /// when the boot file and the applications disagree;
 /// [`AssembleError::UnsafeSymlink`] when an application holds a link that
-/// leaves it; [`AssembleError::SymlinkCycle`] when one loops back on itself;
+/// leaves it; [`AssembleError::ExcludedSymlinkTarget`] when its `ebin` or
+/// `priv` is a link to a directory that never travels;
+/// [`AssembleError::SymlinkCycle`] when one loops back on itself;
 /// [`AssembleError::NonUtf8Name`] when a file cannot be named as text; and
 /// [`AssembleError::Copy`] or [`AssembleError::Io`] for anything the
 /// filesystem refuses.
@@ -909,11 +977,14 @@ impl Filter {
 
 /// Copies one application's `ebin` or `priv` into the staged tree.
 ///
-/// `from` is checked before anything is read out of it. An `ebin` or a `priv`
-/// that is *itself* a symlink is the same defect as a link inside one, and
-/// `read_dir` would follow it without a word: an application whose `priv`
-/// points at some other directory of the build machine would have that
-/// directory copied into the artifact whole.
+/// `from` is checked before anything is read out of it, against both of the
+/// boundaries a link inside it would face. An `ebin` or a `priv` that is
+/// *itself* a symlink is the same defect as a link inside one, and `read_dir`
+/// would follow it without a word: an application whose `priv` points at some
+/// other directory of the build machine would have that directory copied into
+/// the artifact whole, and one whose `priv` points at its own `src` would have
+/// the sources [`EXCLUDED_APP_DIRS`] exists to leave behind staged under the
+/// name `priv`.
 fn copy_subtree(
     app_root: &Path,
     from: &Path,
@@ -922,7 +993,15 @@ fn copy_subtree(
 ) -> Result<(), AssembleError> {
     let metadata = symlink_metadata(from)?;
     let subtree = if metadata.is_symlink() {
-        resolve_link(app_root, from)?
+        let resolved = resolve_link(app_root, from)?;
+        if let Some(excluded) = excluded_component(app_root, &resolved) {
+            return Err(AssembleError::ExcludedSymlinkTarget {
+                path: from.to_path_buf(),
+                target: resolved,
+                excluded,
+            });
+        }
+        resolved
     } else {
         canonical(from)?
     };
@@ -993,6 +1072,20 @@ impl TreeCopy<'_> {
         self.entered.pop();
         Ok(())
     }
+}
+
+/// The excluded directory a path inside the application reaches, if any.
+///
+/// The comparison is on the path components below `app_root`, so a link to
+/// `src`, to `src/data`, or to anything deeper answers `src`, and a link to a
+/// directory that merely *holds* a `doc` answers nothing: the exclusion applies
+/// at the top level of an application, and a real `priv/doc` stages.
+fn excluded_component(app_root: &Path, target: &Path) -> Option<String> {
+    let relative = target.strip_prefix(app_root).ok()?;
+    relative.components().find_map(|component| {
+        let name = component.as_os_str().to_str()?;
+        EXCLUDED_APP_DIRS.contains(&name).then(|| name.to_owned())
+    })
 }
 
 /// Resolves a symlink, refusing one that dangles or leaves the application.

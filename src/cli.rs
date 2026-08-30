@@ -10,14 +10,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::appfile::{self, AppResource};
 use crate::assemble::{self, StageOptions, StagedRoot};
+use crate::beam;
 use crate::closure::{self, AppSet};
 use crate::doctor;
+use crate::elf::{self, ElfInfo};
 use crate::otp;
+use crate::report::{self, SizeReport};
+use crate::strip::{self, StripOptions, StripReport};
 use crate::target::Target;
 
 /// Version of the `version --json` schema.
@@ -30,7 +34,24 @@ pub const APPFILE_FORMAT_VERSION: u32 = 1;
 pub const CLOSURE_FORMAT_VERSION: u32 = 1;
 
 /// Version of the `stage --json` schema.
-pub const STAGE_FORMAT_VERSION: u32 = 1;
+///
+/// Two since A2: the object gained the `strip` and `report` members, which a
+/// consumer written against version one would not find.
+pub const STAGE_FORMAT_VERSION: u32 = 2;
+
+/// Version of the `beam chunks --json` schema.
+pub const BEAM_FORMAT_VERSION: u32 = 1;
+
+/// Version of the `elf deps --json` schema.
+pub const ELF_FORMAT_VERSION: u32 = 1;
+
+/// Version of the `stage --report json` schema.
+pub const SIZE_REPORT_FORMAT_VERSION: u32 = 1;
+
+/// Width of the label column in the `elf deps` table.
+///
+/// `glibc_max` is the longest label, so every value starts in the same column.
+const ELF_LABEL_WIDTH: usize = 10;
 
 /// Width of the label column in the `appfile parse` table.
 ///
@@ -50,8 +71,8 @@ BEAM runtime into a single executable, so that the people who run a Gleam progra
 not need Erlang installed.
 
 Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version`, `doctor`, `appfile`, `closure` and
-`stage` only.",
+implemented yet; this version ships `version`, `doctor`, `appfile`, `closure`,
+`stage`, `beam` and `elf` only.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -144,12 +165,87 @@ pub enum Command {
         /// Keep the files staging would otherwise delete as known-useless.
         #[arg(long)]
         keep_junk: bool,
+        /// Remove debug information from the staged tree. On by default.
+        #[arg(long, overrides_with = "no_strip")]
+        strip: bool,
+        /// Keep the debug information the default removes.
+        #[arg(long, overrides_with = "strip")]
+        no_strip: bool,
+        /// Strip only the native binaries, leaving the `.beam` files alone.
+        #[arg(long, conflicts_with = "strip_beams_only", conflicts_with = "no_strip")]
+        strip_elf_only: bool,
+        /// Strip only the `.beam` files, leaving the native binaries alone.
+        #[arg(long, conflicts_with = "no_strip")]
+        strip_beams_only: bool,
+        /// The form the size report takes.
+        ///
+        /// `text` prints it under the staging tables; `json` prints the report
+        /// alone, so that it can be piped. Only the `json` *value* conflicts
+        /// with `--json` and `--explain`, which is a rule about the value and
+        /// not about the flag, so [`value_conflict`] enforces it rather than
+        /// clap: `--report text --json` asks for the documented default and
+        /// must not be a usage error.
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        report: ReportFormat,
         /// Print a JSON object instead of a table.
         #[arg(long, conflicts_with = "explain")]
         json: bool,
         /// Print the whole account: sizes, applications, exclusions, junk.
         #[arg(long)]
         explain: bool,
+    },
+    /// Read the chunk table of compiled BEAM modules.
+    Beam {
+        /// What to do with the modules.
+        #[command(subcommand)]
+        command: BeamCommand,
+    },
+    /// Read what native binaries need from the machine that runs them.
+    Elf {
+        /// What to do with the binaries.
+        #[command(subcommand)]
+        command: ElfCommand,
+    },
+}
+
+/// The form `ginary stage` prints its size report in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ReportFormat {
+    /// An aligned table and the `needs:` line, under the staging output.
+    #[default]
+    Text,
+    /// The report alone, as one JSON object, with nothing else printed.
+    Json,
+}
+
+/// A subcommand of `ginary beam`.
+#[derive(Debug, Subcommand)]
+pub enum BeamCommand {
+    /// List the chunks of each module, and whether it holds debug information.
+    ///
+    /// This is the debugging window into stripping: a module that is still big
+    /// after a build shows here exactly which chunk it is big because of.
+    Chunks {
+        /// The `.beam` files to read.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// A subcommand of `ginary elf`.
+#[derive(Debug, Subcommand)]
+pub enum ElfCommand {
+    /// List what each binary needs: its libraries, its glibc floor, its loader.
+    Deps {
+        /// The ELF files to read.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -208,8 +304,77 @@ pub struct StageReport {
     /// Version of this schema; see [`STAGE_FORMAT_VERSION`].
     pub format_version: u32,
     /// The staged tree and the account of what went into it.
+    ///
+    /// The sizes are the ones the tree holds *after* stripping, because that is
+    /// what the artifact will be made of.
     #[serde(flatten)]
     pub staged: StagedRoot,
+    /// What the strip phase did.
+    pub strip: StripReport,
+    /// The size breakdown and the dependency summary.
+    pub report: SizeReport,
+}
+
+/// The payload of `ginary stage --report json`.
+#[derive(Debug, Serialize)]
+pub struct SizeReportPayload {
+    /// Version of this schema; see [`SIZE_REPORT_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// What the strip phase did.
+    pub strip: StripReport,
+    /// The size breakdown and the dependency summary.
+    #[serde(flatten)]
+    pub report: SizeReport,
+}
+
+/// The payload of `ginary beam chunks --json`.
+#[derive(Debug, Serialize)]
+pub struct BeamReport {
+    /// Version of this schema; see [`BEAM_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// One entry per file, in the order the files were given.
+    pub files: Vec<BeamFile>,
+}
+
+/// One file's worth of [`BeamReport`].
+#[derive(Debug, Serialize)]
+pub struct BeamFile {
+    /// The path as it was given on the command line.
+    pub path: String,
+    /// The chunks, in the order the file holds them.
+    pub chunks: Vec<BeamChunk>,
+    /// Whether the file holds [`beam::DEBUG_INFO_CHUNK`].
+    pub debug_info: bool,
+}
+
+/// One chunk of a [`BeamFile`].
+#[derive(Debug, Serialize)]
+pub struct BeamChunk {
+    /// The four-byte identifier, as text.
+    pub id: String,
+    /// The offset of the chunk's data within the file.
+    pub offset: usize,
+    /// The length of the chunk's data.
+    pub len: u32,
+}
+
+/// The payload of `ginary elf deps --json`.
+#[derive(Debug, Serialize)]
+pub struct ElfReport {
+    /// Version of this schema; see [`ELF_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// One entry per file, in the order the files were given.
+    pub files: Vec<ElfFile>,
+}
+
+/// One file's worth of [`ElfReport`].
+#[derive(Debug, Serialize)]
+pub struct ElfFile {
+    /// The path as it was given on the command line.
+    pub path: String,
+    /// What the file needs and what it is.
+    #[serde(flatten)]
+    pub info: ElfInfo,
 }
 
 /// The payload of `ginary version --json`.
@@ -241,11 +406,56 @@ impl VersionReport {
 
 /// Parses the process arguments and runs the requested command.
 ///
-/// Argument errors are reported by clap itself, which exits with status 2.
+/// Argument errors are reported by clap itself, which exits with status 2 —
+/// including the ones [`value_conflict`] finds, which are handed back to clap
+/// so that a conflict about a value reads exactly like a conflict about a flag.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if let Some(message) = value_conflict(&cli.command) {
+        Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, message)
+            .exit();
+    }
     let stdout = std::io::stdout();
     dispatch(&cli.command, &mut stdout.lock())
+}
+
+/// The conflicts that are about an argument's *value* rather than its presence.
+///
+/// clap refuses a combination of flags, and `--report` is not a flag: the
+/// conflict belongs to `--report json`, which prints the size report alone with
+/// nothing else on standard output. That leaves nothing for `--explain` to add
+/// and disagrees with `--json`, which prints the whole staging object. Attaching
+/// the conflict to the argument instead would make `--report text --json` — the
+/// documented default next to a flag it does not touch — a usage error.
+///
+/// `None` when the command line is usable; `Some(message)` is what the user is
+/// told, in clap's own voice and with clap's exit status.
+pub fn value_conflict(command: &Command) -> Option<String> {
+    let Command::Stage {
+        report: ReportFormat::Json,
+        json,
+        explain,
+        ..
+    } = command
+    else {
+        return None;
+    };
+    if *json {
+        return Some(
+            "the argument `--report json` cannot be used with `--json`: one prints the size \
+             report, the other prints the whole staging object"
+                .to_owned(),
+        );
+    }
+    if *explain {
+        return Some(
+            "the argument `--report json` cannot be used with `--explain`: the report is \
+             printed alone, so there is nothing for the account to appear beside"
+                .to_owned(),
+        );
+    }
+    None
 }
 
 /// Runs one command, writing its output to `out`.
@@ -284,6 +494,11 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             force,
             extra_bins,
             keep_junk,
+            strip: _,
+            no_strip,
+            strip_elf_only,
+            strip_beams_only,
+            report,
             json,
             explain,
         } => write_stage(
@@ -298,11 +513,37 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                     remove_junk: !*keep_junk,
                     force: *force,
                 },
+                strip: strip_options(*no_strip, *strip_elf_only, *strip_beams_only),
+                report: *report,
             },
             *json,
             *explain,
             out,
         ),
+        Command::Beam {
+            command: BeamCommand::Chunks { paths, json },
+        } => write_beam_chunks(paths, *json, out),
+        Command::Elf {
+            command: ElfCommand::Deps { paths, json },
+        } => write_elf_deps(paths, *json, out),
+    }
+}
+
+/// Turns the four stripping flags into the two booleans the module takes.
+///
+/// `--no-strip` turns both off. The two `--strip-*-only` flags turn the other
+/// half off; clap already refuses them next to `--no-strip`, so there is no
+/// combination here that means two things at once.
+fn strip_options(no_strip: bool, elf_only: bool, beams_only: bool) -> StripOptions {
+    if no_strip {
+        return StripOptions {
+            elf: false,
+            beams: false,
+        };
+    }
+    StripOptions {
+        elf: !beams_only,
+        beams: !elf_only,
     }
 }
 
@@ -320,6 +561,10 @@ struct StageRequest<'a> {
     dir: &'a Path,
     /// How to build it.
     options: StageOptions,
+    /// How much of it to strip.
+    strip: StripOptions,
+    /// The form the size report takes.
+    report: ReportFormat,
 }
 
 /// Stages a shipment and writes the result in the requested form.
@@ -336,7 +581,22 @@ fn write_stage(
     let otp = otp::discover(request.otp_root)?;
     let apps =
         closure::app_dependency_closure(request.shipment, &otp.lib, request.roots, request.extra)?;
-    let staged = assemble::stage(&apps, &otp, &request.options, request.dir)?;
+    let before = assemble::stage(&apps, &otp, &request.options, request.dir)?;
+
+    let stripping = request.strip.elf || request.strip.beams;
+    let strip_report = if stripping {
+        strip::strip(before.root(), &otp, &request.strip)?
+    } else {
+        StripReport::disabled()
+    };
+    // The listing on disk still holds the pre-strip sizes, so the tree stops
+    // describing itself the moment a byte is removed from it.
+    let staged = if stripping {
+        before.refresh()?
+    } else {
+        before.clone()
+    };
+    let size_report = report::measure(&before, &strip_report, staged.root())?;
 
     if json {
         return write_json(
@@ -344,6 +604,19 @@ fn write_stage(
             &StageReport {
                 format_version: STAGE_FORMAT_VERSION,
                 staged,
+                strip: strip_report,
+                report: size_report,
+            },
+        );
+    }
+
+    if request.report == ReportFormat::Json {
+        return write_json(
+            out,
+            &SizeReportPayload {
+                format_version: SIZE_REPORT_FORMAT_VERSION,
+                strip: strip_report,
+                report: size_report,
             },
         );
     }
@@ -353,6 +626,10 @@ fn write_stage(
     } else {
         render_stage_table(&staged)
     };
+    text.push('\n');
+    text.push_str(&strip_report.to_string());
+    text.push('\n');
+    text.push_str(&size_report.render_text());
     text.push_str(&format!(
         "\nstaged {} files, {} bytes, into {}\n",
         staged.files().len(),
@@ -361,6 +638,121 @@ fn write_stage(
     ));
     out.write_all(text.as_bytes())
         .context("cannot write the staging report to standard output")
+}
+
+/// Lists the chunks of every named module and writes them in the wanted form.
+fn write_beam_chunks(paths: &[PathBuf], json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("cannot read `{}`", path.display()))?;
+        let chunks = beam::chunks(&bytes)
+            .with_context(|| format!("cannot read the chunks of `{}`", path.display()))?;
+        files.push(BeamFile {
+            path: path.display().to_string(),
+            chunks: chunks
+                .iter()
+                .map(|chunk| BeamChunk {
+                    id: chunk.id_str(),
+                    offset: chunk.offset,
+                    len: chunk.len,
+                })
+                .collect(),
+            debug_info: beam::has_chunk(&bytes, &beam::DEBUG_INFO_CHUNK),
+        });
+    }
+
+    if json {
+        return write_json(
+            out,
+            &BeamReport {
+                format_version: BEAM_FORMAT_VERSION,
+                files,
+            },
+        );
+    }
+
+    let mut text = String::new();
+    for (index, file) in files.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(&file.path);
+        text.push('\n');
+        let rows: Vec<[String; 3]> = file
+            .chunks
+            .iter()
+            .map(|chunk| {
+                [
+                    chunk.id.clone(),
+                    chunk.offset.to_string(),
+                    chunk.len.to_string(),
+                ]
+            })
+            .collect();
+        text.push_str(&closure::render_table(["id", "offset", "len"], &rows));
+        text.push_str(&format!(
+            "debug_info: {}\n",
+            if file.debug_info { "yes" } else { "no" }
+        ));
+    }
+    out.write_all(text.as_bytes())
+        .context("cannot write the chunk table to standard output")
+}
+
+/// Inspects every named binary and writes what it needs in the wanted form.
+fn write_elf_deps(paths: &[PathBuf], json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let info =
+            elf::inspect(path).with_context(|| format!("cannot inspect `{}`", path.display()))?;
+        files.push(ElfFile {
+            path: path.display().to_string(),
+            info,
+        });
+    }
+
+    if json {
+        return write_json(
+            out,
+            &ElfReport {
+                format_version: ELF_FORMAT_VERSION,
+                files,
+            },
+        );
+    }
+
+    let mut text = String::new();
+    for (index, file) in files.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(&file.path);
+        text.push('\n');
+        for (label, value) in [
+            ("class", file.info.class.to_string()),
+            ("machine", file.info.machine.clone()),
+            ("interp", or_dash(file.info.interp.as_deref())),
+            ("pie", yes_no(file.info.is_pie)),
+            ("stripped", yes_no(file.info.stripped)),
+            ("glibc_max", or_dash(file.info.glibc_max.as_deref())),
+            ("needed", file.info.needed.join(", ")),
+        ] {
+            text.push_str(&format!("  {label:<ELF_LABEL_WIDTH$}{value}\n"));
+        }
+    }
+    out.write_all(text.as_bytes())
+        .context("cannot write the dependency table to standard output")
+}
+
+/// Renders an optional value, with a dash for the absent one.
+fn or_dash(value: Option<&str>) -> String {
+    value.unwrap_or("-").to_owned()
+}
+
+/// Renders a boolean as the word the tables print.
+fn yes_no(value: bool) -> String {
+    if value { "yes" } else { "no" }.to_owned()
 }
 
 /// Renders the default table: bytes and file count per category.
@@ -571,8 +963,6 @@ fn write_json(out: &mut impl Write, value: &impl Serialize) -> anyhow::Result<()
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory as _;
-
     use super::*;
 
     #[test]
@@ -595,6 +985,44 @@ mod tests {
     #[test]
     fn an_unknown_subcommand_is_an_error() {
         assert!(Cli::try_parse_from(["ginary", "build"]).is_err());
+    }
+
+    /// A `stage` command line, parsed.
+    fn stage_command(extra: &[&str]) -> Command {
+        let mut argv = vec![
+            "ginary", "stage", "shipment", "--root", "notify", "--out", "out",
+        ];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv)
+            .expect("the flags under test parse; the conflict is decided afterwards")
+            .command
+    }
+
+    #[test]
+    fn report_json_conflicts_with_the_two_flags_that_print_something_else() {
+        assert!(
+            value_conflict(&stage_command(&["--report", "json", "--json"]))
+                .is_some_and(|message| message.contains("--json"))
+        );
+        assert!(
+            value_conflict(&stage_command(&["--report", "json", "--explain"]))
+                .is_some_and(|message| message.contains("--explain"))
+        );
+    }
+
+    #[test]
+    fn report_text_conflicts_with_nothing() {
+        // The default, spelled out loud. A conflict attached to the argument
+        // rather than to its value would make this a usage error.
+        assert_eq!(
+            value_conflict(&stage_command(&["--report", "text", "--json"])),
+            None
+        );
+        assert_eq!(
+            value_conflict(&stage_command(&["--report", "text", "--explain"])),
+            None
+        );
+        assert_eq!(value_conflict(&stage_command(&["--report", "json"])), None);
     }
 
     #[test]

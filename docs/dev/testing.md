@@ -17,7 +17,11 @@
 | `tests/closure.rs` | the closure over fake shipment and OTP trees: seeds, edges, resolution order, determinism, the three errors, `explain` and `chain`, two property tests, and one gated run over a real shipment |
 | `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, `stage` as a table, JSON, `--explain`, `--force` and its two usage errors, and the `otp` field `doctor` now reports |
 | `tests/assemble.rs` | the staging root over fake trees: the exact layout, every exclusion, junk removal, modes, symlinks, the error paths, the listing, and determinism |
-| `tests/stage_run.rs` | toolchain-gated: stage the `hello_ffi` fixture against the host OTP and boot it through `erlexec` |
+| `tests/stage_run.rs` | toolchain-gated: stage the `hello_ffi` fixture against the host OTP, strip it, measure it, and boot it through `erlexec` |
+| `tests/beam.rs` | the IFF chunk reader: the grammar over hand-built bytes, the shape a compiler emits over three real modules, and the never-panic properties |
+| `tests/elf.rs` | read-only ELF inspection, against the running test binary, a non-ELF file, truncations of a real binary, and the host `beam.smp` |
+| `tests/strip.rs` | stripping a staged root: the exact `beam_lib` one-liner, the four verification failures, the three option shapes, idempotence, and `StagedRoot::refresh` |
+| `tests/report.rs` | the size and dependency account: the rendered table and `needs:` line over a synthetic report, and the measurement over a real staged tree |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -32,6 +36,12 @@ all four runs against fixtures and temporary directories. `tests/assemble.rs` ne
 either and could join `test:fast`; `tests/stage_run.rs` is entirely gated, because every test in
 it runs a real `gleam` and a real `erlexec`.
 
+The four A2 targets divide the same way. `tests/beam.rs` and `tests/report.rs` need nothing at
+all. `tests/strip.rs` needs nothing for all but one test — the stub `erl` a `FakeOtp` writes is
+what makes the beam step reachable without an Erlang — and gates the one that runs a real `strip`
+on `require_tools(&["strip"])`. `tests/elf.rs` gates the two tests that read the host `beam.smp`
+and leaves the rest ungated, because the fixture the others use is the test binary itself.
+
 The library and binary targets spawn only fake shell scripts in temporary directories, never a
 program from the machine's `PATH`. Four integration targets do reach it, each for a stated
 reason:
@@ -43,6 +53,7 @@ reason:
 | `tests/otp.rs`, `tests/appfile.rs`, `tests/closure.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
 | `tests/stage_run.rs` | `gleam export erlang-shipment`, `otp::discover(None)`, and the `erlexec` of the staged tree | every test is gated on `require_tools(&["gleam", "erl"])`; the launched runtime gets `env_clear()`, an empty `PATH` directory and a `HOME` inside the test's temporary tree, and both children run under a deadline — `fixture::EXPORT_BUDGET` (180 s) and `erl::RUN_BUDGET` (60 s) — with stdin on the null device |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
+| `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
 
@@ -156,6 +167,35 @@ assembly refuses the rest. `fake_otp::make_executable` is the counterpart of
 which is how a test builds the one mismatch assembly exists to catch — a boot file carried over
 from a different OTP installation.
 
+A2 added four things to the same builder, and each is the smallest addition that keeps the "no
+API for an invalid tree" rule intact. `FakeOtp::with_erl_script` installs a stub `bin/erl` that
+writes its own argument vector to `<root>/bin/erl.argv` and exits zero, which
+`FakeOtpRoot::erl_argv` reads back; `src/strip.rs` runs the OTP installation's own `erl` by
+absolute path, so this is the only way a test asserts on the exact `beam_lib:strip_files/1`
+one-liner — and on the exact list of modules it is given — without an Erlang installed.
+`FakeOtp::with_shrinking_erl_script` is the same stub with a body: it overwrites every `.beam`
+named after `-extra` with a smaller module that still holds `Code`, which is what lets a command
+line test tell a `ginary.stage.json` that was refreshed after stripping from one that was not. A
+stub that changes no bytes cannot, and the test that used one asserted nothing.
+`FakeOtp::with_failing_erl_script` is the same stub with a term on standard error and a non-zero
+exit, which is what a real `beam_lib` failure looks like from the outside; the term travels in a
+file beside the stub rather than inside its source, because `~p` prints a quoted atom with
+apostrophes in it and a single-quoted shell string cannot hold one. All three go through
+`script::script` rather than the builder's own `write_executable`, because this is the one stub a
+test actually execs and that helper is what waits out the `ETXTBSY` window a sibling thread's
+`fork` opens.
+
+`DUMMY_BEAM` changed with them. It was twelve bytes — a bare `FOR1 <size> BEAM` with no chunks —
+which was enough for everything that only counted and copied files. Stripping *opens* the
+modules, and verifies that none holds `Dbgi` or `Docs` and that every one holds `Code`, so a
+tree whose modules have no `Code` at all could not tell a working verification from a broken one.
+It is now forty-eight bytes holding `AtU8`, `Code` and `Line`: structurally a module, still not a
+loadable one, and *already stripped*, so a stub `erl` that does nothing leaves a tree that
+legitimately passes. A test that needs a module carrying `Dbgi` writes one with
+`fake_otp::beam_bytes`, in the open, which is the same rule the symlink tests follow.
+`tests/snapshots/assemble__stage_explain_table.snap` moved by 288 bytes with it — eight modules
+times thirty-six — and nothing else in the suite changed.
+
 To test a *broken* root, build a whole one and break it: `fs::remove_file`, `fs::create_dir` for
 a second `erts-*`, or `fake_otp::make_non_executable`. The builder deliberately has no API for
 producing an invalid tree, so nothing can be broken by accident. `tests/assemble.rs` follows the
@@ -231,6 +271,35 @@ four things a staged root has to get right are exactly the four the FFI touches.
 `build/` is git-ignored through the existing `tests/fixtures/*/build/` pattern, and
 `FixtureProject::copy` skips it, so no test ever builds the fixture in place.
 
+### `tests/fixtures/beam/` — three real compiled modules
+
+`gleam@bool.beam`, `gleam@string.beam` and `gleam@list.beam`, copied verbatim from
+`gleam export erlang-shipment` over the `notify` project, with `tests/fixtures/beam/README.md`
+recording where each came from. They exist for the reason the copied `.app` files exist: a parser
+that only handles files written by its own author is not a parser. What they add that a
+hand-built byte string cannot is the *shape a compiler emits* — fourteen chunks, a zero-length
+`StrT`, four-byte padding between every pair, and both `Dbgi` and `Docs` present.
+
+They are also uncompressed, which a *stripped* module is not: `beam_lib` writes what it rewrote
+through `zlib:gzip/1`, so the fixtures stay the bare `FOR1` form the grammar tests pin their
+offsets against. The gzip-wrapped shape is covered twice over. `tests/stage_run.rs` reads modules
+a real runtime actually wrote, and `tests/beam.rs` builds members with `flate2` — the same crate
+`src/beam.rs` decompresses with, added to `dev-dependencies` for it — so that the branch is held
+to the never-panic policy on a machine with no toolchain at all: a member cut short, the magic
+followed by rubbish, a proptest that fixes the two magic bytes and randomises the rest, and a
+small member that expands past `beam::MAX_FORM_BYTES`, which is the bounded allocation that keeps
+a gzip bomb from ending the process.
+
+They are **unstripped on purpose**. A fixture that had already been stripped could not show what
+stripping is for, and `every_fixture_module_still_carries_the_debug_information_stripping_removes`
+fails if anyone replaces one with a stripped copy.
+
+The three sizes span two orders of magnitude, also on purpose. `gleam@bool.beam` is small enough
+that `the_small_fixtures_chunk_table_is_exactly_this` names all fourteen chunk offsets and
+lengths; `gleam@list.beam` is large enough that truncating it at every one of its 49 680 byte
+offsets is a real workout for the never-panic property. Their licence is `Apache-2.0` and, since
+a binary carries no SPDX header, `REUSE.toml` declares the path.
+
 ### `tests/fixtures/app/`
 
 `tests/fixtures/app/` holds two kinds of file and `tests/fixtures/app/README.md` records which is
@@ -249,6 +318,41 @@ are the point. The README names the source directory and the version of every on
 The two are complementary. The copies keep the coverage on a machine with no Erlang; the gated
 `parses_every_app_in_host_otp` walks the live OTP root and asserts every `.app` in it parses,
 which is coverage the copies cannot give.
+
+## The never-panic policy for binary parsers
+
+Every parser in this crate reads bytes ginary did not write: a `.beam` out of somebody's build
+tree, an ELF out of somebody's OTP tarball, and later a payload out of an artifact a virus
+scanner may have appended to. A packaging tool that panics on a damaged file has told its user
+nothing, and on the launcher path a panic is forbidden outright.
+
+The rule is therefore uniform, and it is a rule about the *test suite* as much as about the code:
+**every public entry point of a binary parser has a property test that feeds it arbitrary bytes,
+and a hand-written test for each way its input can be short.** A branch a random vector cannot
+reach in a lifetime of cases — the gzip wrapper `beam::form` unwraps needs two exact magic bytes
+and then a decodable deflate stream — gets a property test of its own with the prefix fixed, and
+hand-built inputs for its failures; a branch covered only by a toolchain-gated test is not
+covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs` and `src/elf.rs` are
+the first two; `trailer`, `payload` and `appfile` join them as they land.
+
+| what is fed in | where |
+|---|---|
+| random byte vectors, 0 to 512 bytes | `chunks_never_panics_on_arbitrary_bytes`, `inspect_bytes_never_panics_on_arbitrary_bytes` |
+| bytes that start with the magic and then do not | `chunks_never_panics_on_almost_a_beam_file`, `chunks_never_panics_on_almost_a_gzipped_beam_file`, `inspect_bytes_never_panics_on_almost_an_elf` |
+| a compressed wrapper that will not unwrap | `a_gzip_member_cut_short_is_reported_rather_than_read_as_garbage`, `the_gzip_magic_followed_by_rubbish_is_not_a_module` |
+| a small input that expands without end | `a_member_that_expands_past_the_limit_is_refused_rather_than_allocated` |
+| every prefix of a real file, one per byte | `truncating_a_real_module_at_every_byte_offset_never_panics` |
+| named truncations of a real binary | `a_truncated_binary_is_an_error_rather_than_a_panic` |
+| a length field of `u32::MAX` | `a_chunk_length_of_u32_max_is_reported_rather_than_overflowing` |
+| a header cut in half | `a_chunk_header_cut_in_half_is_reported_rather_than_indexed` |
+
+A property test that only asserts "did not panic" is weak on its own, which is why each is paired
+with a hand-written test asserting the *exact* error variant and its fields. The property finds
+the input nobody thought of; the hand-written test says what the answer has to be.
+
+Arithmetic is part of the rule. `offset + len` over a `u32::MAX` length must not overflow a
+`usize` on a 32-bit target, and a size that is subtracted must saturate: a strip that made a file
+bigger is a defect to report, not a panic.
 
 ## Assembly scenarios
 
@@ -274,7 +378,7 @@ apart.
 | boot | a boot file naming `kernel-1.0` against a staged `kernel-11.0.3` is `BootReferencesMissingApp` naming *both*; the versions actually checked are reported |
 | erts bin | a missing required binary names the path it searched; `--extra-bin heart epmd` stages six programs; an extra that is not there is an error, not a skip; every program left behind is listed with the reason `assemble::excluded_reason` gives, and an extra that *was* staged is not also listed as excluded |
 | output | a non-empty `out` is refused and left untouched; an empty one is accepted; `--force` replaces rather than merges; a failure leaves neither `out` nor an `<out>.tmp-*` |
-| symlinks | a link inside the application is copied as a plain file with the target's bytes; one that escapes the application directory and one that dangles are both `UnsafeSymlink` (`tests/regressions/a1c_*` add the three the first review found: an `ebin` or a `priv` that is *itself* a link out of the application, a link to a directory outside the subtree being copied, and a link that loops) |
+| symlinks | a link inside the application is copied as a plain file with the target's bytes; one that escapes the application directory and one that dangles are both `UnsafeSymlink` (`tests/regressions/a1c_*` add the three the first review found: an `ebin` or a `priv` that is *itself* a link out of the application, a link to a directory outside the subtree being copied, and a link that loops; `a2_a_symlinked_priv_reached_an_excluded_directory.rs` adds the half of the first of those that stayed open, an `ebin` or `priv` that is a link to `src` or into it, which is `ExcludedSymlinkTarget`, and pins that a link to a *non*-excluded sibling directory still stages) |
 | accounting | the per-category totals sum to `total_bytes()`, which equals a walk of the tree with the listing excluded; nine named paths are checked against the category the size report will add them to |
 | listing | `ginary.stage.json` round-trips through serde, lists every file sorted by path, never lists itself, and names the ERTS version, the release and the OTP version |
 | determinism | staging the same inputs into two directories produces the same paths, the same bytes, the same modes and the same listing |
@@ -317,7 +421,7 @@ to hang a test binary with no diagnosis.
 ## Snapshots
 
 Textual output is asserted with `insta`, and the `.snap` files under `tests/snapshots/` are
-committed and reviewed like any other assertion. Seven exist:
+committed and reviewed like any other assertion. Eleven exist:
 
 | snapshot | what it pins |
 |---|---|
@@ -328,6 +432,11 @@ committed and reviewed like any other assertion. Seven exist:
 | `closure__app_not_found_message.snap` | the whole `AppNotFound` message, hint included |
 | `closure__shadowed_otp_application_warning.snap` | the warning an application in both trees produces |
 | `cli__closure_explain_table.snap` | what `ginary closure --explain` prints, footer included |
+| `assemble__stage_explain_table.snap` | what `ginary stage --explain` prints over the six-application scenario |
+| `cli__beam_chunks_table.snap` | all fourteen chunks of `gleam@bool.beam` and the `debug_info` line |
+| `strip__report_table.snap` | the three-line strip table when both halves ran |
+| `strip__report_table_when_nothing_ran.snap` | the same table when one half found nothing and the other was skipped |
+| `report__size_report_text.snap` | the size table, the `needs:` line and the warnings block, over a synthetic report |
 
 A snapshot is a contract, not a recording. `cargo insta review` is for reviewing a *deliberate*
 change to output; accepting a snapshot to make a red test pass is the same defect as weakening an
@@ -360,8 +469,9 @@ Planned test categories:
 - **Trace assertions** — end-to-end tests read the JSON Lines trace and assert on phase order,
   on `cache hit` for the second run, and on per-phase time bounds.
 - **Property tests** — `proptest` over the trailer encoding, the `.app` parser and tar path
-  validation.
-- **Fuzzing** — `cargo-fuzz` targets for `trailer`, `appfile` and `payload_unpack`.
+  validation. The BEAM and ELF readers already have theirs; see the never-panic policy above.
+- **Fuzzing** — `cargo-fuzz` targets for `trailer`, `appfile`, `beam_chunks`, `elf_inspect` and
+  `payload_unpack`.
 - **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job.
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table

@@ -1,0 +1,17 @@
+---
+source: tests/report.rs
+expression: synthetic().render_text()
+---
+category      files  before    after     saved
+erts_binary   4      41675352  11742936  29932416
+boot          1      12345     12345     0
+otp_beam      280    8000000   2500000   5500000
+gleam_beam    32     1382144   511072    871072
+priv          3      4096      4096      0
+app_resource  40     51200     51200     0
+total         360    51125137  14821649  36303488
+
+needs: libc.so.6 (GLIBC_2.38), libgcc_s.so.1, libm.so.6, libstdc++.so.6, libtinfo.so.6
+
+warnings:
+  lib/notify/priv/ghost.txt is in the listing and not in the tree

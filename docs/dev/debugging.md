@@ -44,6 +44,127 @@ hung `docker` cannot hang `doctor`; the tool is then reported as found with no v
 
 `doctor` never fails. A missing tool is information, not an error, and the exit status stays 0.
 
+## Looking inside the binaries an artifact is made of
+
+Two commands answer the two questions a size or portability surprise turns into. Both are
+read-only, both take any number of paths, and both take `--json`.
+
+### `ginary beam chunks <file>...`
+
+What a compiled module is made of, and whether it still carries debug information.
+
+```console
+$ ginary beam chunks tests/fixtures/beam/gleam@list.beam
+tests/fixtures/beam/gleam@list.beam
+id    offset  len
+AtU8  20      1763
+Code  1792    9434
+StrT  11236   0
+ImpT  11244   316
+ExpT  11568   808
+FunT  12384   172
+LitT  12564   273
+Meta  12848   45
+LocT  12904   604
+Attr  13516   39
+CInf  13564   168
+Dbgi  13740   27895
+Docs  41644   7250
+Line  48904   689
+Type  49604   76
+debug_info: yes
+```
+
+That module is checked in, so the transcript above is reproducible: `Dbgi` and `Docs` are 35 kB
+of a 49 kB file, which is what stripping is for.
+
+This is the window onto stripping. A module that is still large after a build shows here exactly
+which chunk it is large because of, and `debug_info: yes` on a *staged* module means the beam
+half of stripping did not run, or ran and did nothing — which `ginary stage` would also have
+refused, since it re-reads every module afterwards.
+
+A stripped module is a gzip member rather than a bare `FOR1` form, because
+`beam_lib` writes what it rewrote through `zlib:gzip/1`. The command unwraps it
+the way the code server does, so the table reads the same either way; the offsets are then
+offsets into the uncompressed form.
+
+`--json` prints `{format_version, files: [{path, chunks: [{id, offset, len}], debug_info}]}`, in
+the order the paths were given. A file that is not a module is an error and exits 1; nothing
+partial is printed.
+
+### `ginary elf deps <file>...`
+
+What a native binary needs from the machine that runs it.
+
+```console
+$ ginary elf deps ~/.local/share/mise/installs/erlang/29.0.5/erts-17.0.5/bin/beam.smp
+.../erts-17.0.5/bin/beam.smp
+  class     64
+  machine   x86_64
+  interp    /lib64/ld-linux-x86-64.so.2
+  pie       yes
+  stripped  no
+  glibc_max 2.38
+  needed    libtinfo.so.6, libstdc++.so.6, libm.so.6, libgcc_s.so.1, libc.so.6
+```
+
+`glibc_max` is the highest `GLIBC_x.y` in `.gnu.version_r`, compared numerically, and it is the
+artifact's portability floor: a machine with an older glibc will not start the runtime, whatever
+else is installed on it. `stripped` says whether the file still has a `.symtab`, which is the
+first thing to check when a staged tree is smaller than expected — somebody else's build may have
+stripped it already.
+
+`--json` prints `{format_version, files: [{path, class, kind, machine, interp, needed,
+glibc_max, is_pie, stripped}]}`. A file that is not an ELF is an error and exits 1. `kind` is
+`e_type` — `executable`, `shared_object`, `relocatable`, `core` — and it is what decides which
+arguments `strip` gets, so a position-independent program reads `shared_object` here and `pie
+yes` in the table above: the header does not distinguish the two, and `interp` does not either.
+glibc's own `libc.so.6` is a library that carries a program interpreter.
+
+## Reading the size report
+
+`ginary stage` prints the strip table and the size report under its own output:
+
+```console
+elf:   4 files, 56602456 -> 10722528 bytes, 45879928 saved
+beams: 205 files, 10158920 -> 1889386 bytes, 8269534 saved
+total: 209 files, 66761376 -> 12611914 bytes, 54149462 saved
+
+category      files  before    after     saved
+erts_binary   4      56602456  10722528  45879928
+...
+total         214    66775592  12626130  54149462
+
+needs: libc.so.6 (GLIBC_2.38), libgcc_s.so.1, libm.so.6, libstdc++.so.6, libtinfo.so.6
+```
+
+A half of the strip table that did not run says so in place of its numbers — `nothing to strip`,
+`skipped: <reason>`, `not asked for` — so a missing saving is never ambiguous. `--no-strip`,
+`--strip-elf-only` and `--strip-beams-only` narrow it; ADR 0007 records why the default is both.
+
+`--report json` prints the report alone, as one object, with nothing else on standard output, so
+it can be piped:
+
+```console
+$ ginary stage ... --report json | jq '.needs_summary'
+{
+  "needed": ["libc.so.6", "libgcc_s.so.1", "libm.so.6", "libstdc++.so.6", "libtinfo.so.6"],
+  "glibc_max": "2.38"
+}
+```
+
+The two JSON shapes nest differently, and the path above is the one that works for `--report
+json`: that object is `{format_version, strip, ...the report}` with the report's own members —
+`categories`, `total_before`, `total_after`, `elf_deps`, `needs_summary`, `warnings` — at the top
+level. Under `--json` the same report is one member of a larger object, so there the path is
+`.report.needs_summary`.
+
+`--report json` cannot be combined with `--json` or with `--explain`: the first prints the report
+alone, the second prints the whole staging object — which carries the same report under `report`
+and the strip account under `strip` — and the third asks for an account there would be nothing to
+print beside. The conflict is with the *value*: `--report text` is the default and sits happily
+next to either flag.
+
 ## Reproducing a launch by hand (planned)
 
 Once the launcher exists, the intended loop is:

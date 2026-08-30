@@ -15,3 +15,5 @@ only partly built, the record says so under `Consequences`.
 - [0005](0005-cache-layout-and-atomic-extraction.md) — Cache layout and atomic extraction
 - [0006](0006-tdd-workflow-execution-model.md) — TDD workflow and the developer tooling that
   comes first
+- [0007](0007-strip-elf-and-beam-debug-info.md) — Strip ELF and BEAM debug
+  information, on by default

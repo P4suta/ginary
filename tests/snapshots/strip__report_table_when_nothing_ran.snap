@@ -1,0 +1,7 @@
+---
+source: tests/strip.rs
+expression: report.to_string()
+---
+elf:   nothing to strip
+beams: skipped: no `erl` at /opt/otp/bin/erl
+total: 0 files, 0 -> 0 bytes, 0 saved

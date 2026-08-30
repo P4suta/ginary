@@ -27,3 +27,13 @@ mod a1c_a_non_utf8_file_name_was_dropped;
 mod a1c_a_symlinked_directory_looped_or_leaked;
 #[path = "regressions/a1c_a_symlinked_ebin_or_priv_escaped_the_app.rs"]
 mod a1c_a_symlinked_ebin_or_priv_escaped_the_app;
+#[path = "regressions/a2_a_module_outside_ebin_was_never_stripped.rs"]
+mod a2_a_module_outside_ebin_was_never_stripped;
+#[path = "regressions/a2_a_shared_object_with_an_interpreter_was_fully_stripped.rs"]
+mod a2_a_shared_object_with_an_interpreter_was_fully_stripped;
+#[path = "regressions/a2_a_symlinked_priv_reached_an_excluded_directory.rs"]
+mod a2_a_symlinked_priv_reached_an_excluded_directory;
+#[path = "regressions/a2_an_unreadable_elf_file_failed_the_whole_stage.rs"]
+mod a2_an_unreadable_elf_file_failed_the_whole_stage;
+#[path = "regressions/a2_the_staged_root_became_a_wildcard.rs"]
+mod a2_the_staged_root_became_a_wildcard;

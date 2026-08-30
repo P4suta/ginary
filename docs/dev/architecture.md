@@ -21,7 +21,7 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)* or *(A1c)* exist; the rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)* or *(A2)* exist; the rest are the plan.
 
 ```
 build side
@@ -35,8 +35,10 @@ build side
   closure.rs       (A1b) transitive closure of `applications` -> AppSet
   native.rs        detects ELF/Mach-O/PE under priv/, matches them to the target
   assemble.rs      (A1c) builds the staging root
-  strip.rs         `strip` on ELF, `beam_lib:strip_release` on .beam
-  report.rs        size and dependency accounting
+  beam.rs          (A2) the chunk table of a compiled module
+  elf.rs           (A2) read-only inspection of a native binary
+  strip.rs         (A2) `strip` on ELF, `beam_lib:strip_files` on .beam
+  report.rs        (A2) size and dependency accounting
   manifest.rs      ginary.json
   payload.rs       deterministic tar + zstd; safe unpack
   trailer.rs       the 64-byte trailer
@@ -82,7 +84,7 @@ gleam.toml [tools.ginary]        CLI flags
                       assemble::stage  ->  staging root
                               |
                               v
-                        strip::run  (ELF + .beam)
+                       strip::strip  (ELF + .beam)
                               |
                     +---------+---------+
                     v                   v
@@ -218,12 +220,16 @@ allowlist, not by a filter, so nothing *inside* `ebin` or `priv` is pruned by na
 rather than one: a link to a *file* may point anywhere inside the application, and a link to a
 *directory* may not leave the `ebin` or `priv` it was found in, or `ebin/x -> ../src` would walk
 around a structural rule. A link that crosses its boundary or points at nothing is
-`UnsafeSymlink`, one that points back at a directory containing it is `SymlinkCycle`, and both
+`UnsafeSymlink`, and one that points back at a directory containing it is `SymlinkCycle`. Both
 are checked on the `ebin` and `priv` themselves as well as on everything under them — an
 application whose `priv` *is* a link to elsewhere on the build machine is the same defect, and
-`read_dir` follows it without a word. A file whose name is not valid UTF-8 is `NonUtf8Name`: the
-listing is text, and an artifact holding a file its own index cannot name is worse than one that
-was not built.
+`read_dir` follows it without a word. An `ebin` or `priv` that is itself a link has no
+enclosing subtree to be held to, so the second boundary reaches it as the exclusion itself:
+a link resolving to one of the excluded directories, or to anything inside one, is
+`ExcludedSymlinkTarget`, because `priv -> src` staging the sources under another name is the
+same silent leak as `priv/x -> ../src` and only the name on the door differs. A file whose name
+is not valid UTF-8 is `NonUtf8Name`: the listing is text, and an artifact holding a file its own
+index cannot name is worse than one that was not built.
 
 **The boot file is checked against the tree.** `no_dot_erlang.boot` hardcodes the `kernel` and
 `stdlib` versions it was generated against, as literal `$ROOT/lib/<name>-<vsn>/ebin` byte
@@ -246,8 +252,116 @@ Junk removal is the one place assembly deletes rather than declines to copy:
 `StagedRoot::junk_removed` with its size, so `--keep-junk` and the report can both say exactly
 what the default cost.
 
+The listing stops describing the tree the moment a later phase rewrites a byte of it, so
+`StagedRoot::refresh` re-stats every file it lists, recomputes the per-application totals and
+writes `ginary.stage.json` again. What it carries over untouched is the account that *cannot* be
+re-derived from a directory — the excluded ERTS binaries, the junk that was removed, the boot
+references that were checked — because those are records of what staging decided, and a refresh
+that dropped them would lose `--explain` for good.
+
 `ginary stage <shipment> --root NAME --out DIR` is the developer window onto all of this, and
 the input to `tests/stage_run.rs`, which boots what it wrote.
+
+## Stripping the staged root
+
+`strip::strip(root, &OtpInfo, &StripOptions)` is the one phase that *changes* the tree assembly
+wrote, and it is two unrelated halves because a staged root holds two unrelated kinds of binary.
+
+```
+staged root
+   |
+   +-- every file whose first four bytes are \x7fELF
+   |     strip --strip-all       anything else
+   |     strip --strip-unneeded  a shared object (ET_DYN named *.so, or with no PT_INTERP)
+   |     then elf::inspect again: same class, same machine, or the file was destroyed
+   |     one that starts like an ELF and will not parse is a reported skip, not a failure
+   |
+   +-- <otp.root>/bin/erl -noshell -env ERL_CRASH_DUMP /dev/null
+   |     -eval 'beam_lib:strip_files(Files)' -extra <every staged .beam>
+   |     then beam::chunks on every staged .beam: no Dbgi, no Docs, still a Code
+   |
+   v
+StagedRoot::refresh  ->  ginary.stage.json rewritten with the sizes the tree now has
+   |
+   v
+report::measure(before, strip_report, root)  ->  SizeReport
+```
+
+Four decisions shape it, and each has tests that would fail without it.
+
+**Files are found by their magic, never by their name.** A NIF under `priv/lib` is not required
+to be called `.so` and a `.so` is not required to be a NIF; a `priv/lib/x.so` that is really a
+shell script must not be handed to a binary tool. `elf::is_elf` reads four bytes and answers.
+Which arguments the tool then gets is decided by `e_type`: `ElfInfo::kind` being
+`ElfKind::SharedObject` is necessary, because a program is not a library, and the name or an
+absent `PT_INTERP` decides the rest — a position-independent *executable* is an `ET_DYN` too and
+must still be stripped all the way, while glibc's own `libc.so.6` shows that a real library may
+carry an interpreter. A file that begins with the magic and is not a whole ELF is neither
+stripped nor fatal: it is a `warning:` line under the strip table, which is the same decision
+`report::measure` reaches about the same file.
+
+**Neither tool is trusted to have done what it said.** `strip --strip-all` on a shared object
+produces a file that is smaller and will not load, and `beam_lib` answers
+`{ok, _}` for a list it was given and changed nothing in — the two failures that are invisible
+until the artifact is in somebody else's hands. So every ELF is re-inspected and has to still be
+an ELF of the same class and machine, and every staged `.beam` is re-read and has to have lost
+`Dbgi` and `Docs` and kept `Code`. `Line` stays on purpose: it is what turns a crash in a
+packaged application into a stack trace with line numbers. ADR 0007 records the trade.
+
+**A missing tool is a reported skip; a failing tool is an error.** `strip` is not part of the
+Rust toolchain and an OTP root assembled from a tarball of ERTS binaries alone genuinely has no
+`bin/erl`. Both are `ElfOutcome::Skipped` / `BeamOutcome::Skipped` with a reason naming what was
+looked for, because a bigger artifact is better than a build that will not run on a machine
+missing a developer tool. A tool that *runs* and fails is an error naming the file and quoting
+what the tool wrote to standard error.
+
+**The runtime is the installation's own, by absolute path, and it is given files.** `beam_lib`
+lives inside OTP, so stripping modules means starting Erlang, and the release that rewrites them
+has to be the release they came from. Whatever `erl` is on `PATH` is not consulted. The modules
+arrive after `-extra` rather than being interpolated into the expression, so a name holding a
+quote cannot become Erlang source — and they arrive as *paths* passed to
+`beam_lib:strip_files/1`, not as a directory passed to `strip_release/1`, which would expand
+`<root>/lib/*/ebin/*.beam` through `filelib:wildcard/1`. There the root is a glob prefix: a
+staged root named `build[1]` would match nothing and one named `build*` would rewrite modules
+under every sibling directory whose name starts `build`. Passing the list ginary walked also
+keeps the two halves honest, since every module the report counts is one the runtime was handed,
+`priv` included. A tree too large for one argument vector is stripped in several calls; see
+`strip::MAX_ARGUMENT_BYTES`.
+
+One property of `beam_lib` shows through into `src/beam.rs`: it writes every module
+it rewrote through `zlib:gzip/1`, so a stripped `.beam` on disk is a gzip member wrapping the IFF
+form. The code server unwraps it on the way in and so does `beam::form`, which is why the
+verification, `ginary beam chunks` and the report all read a stripped module as readily as an
+unstripped one. Whether ginary should instead rewrite the modules uncompressed — the payload's
+own zstd does better on uncompressed input — is a measurement the plan defers.
+
+Stripping is idempotent, and that is not incidental: `strip` over an already-stripped file and
+`strip_files` over an already-stripped module both write the same bytes back, so
+"identical input produces identical artifact bytes" survives this phase. `tests/strip.rs` and
+`tests/stage_run.rs` each assert it, the second over a real runtime.
+
+## The size and dependency report
+
+`report::measure(before, strip_report, root)` answers the two questions that decide whether an
+artifact is shippable, and it answers both from the tree rather than from what a tool claimed.
+The strip report is an *input* to the account and never a source for it.
+
+**How big is it, and where did the size go?** Each of `assemble::Category`'s buckets carries a
+`bytes_before` read from the listing staging wrote and a `bytes_after` stat'd from the disk now,
+so "the artifact is 12 MB" becomes "the ERTS binaries are 10.7 MB of it, and stripping already
+took 45.9 MB off them".
+
+**Where will it not run?** An artifact carries its own BEAM and not its own libc. Every ELF in
+the tree is inspected, and the union of their `DT_NEEDED` entries with the highest `GLIBC_x.y`
+any of them requires becomes the `needs:` line — the portability floor, stated at build time
+rather than discovered by a user whose loader refuses the artifact. The glibc versions are
+compared numerically, component by component, because sorting the strings puts `2.9` above
+`2.38` and would report a floor two hundred releases too low.
+
+Nothing in the report is fatal. A file the listing names and the tree does not hold, or one that
+starts like an ELF and will not parse, is a line in `warnings` and the rest of the report is
+still produced: a report that refuses to print because one file is odd is worse than one that
+prints and says which file was odd.
 
 ## Launch data flow
 
@@ -294,4 +408,7 @@ Concurrent first runs race on the rename, and the loser deletes its own temporar
 - The builder never mutates the shipment; it only reads it.
 - Cache entries are immutable once renamed into place, so a running application cannot observe a
   half-written runtime.
-- Identical input produces identical artifact bytes.
+- Identical input produces identical artifact bytes, stripping included.
+- No tool that rewrites a file in the artifact is trusted; every one of them is checked
+  afterwards against what it claimed to have done.
+- Every binary parser answers with a typed error rather than a panic, whatever bytes it is given.

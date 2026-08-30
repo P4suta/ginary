@@ -1,0 +1,7 @@
+---
+source: tests/strip.rs
+expression: report.to_string()
+---
+elf:   4 files, 41675352 -> 11742936 bytes, 29932416 saved
+beams: 312 files, 9382144 -> 3011072 bytes, 6371072 saved
+total: 316 files, 51057496 -> 14754008 bytes, 36303488 saved

@@ -1,0 +1,21 @@
+---
+source: tests/cli.rs
+expression: stdout
+---
+tests/fixtures/beam/gleam@bool.beam
+id    offset  len
+AtU8  20      162
+Code  192     489
+StrT  692     0
+ImpT  700     76
+ExpT  784     148
+LitT  940     37
+Meta  988     45
+LocT  1044    4
+Attr  1056    39
+CInf  1104    168
+Dbgi  1280    1457
+Docs  2748    1798
+Line  4556    85
+Type  4652    10
+debug_info: yes

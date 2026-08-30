@@ -25,3 +25,12 @@ path = ["tests/fixtures/app/shipment/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "the gleam_stdlib, gleam_crypto, mist and notify authors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Compiled BEAM modules copied verbatim from `gleam export erlang-shipment`, so
+# that the IFF chunk reader is tested against files it did not write. A binary
+# carries no SPDX header; the path is declared here instead.
+[[annotations]]
+path = ["tests/fixtures/beam/*.beam"]
+precedence = "override"
+SPDX-FileCopyrightText = "the gleam_stdlib authors"
+SPDX-License-Identifier = "Apache-2.0"

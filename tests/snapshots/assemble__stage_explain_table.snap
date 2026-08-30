@@ -5,19 +5,19 @@ expression: staged.explain()
 category      bytes  files
 erts_binary   286    4
 boot          74     1
-otp_beam      36     3
-gleam_beam    60     5
+otp_beam      144    3
+gleam_beam    240    5
 priv          26     2
 app_resource  837    6
-total         1319   21
+total         1607   21
 
 app           vsn     source    files  bytes
-crypto        5.9.2   otp       3      154
-gleam_crypto  1.4.0   shipment  2      148
-gleam_stdlib  0.62.0  shipment  3      167
-kernel        11.0.3  otp       2      156
-notify        1.0.0   shipment  4      198
-stdlib        8.0.3   otp       2      136
+crypto        5.9.2   otp       3      190
+gleam_crypto  1.4.0   shipment  2      184
+gleam_stdlib  0.62.0  shipment  3      239
+kernel        11.0.3  otp       2      192
+notify        1.0.0   shipment  4      270
+stdlib        8.0.3   otp       2      172
 
 excluded erts binaries:
   epmd     the port mapper daemon; add it with --extra-bin for a distributed application

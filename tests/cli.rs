@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The command line surface added in A1a and A1b: `ginary appfile parse`, the
-//! OTP installation `ginary doctor` now reports, and `ginary closure`.
+//! The command line surface added in A1a, A1b, A1c and A2: `ginary appfile
+//! parse`, the OTP installation `ginary doctor` now reports, `ginary closure`,
+//! `ginary stage` with its stripping flags, and the two developer windows onto
+//! the binaries an artifact is made of, `ginary beam chunks` and
+//! `ginary elf deps`.
 //!
 //! `tests/smoke_cli.rs` covers the A0 commands. This file drives the same real
 //! binary and asserts only on the user-visible contract: exit codes, the table,
@@ -13,7 +16,7 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use serde_json::Value;
 
-use crate::common::fake_otp::{FakeOtp, FakeShipment};
+use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
@@ -587,7 +590,7 @@ fn stage_json_carries_the_documented_keys() {
         .success();
     let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
 
-    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["format_version"], Value::from(2));
     assert_eq!(value["erts_vsn"], Value::from("17.0.5"));
     assert_eq!(value["otp_release"], Value::from(29));
     assert_eq!(value["otp_version"], Value::from("29.0.5"));
@@ -723,5 +726,535 @@ fn stage_without_the_extra_application_leaves_it_out() {
     assert!(
         !out.join("lib/sasl-4.3").exists(),
         "nothing reaches the tree that the closure did not ask for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A2: stripping, the size report, and the two binary windows.
+// ---------------------------------------------------------------------------
+
+/// The same trees as [`stage_trees`], with a stub `bin/erl` in the runtime.
+///
+/// `src/strip.rs` runs the OTP installation's own `erl` by absolute path, so
+/// without one the beam step can only be skipped. The stub writes its argument
+/// vector to `<otp>/bin/erl.argv` and exits, which is how a command line test
+/// asserts on the one-liner ginary passes without an Erlang installed.
+fn stage_trees_with_erl() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    stage_trees_with(FakeOtp::with_erl_script)
+}
+
+/// The same trees again, with a stub `bin/erl` that shrinks every module it is
+/// given.
+///
+/// The difference matters to exactly one test: a stub that changes no bytes
+/// cannot show whether `ginary.stage.json` was rewritten after stripping,
+/// because nothing on disk moved.
+fn stage_trees_with_shrinking_erl() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    stage_trees_with(FakeOtp::with_shrinking_erl_script)
+}
+
+/// Builds the trees, letting the caller choose which stub `erl` the runtime
+/// carries.
+fn stage_trees_with(erl: fn(FakeOtp) -> FakeOtp) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let shipment = FakeShipment::new()
+        .app_with("notify", "1.0.0", |app| {
+            app.applications(&["gleam_crypto"])
+                .priv_file("greeting.txt", b"hello from priv\n")
+        })
+        .app("gleam_crypto", "0.4.0", &["crypto"])
+        .build_in(dir.path().join("shipment"));
+    std::fs::create_dir_all(dir.path().join("otp")).expect("the otp root");
+    let otp = erl(FakeOtp::new())
+        // The same two programs `stage_trees` leaves in the runtime's `bin`, so
+        // that `--explain` has an exclusion to print and the assertion that it
+        // still prints one under the strip table is not vacuous.
+        .extra_erts_bins(&["epmd", "heart"])
+        .app("crypto", "5.9.2", &["kernel", "stdlib"])
+        .build_in(dir.path().join("otp"));
+    let shipment_root = shipment.root.clone();
+    let otp_root = otp.root.clone();
+    let out = dir.path().join("out");
+    (dir, shipment_root, otp_root, out)
+}
+
+/// The argument vector the stub `bin/erl` under `otp` was called with.
+fn erl_argv(otp: &Path) -> Vec<String> {
+    match std::fs::read_to_string(otp.join("bin/erl.argv")) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("cannot read the argv log: {error}"),
+    }
+}
+
+/// Every `.beam` under `root`, as absolute paths, in staged-tree path order.
+///
+/// The list ginary has to hand `beam_lib:strip_files/1`, derived here by this
+/// file's own walk rather than from the code's, so that the assertion is about
+/// the tree and not about the implementation agreeing with itself.
+fn staged_modules(root: &Path) -> Vec<String> {
+    fn collect(root: &Path, dir: &Path, into: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("a readable directory") {
+            let path = entry.expect("a readable entry").path();
+            if path.is_dir() {
+                collect(root, &path, into);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "beam")
+            {
+                into.push(
+                    path.strip_prefix(root)
+                        .expect("a path under the root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(root, root, &mut found);
+    found.sort();
+    found
+        .iter()
+        .map(|relative| root.join(relative).display().to_string())
+        .collect()
+}
+
+/// A `.beam` fixture path as it appears in the command's own output.
+fn beam_fixture(name: &str) -> String {
+    format!("tests/fixtures/beam/{name}")
+}
+
+#[test]
+fn the_help_lists_the_beam_and_elf_commands() {
+    let assert = ginary().arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("beam"), "{stdout}");
+    assert!(stdout.contains("elf"), "{stdout}");
+}
+
+#[test]
+fn beam_chunks_prints_the_whole_table_and_the_debug_info_line() {
+    let assert = ginary()
+        .args(["beam", "chunks", &beam_fixture("gleam@bool.beam")])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    insta::assert_snapshot!("beam_chunks_table", stdout);
+}
+
+#[test]
+fn beam_chunks_json_carries_every_chunk_of_every_file_in_order() {
+    let assert = ginary()
+        .args([
+            "beam",
+            "chunks",
+            "--json",
+            &beam_fixture("gleam@bool.beam"),
+            &beam_fixture("gleam@string.beam"),
+        ])
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    let files = value["files"].as_array().expect("files is an array");
+    assert_eq!(files.len(), 2);
+    assert_eq!(
+        files[0]["path"],
+        Value::from(beam_fixture("gleam@bool.beam")),
+        "the files keep the order they were given in"
+    );
+    assert_eq!(files[0]["debug_info"], Value::from(true));
+    let first = &files[0]["chunks"][0];
+    assert_eq!(first["id"], Value::from("AtU8"));
+    assert_eq!(first["offset"], Value::from(20));
+    assert_eq!(first["len"], Value::from(162));
+    let ids: Vec<&str> = files[1]["chunks"]
+        .as_array()
+        .expect("chunks is an array")
+        .iter()
+        .filter_map(|chunk| chunk["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"Code") && ids.contains(&"Dbgi"), "{ids:?}");
+}
+
+#[test]
+fn beam_chunks_reports_a_file_that_is_not_a_module_and_exits_one() {
+    let assert = ginary()
+        .args(["beam", "chunks", &fixture("nested.app")])
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stderr.contains(&fixture("nested.app")),
+        "the file that could not be read is named: {stderr}"
+    );
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "no partial table may be printed"
+    );
+}
+
+#[test]
+fn beam_chunks_without_a_path_is_a_usage_error() {
+    ginary().args(["beam", "chunks"]).assert().code(2);
+}
+
+#[test]
+fn elf_deps_prints_what_the_binary_needs() {
+    let binary = assert_cmd::cargo::cargo_bin("ginary");
+    let assert = ginary()
+        .args(["elf", "deps"])
+        .arg(&binary)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.lines().next() == Some(binary.display().to_string().as_str()),
+        "the first line names the file: {stdout}"
+    );
+    for label in [
+        "class",
+        "machine",
+        "interp",
+        "pie",
+        "stripped",
+        "glibc_max",
+        "needed",
+    ] {
+        assert!(stdout.contains(label), "no `{label}` line:\n{stdout}");
+    }
+    assert!(stdout.contains("libc.so.6"), "{stdout}");
+}
+
+#[test]
+fn elf_deps_json_carries_the_documented_keys() {
+    let binary = assert_cmd::cargo::cargo_bin("ginary");
+    let assert = ginary()
+        .args(["elf", "deps", "--json"])
+        .arg(&binary)
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    let file = &value["files"][0];
+    assert_eq!(file["path"], Value::from(binary.display().to_string()));
+    assert_eq!(file["class"], Value::from(64));
+    assert_eq!(file["machine"], Value::from(std::env::consts::ARCH));
+    assert!(
+        file["needed"]
+            .as_array()
+            .is_some_and(|needed| needed.iter().any(|name| name == "libc.so.6")),
+        "{value}"
+    );
+    assert!(file["interp"].is_string(), "{value}");
+    assert!(file["glibc_max"].is_string(), "{value}");
+    assert!(file["is_pie"].is_boolean(), "{value}");
+    assert!(file["stripped"].is_boolean(), "{value}");
+}
+
+#[test]
+fn elf_deps_reports_a_file_that_is_not_an_elf_and_exits_one() {
+    let assert = ginary()
+        .args(["elf", "deps", &fixture("nested.app")])
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(stderr.contains(&fixture("nested.app")), "{stderr}");
+    assert!(stderr.contains("not an ELF file"), "{stderr}");
+}
+
+#[test]
+fn stage_strips_by_default_and_prints_the_strip_table() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("elf:   nothing to strip"),
+        "a fake runtime holds no native code, and the table says so:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("beams: ")
+            && line.contains(" files, ")
+            && line.contains(" saved")),
+        "the beam step ran and reported its files:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("total: ")),
+        "{stdout}"
+    );
+    assert!(
+        !erl_argv(&otp).is_empty(),
+        "stripping is on by default, so the runtime was started"
+    );
+}
+
+#[test]
+fn stage_runs_the_otp_roots_own_erl_with_the_beam_lib_one_liner() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    stage_command(&shipment, &otp, &out).assert().success();
+
+    let mut expected = vec![
+        "-noshell".to_owned(),
+        "-env".to_owned(),
+        "ERL_CRASH_DUMP".to_owned(),
+        "/dev/null".to_owned(),
+        "-eval".to_owned(),
+        "Files=init:get_plain_arguments(), case beam_lib:strip_files(Files) of {ok,_} -> \
+         halt(0); Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end."
+            .to_owned(),
+        "-extra".to_owned(),
+    ];
+    let modules = staged_modules(&out);
+    assert!(!modules.is_empty(), "the command stages modules");
+    expected.extend(modules);
+    assert_eq!(erl_argv(&otp), expected);
+}
+
+#[test]
+fn stage_skips_the_beam_step_when_the_otp_root_holds_no_erl() {
+    // `stage_trees` builds a runtime without the stub. A missing `erl` is a
+    // reported skip and not a failure: the tree still stages.
+    let (_dir, shipment, otp, out) = stage_trees();
+
+    let assert = stage_command(&shipment, &otp, &out).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("beams: skipped:")
+            && stdout.contains(&otp.join("bin/erl").display().to_string()),
+        "the skip names the `erl` that was looked for:\n{stdout}"
+    );
+    assert!(
+        out.join("ginary.stage.json").is_file(),
+        "the tree still staged"
+    );
+}
+
+#[test]
+fn stage_with_no_strip_reports_both_halves_as_not_asked_for() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--no-strip")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("elf:   not asked for"), "{stdout}");
+    assert!(stdout.contains("beams: not asked for"), "{stdout}");
+    assert!(
+        erl_argv(&otp).is_empty(),
+        "--no-strip must not start the runtime"
+    );
+}
+
+#[test]
+fn stage_with_strip_elf_only_leaves_the_modules_alone() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--strip-elf-only")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("beams: not asked for"), "{stdout}");
+    assert!(erl_argv(&otp).is_empty());
+}
+
+#[test]
+fn stage_with_strip_beams_only_leaves_the_native_binaries_alone() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--strip-beams-only")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("elf:   not asked for"), "{stdout}");
+    assert!(!erl_argv(&otp).is_empty());
+}
+
+#[test]
+fn stage_with_no_strip_and_a_strip_only_flag_is_a_usage_error() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    stage_command(&shipment, &otp, &out)
+        .args(["--no-strip", "--strip-elf-only"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn stage_with_both_strip_only_flags_is_a_usage_error() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    stage_command(&shipment, &otp, &out)
+        .args(["--strip-elf-only", "--strip-beams-only"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn stage_prints_the_needs_line_under_the_tables() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("needs: (none)"),
+        "a fake tree needs nothing, and the line still has to be there:\n{stdout}"
+    );
+}
+
+#[test]
+fn stage_explain_includes_the_strip_table_and_the_needs_line() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--explain")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("excluded erts binaries:"), "{stdout}");
+    assert!(stdout.contains("elf:   nothing to strip"), "{stdout}");
+    assert!(stdout.contains("needs: "), "{stdout}");
+}
+
+#[test]
+fn stage_with_report_json_prints_the_report_and_nothing_else() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .args(["--report", "json"])
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("the whole of standard output is one JSON object");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(
+        value["strip"]["elf"]["status"],
+        Value::from("nothing_to_strip")
+    );
+    assert_eq!(value["strip"]["beams"]["status"], Value::from("stripped"));
+    assert!(
+        value["categories"]["gleam_beam"]["files"].is_number(),
+        "{value}"
+    );
+    assert!(value["total_before"].is_number(), "{value}");
+    assert!(value["total_after"].is_number(), "{value}");
+    assert_eq!(
+        value["needs_summary"]["needed"],
+        Value::from(Vec::<String>::new())
+    );
+}
+
+#[test]
+fn stage_with_report_json_and_json_is_a_usage_error() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    stage_command(&shipment, &otp, &out)
+        .args(["--report", "json", "--json"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn stage_with_report_json_and_explain_is_a_usage_error() {
+    // `--report json` prints the report alone, so an `--explain` beside it
+    // would be silently dropped. Refusing it says so instead.
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    stage_command(&shipment, &otp, &out)
+        .args(["--report", "json"])
+        .arg("--explain")
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn stage_with_report_text_and_json_asks_for_the_default_and_is_accepted() {
+    // The conflict belongs to the *value* `json`, not to the `--report` flag:
+    // `--report text` is the default, and spelling a default out loud must
+    // never turn a working command line into a usage error.
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .args(["--report", "text"])
+        .arg("--json")
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("--json still prints the staging object");
+
+    assert!(value["report"]["categories"].is_object(), "{value}");
+}
+
+#[test]
+fn stage_json_carries_the_strip_and_report_members() {
+    let (_dir, shipment, otp, out) = stage_trees_with_erl();
+
+    let assert = stage_command(&shipment, &otp, &out)
+        .arg("--json")
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(2));
+    assert_eq!(
+        value["strip"]["elf"]["status"],
+        Value::from("nothing_to_strip")
+    );
+    assert!(value["strip"]["per_file"].is_array(), "{value}");
+    assert!(value["report"]["categories"].is_object(), "{value}");
+    assert!(value["report"]["needs_summary"].is_object(), "{value}");
+}
+
+#[test]
+fn stage_rewrites_the_listing_so_its_sizes_match_the_stripped_tree() {
+    // The listing is the tree's description of itself, and stripping rewrites
+    // the tree. A `ginary.stage.json` still holding the pre-strip sizes would
+    // be trusted by every later phase.
+    //
+    // The runtime here is the *shrinking* stub, because a stub that changed no
+    // bytes would leave every size already correct and this whole test would
+    // pass with `StagedRoot::refresh` deleted.
+    let (_dir, shipment, otp, out) = stage_trees_with_shrinking_erl();
+
+    stage_command(&shipment, &otp, &out).assert().success();
+
+    let text = std::fs::read_to_string(out.join("ginary.stage.json")).expect("the listing");
+    let listing: Value = serde_json::from_str(&text).expect("the listing parses");
+    let mut shrunken = 0;
+    for file in listing["files"].as_array().expect("files is an array") {
+        let path = file["path"].as_str().expect("a path");
+        let size = file["size"].as_u64().expect("a size");
+        let actual = std::fs::metadata(out.join(path))
+            .unwrap_or_else(|error| panic!("cannot stat {path}: {error}"))
+            .len();
+        assert_eq!(size, actual, "the listing's size for `{path}` is stale");
+        if path.ends_with(".beam") && size < DUMMY_BEAM.len() as u64 {
+            shrunken += 1;
+        }
+    }
+    assert!(
+        shrunken > 0,
+        "the stub has to have changed the tree, or this test asserts nothing"
     );
 }

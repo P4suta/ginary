@@ -11,10 +11,18 @@
 //!   writes, `<dir>/<app>/ebin/<app>.app`.
 //!
 //! Neither writes a byte that could be executed usefully: the ERTS binaries are
-//! shell scripts that exit, and the `.beam` files are twelve bytes. What they
-//! do carry is the *structure*, which is all the closure, assembly and
-//! discovery code reads. A test that needs a real runtime is gated on the host
-//! toolchain instead — see [`crate::common::tools::require_tools`].
+//! shell scripts that exit, and a `.beam` is the forty-eight bytes of
+//! [`DUMMY_BEAM`]. What they do carry is the *structure*, which is all the
+//! closure, assembly, stripping and discovery code reads. A test that needs a
+//! real runtime is gated on the host toolchain instead — see
+//! [`crate::common::tools::require_tools`].
+//!
+//! [`FakeOtp::with_erl_script`] is the one place a builder writes a program
+//! that does something. `src/strip.rs` runs `<root>/bin/erl` by absolute path,
+//! and a test cannot assert on the one-liner it passes to
+//! `beam_lib:strip_files/1` without an `erl` that writes its own argument
+//! vector down. The stub does exactly that and exits; it strips nothing, which
+//! is why [`DUMMY_BEAM`] is already stripped.
 //!
 //! Both builders take applications through the same [`FakeApp`] description, so
 //! an application can be moved between a fake OTP root and a fake shipment
@@ -44,6 +52,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::common::script::script;
+
 /// The default ERTS version a [`FakeOtp`] uses, matching the host OTP 29.0.5.
 pub const DEFAULT_ERTS_VSN: &str = "17.0.5";
 /// The default OTP release a [`FakeOtp`] uses.
@@ -55,12 +65,55 @@ pub const DEFAULT_KERNEL_VSN: &str = "11.0.3";
 /// The `stdlib` version a [`FakeOtp`] seeds itself with.
 pub const DEFAULT_STDLIB_VSN: &str = "8.0.3";
 
-/// The first twelve bytes of a BEAM file: an IFF `FOR1` chunk of form `BEAM`.
+/// A minimal, already-stripped BEAM file: `AtU8`, `Code` and `Line`, four
+/// bytes of nothing each.
 ///
-/// Enough that a reader can tell the file apart from noise, and deliberately
-/// not enough to load. Nothing in ginary opens a `.beam`; `strip` will, and
-/// those tests are gated on the real toolchain.
-pub const DUMMY_BEAM: &[u8] = b"FOR1\x00\x00\x00\x04BEAM";
+/// Structurally a BEAM and deliberately not a loadable one. Until A2 this was
+/// the twelve bytes of a bare `FOR1 <size> BEAM` with no chunks at all, which
+/// was enough for everything that only counted and copied files. `src/strip.rs`
+/// opens them: it verifies that no staged module still holds
+/// [`ginary::beam::DEBUG_INFO_CHUNK`] or [`ginary::beam::DOCS_CHUNK`] and that
+/// every one still holds [`ginary::beam::CODE_CHUNK`], and a fake tree whose
+/// modules have no `Code` at all could not tell a working verification from a
+/// broken one.
+///
+/// It carries no `Dbgi` and no `Docs`, so a fake tree is what a *stripped* tree
+/// looks like and running a stub `erl` over it is legitimately a no-op. A test
+/// that needs a module with debug information in it writes one with
+/// [`beam_bytes`], in the open, the same way a test that needs a broken OTP
+/// root builds a whole one and breaks it.
+pub const DUMMY_BEAM: &[u8] = b"FOR1\x00\x00\x00\x28BEAM\
+AtU8\x00\x00\x00\x04\x00\x00\x00\x00\
+Code\x00\x00\x00\x04\x00\x00\x00\x00\
+Line\x00\x00\x00\x04\x00\x00\x00\x00";
+
+/// Builds BEAM bytes holding exactly the chunks given, in the order given.
+///
+/// Real IFF padding: a chunk whose length is not a multiple of four is followed
+/// by up to three zero bytes, which is the rule a reader that only added the
+/// declared length would get wrong on the second chunk of any real module.
+///
+/// # Panics
+///
+/// If a chunk's data is longer than `u32::MAX`, which no test writes.
+pub fn beam_bytes(chunks: &[([u8; 4], &[u8])]) -> Vec<u8> {
+    let mut body: Vec<u8> = b"BEAM".to_vec();
+    for (id, data) in chunks {
+        body.extend_from_slice(id);
+        let len = u32::try_from(data.len()).expect("a chunk shorter than 4 GiB");
+        body.extend_from_slice(&len.to_be_bytes());
+        body.extend_from_slice(data);
+        body.resize(body.len().next_multiple_of(4), 0);
+    }
+    let mut bytes: Vec<u8> = b"FOR1".to_vec();
+    bytes.extend_from_slice(
+        &u32::try_from(body.len())
+            .expect("a form shorter than 4 GiB")
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(&body);
+    bytes
+}
 
 /// One application, described once and written into either layout.
 #[derive(Clone, Debug)]
@@ -254,7 +307,31 @@ pub struct FakeOtp {
     otp_version: Option<String>,
     start_erl_data: bool,
     extra_erts_bins: Vec<String>,
+    erl_script: Option<ErlScript>,
     apps: Vec<FakeApp>,
+}
+
+/// Which stub `bin/erl` a [`FakeOtp`] writes, if any.
+#[derive(Clone, Debug)]
+enum ErlScript {
+    /// Records its arguments and exits 0.
+    Succeeding,
+    /// Records its arguments, replaces every `.beam` it is given with
+    /// [`SHRUNKEN_BEAM`], and exits 0.
+    Shrinking,
+    /// Records its arguments, writes the held text to standard error, exits 1.
+    Failing(String),
+}
+
+/// The module a [`FakeOtp::with_shrinking_erl_script`] stub writes over every
+/// module it is handed.
+///
+/// Smaller than [`DUMMY_BEAM`] and still a module that passes the verification
+/// stripping does: it holds `Code` and neither `Dbgi` nor `Docs`. The point is
+/// the *size*, so that a test can tell a listing that was refreshed after
+/// stripping from one that was not.
+fn shrunken_beam() -> Vec<u8> {
+    beam_bytes(&[(ginary::beam::CODE_CHUNK, b"x".as_slice())])
 }
 
 impl Default for FakeOtp {
@@ -276,6 +353,7 @@ impl FakeOtp {
             otp_version: Some(DEFAULT_OTP_VERSION.to_owned()),
             start_erl_data: true,
             extra_erts_bins: Vec::new(),
+            erl_script: None,
             apps: vec![
                 FakeApp::new("kernel", DEFAULT_KERNEL_VSN).mod_callback("kernel"),
                 FakeApp::new("stdlib", DEFAULT_STDLIB_VSN).applications(&["kernel"]),
@@ -330,6 +408,57 @@ impl FakeOtp {
         self
     }
 
+    /// Installs a stub `bin/erl` that records its argument vector and exits 0.
+    ///
+    /// `src/strip.rs` runs the OTP installation's own `erl` rather than
+    /// whatever is on `PATH`, so this is how a test gets a runtime that can be
+    /// *called* without an Erlang being installed. Every argument lands on its
+    /// own line in `<root>/bin/erl.argv`, which
+    /// [`FakeOtpRoot::erl_argv`] reads back, so a test asserts on the exact
+    /// one-liner rather than on a substring of it.
+    ///
+    /// The stub strips nothing. That is the point: [`DUMMY_BEAM`] is already
+    /// stripped, so a no-op `erl` leaves a tree that passes the verification
+    /// stripping does afterwards, and a test that wants the verification to
+    /// *fail* writes a module holding `Dbgi` into the staged tree itself.
+    #[must_use]
+    pub fn with_erl_script(mut self) -> Self {
+        self.erl_script = Some(ErlScript::Succeeding);
+        self
+    }
+
+    /// Installs a stub `bin/erl` that records its argument vector, replaces
+    /// every `.beam` named after `-extra` with a smaller module, and exits 0.
+    ///
+    /// The other half of [`FakeOtp::with_erl_script`]. That stub changes no
+    /// bytes, which is what makes an already-stripped tree pass verification;
+    /// this one changes every module it is given, which is what makes a test
+    /// about *sizes* — `ginary.stage.json` being rewritten after stripping —
+    /// mean something. The replacement holds `Code` and no debug information,
+    /// so the verification that follows still passes.
+    #[must_use]
+    pub fn with_shrinking_erl_script(mut self) -> Self {
+        self.erl_script = Some(ErlScript::Shrinking);
+        self
+    }
+
+    /// Installs a stub `bin/erl` that records its argument vector, writes
+    /// `stderr` to standard error and exits 1.
+    ///
+    /// What a failing `beam_lib:strip_files/1` looks like from the outside: an
+    /// Erlang term on standard error and a non-zero status. The reason a test
+    /// needs it is that ginary must quote the term rather than swallow it.
+    ///
+    /// `stderr` may hold anything, apostrophes included — a `~p` of a quoted
+    /// atom such as `'Elixir.Foo'` is exactly the shape a real term takes —
+    /// because the text travels in a file beside the stub rather than inside
+    /// the shell source.
+    #[must_use]
+    pub fn with_failing_erl_script(mut self, stderr: &str) -> Self {
+        self.erl_script = Some(ErlScript::Failing(stderr.to_owned()));
+        self
+    }
+
     /// Adds an application with the given dependencies.
     #[must_use]
     pub fn app(self, name: &str, vsn: &str, applications: &[&str]) -> Self {
@@ -379,6 +508,39 @@ impl FakeOtp {
 
         create_dir_all(&root.join("bin"));
         write(&root.join("bin/no_dot_erlang.boot"), &self.boot_bytes());
+        if let Some(kind) = &self.erl_script {
+            let tail = match kind {
+                ErlScript::Succeeding => "exit 0".to_owned(),
+                ErlScript::Shrinking => {
+                    write(&root.join("bin/erl.module"), &shrunken_beam());
+                    "for arg in \"$@\"; do\n\
+                     \x20 case \"$arg\" in *.beam) cp \"$0.module\" \"$arg\" ;; esac\n\
+                     done\nexit 0"
+                        .to_owned()
+                }
+                // The term travels in a file rather than in the script's own
+                // source: an Erlang term printed with `~p` may hold an
+                // apostrophe, and interpolating one into a single-quoted shell
+                // string writes a stub that fails to parse instead of a stub
+                // that fails on purpose.
+                ErlScript::Failing(stderr) => {
+                    write(&root.join("bin/erl.stderr"), stderr.as_bytes());
+                    "cat \"$0.stderr\" >&2\nprintf '\\n' >&2\nexit 1".to_owned()
+                }
+            };
+            // Through `script::script` rather than `write_executable`, because
+            // this is the one stub a test actually execs and that helper is
+            // what waits out the ETXTBSY window a sibling thread's fork opens.
+            script(
+                &root.join("bin"),
+                "erl",
+                &format!(
+                    ": > \"$0.argv\"\n\
+                     for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$0.argv\"; done\n\
+                     {tail}"
+                ),
+            );
+        }
 
         let releases = root.join("releases");
         create_dir_all(&releases.join(self.release.to_string()));
@@ -473,6 +635,33 @@ impl FakeOtpRoot {
     /// If the boot file cannot be read.
     pub fn boot_bytes(&self) -> Vec<u8> {
         std::fs::read(self.boot_file()).expect("the fake boot file should be readable")
+    }
+
+    /// `<root>/bin/erl`, whether or not one was installed.
+    pub fn erl(&self) -> PathBuf {
+        self.root.join("bin").join("erl")
+    }
+
+    /// The argument vector the stub `bin/erl` was last called with.
+    ///
+    /// One entry per argument, in order, without the program itself. Empty
+    /// when the stub was installed and never run.
+    ///
+    /// # Panics
+    ///
+    /// If no stub `erl` was installed, or if it was and the log cannot be read
+    /// after it ran.
+    pub fn erl_argv(&self) -> Vec<String> {
+        let log = self.root.join("bin").join("erl.argv");
+        assert!(
+            self.erl().is_file(),
+            "no stub erl was installed; call FakeOtp::with_erl_script"
+        );
+        match std::fs::read_to_string(&log) {
+            Ok(text) => text.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("cannot read {}: {error}", log.display()),
+        }
     }
 
     /// `<root>/releases`.

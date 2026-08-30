@@ -34,6 +34,15 @@
 //!
 //! - [`assemble`] — the staging root, the exact tree the payload is made of.
 //!
+//! Milestone A2 adds the four modules that make the staged tree small enough
+//! to ship and say what it costs:
+//!
+//! - [`beam`] — the chunk table of a compiled BEAM module;
+//! - [`elf`] — read-only inspection of a native binary;
+//! - [`strip`] — `strip(1)` on the ELF files and `beam_lib:strip_files/1` on
+//!   the modules, each verified afterwards;
+//! - [`report`] — the size breakdown and the `needs:` line.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -42,10 +51,14 @@
 
 pub mod appfile;
 pub mod assemble;
+pub mod beam;
 pub mod cache_dir;
 pub mod cli;
 pub mod closure;
 pub mod doctor;
+pub mod elf;
 pub mod otp;
 pub mod process;
+pub mod report;
+pub mod strip;
 pub mod target;
