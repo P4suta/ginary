@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod artifact;
 pub mod bounded;
 pub mod erl;
 pub mod fake_otp;

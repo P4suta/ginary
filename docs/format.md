@@ -73,8 +73,11 @@ Everything after that is the staging root, sorted by path, one entry per file.
 reproduced. The index supersedes it.
 
 `ginary.json` and `ginary.index.json` are **reserved**: no entry after the front matter may
-carry either name. `pack` refuses a staging listing that names one, so ginary cannot write an
-artifact its own reader would refuse, and `unpack` refuses one that reaches it.
+land on a path whose **first component** is either name. That covers a repeat of the name itself
+and a *directory* carrying it — `ginary.json/nested.txt` occupies the manifest's path just as
+surely, because the reader creates the parents of every entry. `pack` refuses a staging listing
+that names one, so ginary cannot write an artifact its own reader would refuse, and `unpack`
+refuses one that reaches it.
 
 There are no directory entries for directories that hold files — the reader creates the parents
 of every entry — so a directory entry appears only for a directory that would otherwise be lost,
@@ -342,3 +345,13 @@ is a change to a *released* format: v1 has not shipped.
   failed with a bare `AlreadyExists`, which is the completeness marker surviving a rejection
   after all. Both ends now refuse the repeat by name — `unpack` with `DuplicateEntry`, `pack`
   with `ReservedName` — rather than leaving it to a file-system race between two writers.
+
+### v1, milestone A3b
+
+- **A reserved name covers the whole first path component.** Both checks compared the entire
+  path for equality, so a directory named `ginary.json` walked past them: `pack` wrote
+  `ginary.json/nested.txt` into an artifact, and `unpack` let it through to `unpack_in`, which
+  created `<dest>/ginary.json` as a directory before the manifest's own `create_new` failed on
+  it with an unattributed `AlreadyExists`. Reserving the first component instead closes both
+  ends; `DuplicateEntry` now names the path the entry would have landed on rather than the bare
+  reserved name.

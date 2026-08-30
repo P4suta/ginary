@@ -125,36 +125,41 @@ pub enum PayloadError {
         /// The name the archive has there.
         found: String,
     },
-    /// An entry after the front matter carries a name the format reserves for
-    /// entry 0 or entry 1.
+    /// An entry after the front matter lands on a path whose first component
+    /// is a name the format reserves for entry 0 or entry 1.
     ///
     /// Those two entries are read rather than unpacked, so a repeat of either
     /// name is the one path in the archive that `set_overwrite(false)` does
-    /// not already stand in front of.
+    /// not already stand in front of. A path *under* a reserved name is the
+    /// same rejection arriving one directory later: unpacking it would create
+    /// `<dest>/ginary.json` as a directory, and the manifest's own
+    /// `create_new` would then fail on it with an unattributed `AlreadyExists`.
     #[error(
-        "entry {position} of the payload is named `{name}`, which the format reserves for entry \
-         {fixed}"
+        "entry {position} of the payload lands on `{name}`, whose first path component the \
+         format reserves for entry {fixed}"
     )]
     DuplicateEntry {
         /// The zero-based position of the repeat.
         position: usize,
-        /// The reserved name it carries.
+        /// The path the entry would land on, relative to the destination.
         name: String,
-        /// The position the format fixes that name at.
+        /// The position the format fixes the reserved first component at.
         fixed: usize,
     },
-    /// The staging root holds a file whose name the payload format reserves.
+    /// The staging root holds a file whose first path component is a name the
+    /// payload format reserves.
     ///
-    /// Packing it would produce an artifact whose entry 2 or later repeats a
-    /// front-matter name, which this ginary's own reader refuses.
+    /// Packing it would produce an artifact whose entry 2 or later lands on a
+    /// front-matter name — as the file itself, or as a directory holding it —
+    /// which this ginary's own reader refuses.
     #[error(
-        "the staging root holds `{path}`, whose name the payload format reserves for its entry \
-         {fixed}"
+        "the staging root holds `{path}`, whose first path component the payload format reserves \
+         for its entry {fixed}"
     )]
     ReservedName {
-        /// The staged file whose name is reserved.
+        /// The staged file whose first path component is reserved.
         path: String,
-        /// The position the format fixes that name at.
+        /// The position the format fixes that component at.
         fixed: usize,
     },
     /// An entry is neither a regular file nor a directory.
@@ -582,34 +587,45 @@ fn check_entry_path<R: Read>(
     }
 }
 
-/// Refuses an entry after the front matter that lands on a reserved name.
-fn check_not_reserved(position: usize, destined: &str) -> Result<(), PayloadError> {
-    for (name, fixed) in RESERVED_NAMES {
-        if destined == name {
-            return Err(PayloadError::DuplicateEntry {
-                position,
-                name: name.to_owned(),
-                fixed,
-            });
-        }
-    }
-    Ok(())
+/// The position the format fixes `path`'s first component at, when that
+/// component is a reserved name.
+///
+/// The comparison is on the first component and not on the whole path, so a
+/// *directory* named `ginary.json` is refused with the file it would hold: the
+/// tar crate creates the parents of every entry, so `ginary.json/nested.txt`
+/// occupies the manifest's path just as surely as a repeat of the name does.
+fn reserved_first_component(path: &str) -> Option<usize> {
+    let first = path.split('/').next().unwrap_or(path);
+    RESERVED_NAMES
+        .into_iter()
+        .find(|(name, _)| first == *name)
+        .map(|(_, fixed)| fixed)
 }
 
-/// Refuses a staging listing that names a file the format reserves.
+/// Refuses an entry after the front matter that lands under a reserved name.
+fn check_not_reserved(position: usize, destined: &str) -> Result<(), PayloadError> {
+    match reserved_first_component(destined) {
+        Some(fixed) => Err(PayloadError::DuplicateEntry {
+            position,
+            name: destined.to_owned(),
+            fixed,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Refuses a staging listing that names a file under a reserved name.
 ///
 /// `pack` would otherwise write it as entry 2 or later under a front-matter
 /// name and produce an artifact [`unpack`] refuses, which is a build failure
 /// deferred to the machine that runs the binary.
 fn check_no_reserved_names(listing: &StageListing) -> Result<(), PayloadError> {
     for file in &listing.files {
-        for (name, fixed) in RESERVED_NAMES {
-            if file.path == name {
-                return Err(PayloadError::ReservedName {
-                    path: file.path.clone(),
-                    fixed,
-                });
-            }
+        if let Some(fixed) = reserved_first_component(&file.path) {
+            return Err(PayloadError::ReservedName {
+                path: file.path.clone(),
+                fixed,
+            });
         }
     }
     Ok(())

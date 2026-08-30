@@ -47,3 +47,11 @@ mod a3a_a_repeated_front_entry_forged_the_marker;
 mod a3a_a_zero_length_payload_looked_truncated;
 #[path = "regressions/a3a_the_second_payload_entry_was_never_checked.rs"]
 mod a3a_the_second_payload_entry_was_never_checked;
+#[path = "regressions/a3b_a_reserved_name_covered_only_the_exact_path.rs"]
+mod a3b_a_reserved_name_covered_only_the_exact_path;
+#[path = "regressions/a3b_cache_clean_app_escaped_the_root.rs"]
+mod a3b_cache_clean_app_escaped_the_root;
+#[path = "regressions/a3b_the_manifest_app_was_not_a_name.rs"]
+mod a3b_the_manifest_app_was_not_a_name;
+#[path = "regressions/a3b_the_move_aside_branch_deleted_a_complete_entry.rs"]
+mod a3b_the_move_aside_branch_deleted_a_complete_entry;

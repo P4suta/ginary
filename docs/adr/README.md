@@ -17,3 +17,5 @@ only partly built, the record says so under `Consequences`.
   comes first
 - [0007](0007-strip-elf-and-beam-debug-info.md) — Strip ELF and BEAM debug
   information, on by default
+- [0008](0008-launcher-exit-codes-and-env-protocol.md) — Launcher exit codes 121 to 125, and
+  maintenance through the environment

@@ -50,7 +50,9 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - run: cargo test --locked
+      # The launcher fault points are compiled in only under this feature; see
+      # `src/fault.rs` and `docs/dev/testing.md`.
+      - run: cargo test --locked --features fault-injection
 
   doc:
     name: Documentation

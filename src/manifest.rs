@@ -189,6 +189,23 @@ impl Manifest {
             })
         }
     }
+
+    /// Checks every field the launcher interpolates into a path.
+    ///
+    /// This is the whole of it: [`Manifest::app`], which is the `<app>`
+    /// component of every cache path, and [`Manifest::launch`], which is the
+    /// program the launcher execs and the directories it puts on the code
+    /// path. Both are strings an *artifact* chose, and both are joined onto a
+    /// directory the launcher created, so both are checked at the moment the
+    /// launcher first trusts them rather than at the moment they were written.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::UnsafePath`] naming the field and the value.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        check_name("app", &self.app)?;
+        self.launch.validate()
+    }
 }
 
 /// One file in `ginary.index.json`.
@@ -366,9 +383,15 @@ fn format_rfc3339(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Checks a bare program name: one path component, and nothing that could
-/// climb out of the directory it is looked up in.
-fn check_name(field: &str, value: &str) -> Result<(), ManifestError> {
+/// Checks a bare name: one path component, and nothing that could climb out of
+/// the directory it is joined onto.
+///
+/// Two fields are names rather than paths, and both are interpolated into a
+/// filesystem path by the launcher: `launch.program`, which is looked up in
+/// the bindir, and `app`, which is the `<app>` component of
+/// `<cache>/<app>/<key>`. `pub(crate)` because [`crate::cache`] checks the
+/// second one again at the point it creates that directory.
+pub(crate) fn check_name(field: &str, value: &str) -> Result<(), ManifestError> {
     check_path(field, value)?;
     if value.contains('/') {
         return Err(ManifestError::UnsafePath {

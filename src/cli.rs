@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::appfile::{self, AppResource};
 use crate::assemble::{self, StageOptions, StagedRoot};
 use crate::beam;
+use crate::cache;
 use crate::closure::{self, AppSet};
 use crate::doctor;
 use crate::elf::{self, ElfInfo};
@@ -45,6 +46,9 @@ pub const BEAM_FORMAT_VERSION: u32 = 1;
 /// Version of the `elf deps --json` schema.
 pub const ELF_FORMAT_VERSION: u32 = 1;
 
+/// Version of the `cache dir --json` and `cache clean --json` schemas.
+pub const CACHE_FORMAT_VERSION: u32 = 1;
+
 /// Version of the `stage --report json` schema.
 pub const SIZE_REPORT_FORMAT_VERSION: u32 = 1;
 
@@ -71,8 +75,8 @@ BEAM runtime into a single executable, so that the people who run a Gleam progra
 not need Erlang installed.
 
 Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version`, `doctor`, `appfile`, `closure`,
-`stage`, `beam` and `elf` only.",
+implemented yet; this version ships `version`, `doctor`, `cache`, `appfile`,
+`closure`, `stage`, `beam` and `elf` only.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -206,6 +210,68 @@ pub enum Command {
         #[command(subcommand)]
         command: ElfCommand,
     },
+    /// Inspect and empty the directory packaged applications extract into.
+    Cache {
+        /// What to do with the cache.
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+}
+
+/// A subcommand of `ginary cache`.
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Print the cache root and the rule that produced it.
+    ///
+    /// The same resolution a packaged application makes, so this is the
+    /// answer to "where did my artifact put its runtime": `GINARY_CACHE_DIR`,
+    /// then `XDG_CACHE_HOME/ginary`, then `HOME/.cache/ginary`, and
+    /// `${TMPDIR:-/tmp}/ginary-<uid>` when none of those is set.
+    Dir {
+        /// Print a JSON object instead of a line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove extracted runtimes, freeing the space they take.
+    ///
+    /// Nothing is lost: the next run of an artifact extracts its runtime
+    /// again. The cache root itself stays.
+    Clean {
+        /// Empty one application's directory instead of all of them.
+        #[arg(long, value_name = "NAME")]
+        app: Option<String>,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The payload of `ginary cache dir --json`.
+#[derive(Debug, Serialize)]
+pub struct CacheDirReport {
+    /// Version of this schema; see [`CACHE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The resolved cache root.
+    pub path: String,
+    /// The rule that produced it, as [`cache::Origin::describe`] names it.
+    pub origin: &'static str,
+    /// Whether this is the temporary-directory fallback.
+    pub is_fallback: bool,
+}
+
+/// The payload of `ginary cache clean --json`.
+#[derive(Debug, Serialize)]
+pub struct CacheCleanReport {
+    /// Version of this schema; see [`CACHE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The cache root the removal happened under.
+    pub root: String,
+    /// The application that was emptied, or [`None`] for all of them.
+    pub app: Option<String>,
+    /// The directories that were removed, sorted.
+    pub removed: Vec<String>,
+    /// The total size of what was removed, in bytes.
+    pub bytes: u64,
 }
 
 /// The form `ginary stage` prints its size report in.
@@ -526,7 +592,94 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Elf {
             command: ElfCommand::Deps { paths, json },
         } => write_elf_deps(paths, *json, out),
+        Command::Cache {
+            command: CacheCommand::Dir { json },
+        } => {
+            let dirs = cache::resolve(&cache::Env::from_env(), cache::current_uid());
+            write_cache_dir(&dirs, *json, out)
+        }
+        Command::Cache {
+            command: CacheCommand::Clean { app, json },
+        } => {
+            // Before the value is joined onto anything: `--app /home/u/work`
+            // and `--app ..` both name a directory outside the cache, and what
+            // this command does to a directory is remove it.
+            if let Some(app) = app.as_deref()
+                && !cache::is_app_name(app)
+            {
+                anyhow::bail!("{}", cache::AppNameRefusal(app));
+            }
+            let dirs = cache::resolve(&cache::Env::from_env(), cache::current_uid());
+            let report = cache::clean(&dirs.root, app.as_deref())
+                .with_context(|| format!("cannot clean the cache at {}", dirs.root.display()))?;
+            write_cache_clean(&dirs, app.as_deref(), &report, *json, out)
+        }
     }
+}
+
+/// Writes the resolved cache root and its provenance.
+fn write_cache_dir(
+    dirs: &cache::CacheDirs,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if json {
+        return write_json(
+            out,
+            &CacheDirReport {
+                format_version: CACHE_FORMAT_VERSION,
+                path: dirs.root.display().to_string(),
+                origin: dirs.origin.describe(),
+                is_fallback: dirs.is_fallback,
+            },
+        );
+    }
+    writeln!(
+        out,
+        "cache dir: {} (from {})",
+        dirs.root.display(),
+        dirs.origin.describe()
+    )
+    .context("cannot write the cache directory to standard output")
+}
+
+/// Writes what one `ginary cache clean` removed.
+fn write_cache_clean(
+    dirs: &cache::CacheDirs,
+    app: Option<&str>,
+    report: &cache::CleanReport,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if json {
+        return write_json(
+            out,
+            &CacheCleanReport {
+                format_version: CACHE_FORMAT_VERSION,
+                root: dirs.root.display().to_string(),
+                app: app.map(str::to_owned),
+                removed: report
+                    .removed
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+                bytes: report.bytes,
+            },
+        );
+    }
+
+    for path in &report.removed {
+        writeln!(out, "removed {}", path.display())
+            .context("cannot write the removals to standard output")?;
+    }
+    let count = report.removed.len();
+    let noun = if count == 1 {
+        "directory"
+    } else {
+        "directories"
+    };
+    writeln!(out, "total: {count} {noun}, {} bytes", report.bytes)
+        .context("cannot write the cache summary to standard output")
 }
 
 /// Turns the four stripping flags into the two booleans the module takes.

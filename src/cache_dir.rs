@@ -2,9 +2,16 @@
 //! Resolution of the ginary cache root.
 //!
 //! Bundled applications extract their runtime under this directory, so the
-//! rules must be identical in the builder and in the launcher. Resolution is a
-//! pure function over an [`EnvSnapshot`] so that every rule is unit-testable
-//! without touching the real process environment.
+//! rules must be identical in the builder and in the launcher — and they are
+//! the same code: [`resolve`] is a projection of [`crate::cache::resolve`],
+//! which is where the precedence actually lives. This module is the build
+//! side's view of it, over the three variables `ginary doctor` reports.
+//!
+//! The one deliberate difference is the ending. The launcher falls back to
+//! `${TMPDIR:-/tmp}/ginary-<uid>` when nothing is set, because a packaged
+//! application has to start anyway; the builder answers
+//! [`CacheDirError::Unresolved`], because a tool that silently wrote its
+//! output into `/tmp` would be a tool nobody could find the output of.
 //!
 //! The precedence is:
 //!
@@ -14,11 +21,10 @@
 //! 3. `HOME` — `.cache/ginary` is appended.
 //!
 //! Platform-specific bases (`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on
-//! Windows) and the temporary-directory fallback are later milestones; today
-//! every host follows the rules above.
+//! Windows) are a later milestone; today every host follows the rules above.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The environment variables cache resolution reads.
 ///
@@ -92,36 +98,34 @@ pub enum CacheDirError {
 /// working directory. A relative `XDG_CACHE_HOME` is ignored, as the XDG base
 /// directory specification requires.
 pub fn resolve(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
-    if let Some(value) = non_empty(env.ginary_cache_dir.as_deref()) {
-        return Ok(CacheDir {
-            path: PathBuf::from(value),
-            source: Source::GinaryCacheDir,
-        });
-    }
-
-    if let Some(value) = non_empty(env.xdg_cache_home.as_deref()) {
-        let base = Path::new(value);
-        if base.is_absolute() {
-            return Ok(CacheDir {
-                path: base.join("ginary"),
-                source: Source::XdgCacheHome,
-            });
+    // One implementation of the precedence, in `cache::resolve`. This is its
+    // build-side projection: the same three rules, and an error where the
+    // launcher has a `${TMPDIR}` fallback, because a build tool that silently
+    // wrote into `/tmp` would be a build tool nobody could find the output of.
+    let mut pairs: Vec<(OsString, OsString)> = Vec::new();
+    for (name, value) in [
+        (crate::cache::GINARY_CACHE_DIR_VAR, &env.ginary_cache_dir),
+        (crate::cache::XDG_CACHE_HOME_VAR, &env.xdg_cache_home),
+        (crate::cache::HOME_VAR, &env.home),
+    ] {
+        if let Some(value) = value {
+            pairs.push((OsString::from(name), value.clone()));
         }
     }
 
-    if let Some(value) = non_empty(env.home.as_deref()) {
-        return Ok(CacheDir {
-            path: Path::new(value).join(".cache").join("ginary"),
-            source: Source::Home,
-        });
-    }
-
-    Err(CacheDirError::Unresolved)
-}
-
-/// Returns the value unless it is absent or empty.
-fn non_empty(value: Option<&std::ffi::OsStr>) -> Option<&std::ffi::OsStr> {
-    value.filter(|value| !value.is_empty())
+    // The uid only ever reaches the fallback root, and the fallback is exactly
+    // the case this function refuses, so its value cannot be observed.
+    let resolved = crate::cache::resolve(&crate::cache::Env::from_pairs(pairs), 0);
+    let source = match resolved.origin {
+        crate::cache::Origin::GinaryCacheDir => Source::GinaryCacheDir,
+        crate::cache::Origin::XdgCacheHome => Source::XdgCacheHome,
+        crate::cache::Origin::Home => Source::Home,
+        crate::cache::Origin::Fallback => return Err(CacheDirError::Unresolved),
+    };
+    Ok(CacheDir {
+        path: resolved.root,
+        source,
+    })
 }
 
 #[cfg(test)]

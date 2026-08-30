@@ -9,20 +9,22 @@ nothing today.
 
 | variable | status | effect |
 |---|---|---|
-| `GINARY_CACHE_DIR` | implemented (resolution only) | Overrides the cache root. Resolution and precedence are implemented and reported by `ginary doctor`; nothing extracts into it yet. |
-| `GINARY_DEBUG=1` | planned | Human-readable progress on stderr, prefixed `ginary[debug]:`: the resolved self path, the trailer, the cache decision, the argv and env difference handed to the runtime, and per-phase timings. |
-| `GINARY_TRACE=<file\|dir\|1>` | planned | JSON Lines trace, one object per phase. `1` writes `<app_dir>/trace/<timestamp>-<pid>.jsonl` and keeps the last 20 files. The `LaunchPlan` is always recorded immediately before `execve`, so `ginary trace show <file>` can print a copy-pasteable `env -i ... erlexec ...` command that reproduces the launch. |
-| `GINARY_SUPERVISE=1` | planned | Spawns the runtime and waits instead of calling `execve`, which is the code path Windows uses anyway. Records the exit status, the signal, the elapsed time and a summary of any `erl_crash.dump`. |
-| `GINARY_CMD=<command>` | planned | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags. Values: `inspect`, `directory`, `extract-only`, `selftest` (runs `erlexec -eval 'halt(0)'` against the extracted runtime), `uninstall`. |
-| `GINARY_FAULT=<point>[:<action>]` | planned | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds. Points: `after-extract:pause`, `rename:eexist`, `write:enospc`, `exec:eacces`, `trailer:corrupt`. |
-| `GINARY_ERL_FLAGS` | planned | Extra emulator flags appended to the manifest's, for one run. |
+| `GINARY_CACHE_DIR` | implemented | Overrides the cache root outright, and is used verbatim — relative paths included. The escape hatch for a read-only or `noexec` home directory. `ginary cache dir` prints what it resolves to and why. |
+| `GINARY_DEBUG=1` | implemented | Human-readable progress on stderr, prefixed `ginary[debug]: `, one line per phase with its facts and its elapsed time: `start`, `read_manifest`, `cache_sweep`, `cache_tmp`, `extract`, `chmod`, `sync`, `rename` or `cache_hit`, `preflight_retry`, `exec`. |
+| `GINARY_TRACE=<file>` | implemented | JSON Lines, one object per phase, appended to the file: `{"t_us":..,"phase":..,"kv":{..}[,"elapsed_us":..]}`. The whole `LaunchPlan` is recorded immediately before `execve`, so the launch that failed can be reproduced from the trace. A file that cannot be opened costs one warning and the run carries on. |
+| `GINARY_SUPERVISE=1` | implemented | Spawns the runtime and waits instead of calling `execve`, which is the code path Windows will use anyway. The exit code is mirrored; a child killed by a signal exits `128 + signo`. Records the exit status, the signal and the elapsed time, and if an `erl_crash.dump` appeared during the run, prints its `Slogan` line. |
+| `GINARY_CMD=<command>` | implemented | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags. `directory` prints the cache entry the artifact would use and creates nothing; `extract-only` extracts and prints the entry without launching; `inspect` prints the manifest, the payload geometry and the digest as one JSON object. Any other value is a usage error and exits 2. `selftest` and `uninstall` are still planned. |
+| `GINARY_ERL_FLAGS` | implemented | Extra emulator flags for one run, split on ASCII whitespace and placed after the manifest's own flags and before `-eval`. |
+| `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `launcher:panic` (panic on the launcher path, so the panic hook has something to catch). |
 | `GINARY_OFFLINE=1` | planned | The builder refuses to reach the network and lists what it would have fetched. |
 | `GINARY_REQUIRE_TOOLCHAIN=1` | implemented (convention) | Turns a skipped toolchain-gated test into a failure. See [testing.md](testing.md). |
 
-The launcher deliberately **removes** `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`,
-`ERL_OTP*_FLAGS`, `ERL_ROOTDIR` and `ERL_EPMD_PORT` before starting the runtime (planned). If a
-packaged application behaves differently from a `gleam run`, that scrubbing is the first thing
-to check.
+The launcher **removes** `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`, `ERL_ROOTDIR`,
+`ERL_EPMD_PORT` and every variable whose name begins `ERL_OTP` and ends `_FLAGS` before starting
+the runtime. If a packaged application behaves differently from a `gleam run`, that scrubbing is
+the first thing to check. It **sets** `ROOTDIR`, `BINDIR`, `EMU=beam` and `PROGNAME`
+unconditionally, and `HOME` and `ERL_CRASH_DUMP` only when the caller has not: a `HOME` you
+exported is yours.
 
 ## Diagnosing the environment today
 
@@ -165,24 +167,41 @@ and the strip account under `strip` — and the third asks for an account there 
 print beside. The conflict is with the *value*: `--report text` is the default and sits happily
 next to either flag.
 
-## Reproducing a launch by hand (planned)
+## Reproducing a launch by hand
 
-Once the launcher exists, the intended loop is:
+`GINARY_TRACE` exists so that a bug report carries the launch that failed rather than a
+description of it. The last `exec` record holds the program, the whole argument vector and the
+environment difference, each as a JSON array encoded in a string:
 
 ```console
-$ GINARY_TRACE=1 ./my_gleam_app
-$ ginary trace show ~/.cache/ginary/my_gleam_app/trace/*.jsonl
-env -i HOME=/tmp ROOTDIR=... BINDIR=... EMU=beam PROGNAME=my_gleam_app \
-  ~/.cache/ginary/my_gleam_app/<key>/erts-17.0.5/bin/erlexec \
-  -boot .../bin/no_dot_erlang -noshell +B -start_epmd false \
-  -pa .../lib/my_gleam_app/ebin -eval "'my_gleam_app@@main':run('my_gleam_app')" -extra
+$ GINARY_TRACE=/tmp/t.jsonl ./my_gleam_app --name world
+$ tail -1 /tmp/t.jsonl | jq -r '.kv.argv | fromjson | @sh'
+'-boot' '/home/u/.cache/ginary/my_gleam_app/8f2a.../bin/no_dot_erlang' '-noshell' '+B' \
+'-start_epmd' 'false' '-pa' '.../lib/my_gleam_app/ebin' '-eval' "'my_gleam_app@@main':run(...)" \
+'-extra' '--name' 'world'
+$ tail -1 /tmp/t.jsonl | jq -r '.kv.program, (.kv.env_set|fromjson[]), (.kv.env_remove|fromjson[])'
 ```
 
-and, to keep the intermediate tree:
+Those three pieces are a runnable `env -i` command, and nothing is elided: every `-pa` is in the
+record, which is what makes the reproduction complete rather than indicative.
+
+The three questions that come before it have their own commands, and none of them needs the
+application to start:
 
 ```console
-$ ginary build --keep-staging --staging-dir /tmp/stage
-$ ginary stage --out /tmp/stage
+$ GINARY_CMD=directory ./my_gleam_app      # where would this artifact extract to?
+/home/u/.cache/ginary/my_gleam_app/8f2a1c3d5e7b9a02
+$ GINARY_CMD=inspect ./my_gleam_app | jq .manifest.launch
+$ GINARY_CMD=extract-only ./my_gleam_app   # extract, and stop
+$ GINARY_DEBUG=1 ./my_gleam_app            # and the second run says `cache_hit`
+$ ginary cache dir                         # the same resolution, from the build tool
+$ ginary cache clean --app my_gleam_app    # throw the entry away and start cold
+```
+
+To keep the intermediate tree instead:
+
+```console
+$ ginary stage --out /tmp/stage ...
 ```
 
 ## Reading a crash dump (planned)
@@ -193,6 +212,23 @@ it, so a crash never litters the working directory. `ginary crashdump <path>` su
 
 ## Exit codes
 
-Codes 121 to 125 come from the launcher, not from the application; they are listed in
-[../format.md](../format.md). The CLI prints `error: ...` followed by one `  caused by: ...`
-line per cause and exits 1. A clap usage error exits 2.
+Codes 121 to 125 come from the launcher, never from the application. Every one of them is
+accompanied by exactly one line on standard error beginning `ginary: `, and some carry a second
+line beginning `hint: `.
+
+| code | meaning | what to look at |
+|---|---|---|
+| 121 | the running executable could not be opened, or ginary panicked | `/proc` not mounted, or a bug: a panic prints `ginary: internal error (this is a bug in ginary): ...` |
+| 122 | the trailer is unusable, or the manifest is a format this build does not read | the file was truncated, padded, or built by a newer ginary. A file with *no* magic at all is not this: it is the ginary command line tool |
+| 123 | the payload is corrupt | the digest does not match, or an entry is a symlink, a device or a path that leaves the root. Nothing is left in the cache |
+| 124 | the cache could not be written or read | permissions, a full disk, or an extracted runtime that is still incomplete after one repair. The message names the path and, for a failed preflight, the file |
+| 125 | the runtime would not start | `execve` failed. `ENOENT` on a program that is on disk means its `ld-linux` or one of its libraries is missing; `EACCES` on a program that is executable means the cache is on a `noexec` mount — set `GINARY_CACHE_DIR` |
+
+A packaged application's *own* exit code passes through untouched, including 0 and including
+any of 121 to 125 it chooses to leave: the launcher is gone by then, replaced by the runtime.
+
+The CLI half prints `error: ...` followed by one `  caused by: ...` line per cause and exits 1.
+A clap usage error, and an unrecognised `GINARY_CMD`, exit 2.
+
+ADR [0008](../adr/0008-launcher-exit-codes-and-env-protocol.md) records why the numbers start at
+121 and why maintenance travels in the environment.

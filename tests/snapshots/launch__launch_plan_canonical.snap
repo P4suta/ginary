@@ -1,0 +1,36 @@
+---
+source: tests/launch.rs
+expression: "scrub(&render(&plan),\n&[(Path::new(ROOT), \"<root>\"), (Path::new(DUMPS), \"<app-dir>\")])"
+---
+program: <root>/erts-17.0.5/bin/erlexec
+argv:
+  -boot
+  <root>/bin/no_dot_erlang
+  -noshell
+  +B
+  -start_epmd
+  false
+  -pa
+  <root>/lib/hello/ebin
+  -pa
+  <root>/lib/stdlib-8.0.3/ebin
+  +fnu
+  -eval
+  'hello@@main':run('hello')
+  -extra
+  --name
+  world
+set:
+  ROOTDIR=<root>
+  BINDIR=<root>/erts-17.0.5/bin
+  EMU=beam
+  PROGNAME=hello
+  HOME=<root>
+  ERL_CRASH_DUMP=<app-dir>/erl_crash.dump
+remove:
+  ERL_LIBS
+  ERL_FLAGS
+  ERL_AFLAGS
+  ERL_ZFLAGS
+  ERL_ROOTDIR
+  ERL_EPMD_PORT

@@ -363,6 +363,7 @@ dependencies = [
  "object",
  "predicates",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

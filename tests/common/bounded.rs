@@ -17,7 +17,7 @@
 //! stop; and a child that outlives its budget is killed and reported.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -42,13 +42,33 @@ const DRAIN_GRACE: Duration = Duration::from_secs(10);
 /// [`DRAIN_GRACE`] of its exit, which means something the child left running
 /// still holds the pipes.
 pub fn run_bounded(command: &mut Command, budget: Duration, what: &str) -> Output {
-    let mut child = command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|error| panic!("cannot run {what}: {error}"));
+    wait_bounded(child, budget, what)
+}
 
+/// Waits for an already-spawned `child` within `budget`, capturing both output
+/// streams.
+///
+/// The half of [`run_bounded`] that a caller which had to spawn the child
+/// itself still needs. `tests/common/artifact.rs` is one: a launcher spawn
+/// retries on `ETXTBSY` before there is a child to wait for, and
+/// `tests/launcher.rs` starts eight children at once and waits for them
+/// afterwards. Neither may wait forever, because a launcher that deadlocks on
+/// the cache is exactly the bug these tests exist to catch and a suite that
+/// hung would report it as a timeout with no diagnosis.
+///
+/// `child` must have been spawned with both output streams piped; a stream
+/// that was not is read as empty.
+///
+/// # Panics
+///
+/// As [`run_bounded`].
+pub fn wait_bounded(mut child: Child, budget: Duration, what: &str) -> Output {
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
 

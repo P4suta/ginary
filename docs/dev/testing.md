@@ -15,7 +15,7 @@
 | `tests/appfile.rs` | the `.app` reader: the term grammar, `Term`'s re-serialisation, `AppResource`, the error positions, and every fixture under `tests/fixtures/app/` |
 | `tests/otp.rs` | `inspect_root` against fake roots that are whole and broken, `boot_lib_dirs`, and `discover` with and without an override |
 | `tests/closure.rs` | the closure over fake shipment and OTP trees: seeds, edges, resolution order, determinism, the three errors, `explain` and `chain`, two property tests, and one gated run over a real shipment |
-| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, `stage` as a table, JSON, `--explain`, `--force` and its two usage errors, and the `otp` field `doctor` now reports |
+| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, `stage` as a table, JSON, `--explain`, `--force` and its two usage errors, the `otp` field `doctor` now reports, and `cache dir`/`cache clean` over a cache root pinned with `GINARY_CACHE_DIR` |
 | `tests/assemble.rs` | the staging root over fake trees: the exact layout, every exclusion, junk removal, modes, symlinks, the error paths, the listing, and determinism |
 | `tests/stage_run.rs` | toolchain-gated: stage the `hello_ffi` fixture against the host OTP, strip it, measure it, and boot it through `erlexec` |
 | `tests/beam.rs` | the IFF chunk reader: the grammar over hand-built bytes, the shape a compiler emits over three real modules, and the never-panic properties |
@@ -26,6 +26,15 @@
 | `tests/manifest.rs` | `ginary.json` and `ginary.index.json`: the wire field order, the unknown-key round trip, `check_version`, the `launch` path rules, `created_at`, and the index over a staging root |
 | `tests/payload.rs` | the payload: deterministic packing, the round trip with modes, eight hand-built malicious archives, the two streaming reads, and three never-panic properties |
 | `tests/diag.rs` | the recorder through injected sinks: both output shapes, event order, elapsed time, and the four ways it stays off |
+| `src/error.rs` unit tests | the five exit codes, the message of each variant, the `hint:` second line, and the panic-hook line |
+| `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic |
+| `src/cache.rs` unit tests | the `Env` snapshot, the four resolution rules, the `TMPDIR` fallback and the entry path |
+| `src/fault.rs` unit tests | the `<point>[:<action>]` grammar, and that nothing is armed without the feature |
+| `src/launcher.rs` unit tests | the three `GINARY_CMD` values, and that nothing near them is recognised |
+| `tests/launch.rs` | the pure plan: the argument vector in order, `GINARY_ERL_FLAGS`, non-UTF-8 arguments, the six set variables, the removal list and its `ERL_OTP*_FLAGS` family, the two refusals, and every preflight shape |
+| `tests/cache.rs` | resolution and creation, the fallback warning, the ten extraction steps against a real payload, the sweep's three pid cases, and `clean` |
+| `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts and the three fault points |
+| `tests/artifact_real.rs` | toolchain-gated: one real artifact, assembled by hand out of the fixture and run with a cleared environment |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -130,6 +139,39 @@ trees rather than fake ones: the first copies a fixture Gleam project and export
 boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that
 neither can hang the suite; it is the test-side counterpart of `src/process.rs`, which it cannot
 call because that function takes neither an environment nor a working directory.
+`tests/common/artifact.rs` is what A3b added, and it is the only helper that builds a whole
+*artifact*: a staging root whose `erts-<vsn>/bin` programs are `/bin/sh` scripts, the real
+`payload::pack` over it, and this test run's own `ginary` binary with that payload and a real
+trailer appended. The launch program's stub prints one `env:<NAME>=<VALUE>` line for every
+variable the launch contract names — `<unset>` for one that is absent, so an absent `ERL_LIBS`
+cannot be confused with a stub that never ran — then one `argv:` line per argument, and exits 7.
+Seven is not zero on purpose: "the exit code is mirrored" has to be a claim about a number
+nothing else in the system produces. The stub also answers `--exit N`, `--signal N` (it kills
+itself, so a supervised run has a signal to turn into `128 + signo`) and `--dump` (it writes
+`$ERL_CRASH_DUMP` with a `Slogan:` line in it, which is all `launch::supervise` reads). Everything the launcher decides is therefore readable on
+standard output, and the launcher's whole contract is testable on a machine with no Erlang at
+all. `SyntheticArtifact` also carries the four ways an artifact can be broken — `break_magic`,
+`break_geometry`, `break_payload`, `truncate` — because each one is a different numbered exit
+code and a test that broke the file by hand would be a test that broke it slightly differently
+each time. `truncate` takes its bytes out of the *payload* and leaves the trailer at the end,
+which is deliberate and was corrected during A3b: shortening the file from its end takes the
+trailer with it, and `docs/format.md` rule 2 makes what is left the ginary command line tool
+rather than a damaged artifact. The fault worth a test is the one that still carries a trailer
+and no longer matches it.
+
+`Runner::spawn` and `Runner::output` retry while the kernel answers `ETXTBSY`. That is a
+property of the harness and not of the launcher: cargo runs these tests as threads of one
+process, a `fork` for one test's spawn inherits the descriptor another thread is writing the
+next artifact through, and until that child reaches `execve` the file is still open for writing
+(rust-lang/rust#39189). Serialising the suite would hide a race the launcher does not have; the
+retry is bounded at ten seconds, after which `ETXTBSY` is reported like any other failure.
+
+The *wait* is bounded too. `Runner::output` and the eight-way concurrency test go through
+`bounded::wait_bounded`, the half of `run_bounded` that takes an already-spawned child, with a
+budget of `artifact::RUN_BUDGET`. A launcher that deadlocks on the cache is precisely what these
+tests exist to catch, and an unbounded `wait_with_output` would report it as a stalled job with
+no diagnosis rather than as a failed test.
+
 `tests/common/payload.rs` is what A3a added, and it builds no tree at all in the `FakeOtp` sense:
 it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
 (`staging_tree`), and the two instruments those tests read through, `CountingReader` and
@@ -431,6 +473,15 @@ is `ReservedName` rather than an artifact ginary itself could not read. The gene
 worth more than the fix: an entry a reader handles specially is an entry the reader's generic
 defences have stopped covering, so it needs its own.
 
+**A name check that compares the whole path is a name check with a hole in it.** The first
+version of that fix matched `ginary.json` exactly, and a *directory* of that name walked through
+both ends: `pack` emitted `ginary.json/nested.txt`, and `unpack` created `<dest>/ginary.json` as
+a directory on the way to the nested file, so the manifest's `create_new` failed on it with the
+same unattributed `AlreadyExists` the reservation existed to end.
+`tests/regressions/a3b_a_reserved_name_covered_only_the_exact_path.rs` pins the first-component
+rule at both ends, including the `./` shape, and asserts the destination holds nothing but the
+one front-matter entry that is legitimately unpacked.
+
 ## The `Diag` sink-injection pattern
 
 `src/diag.rs` writes to standard error and to a file, and neither is assertable from inside a test
@@ -617,6 +668,18 @@ Planned test categories:
 - **Fuzzing** — four targets exist; see the fuzzing section above. `elf_inspect` is the one from
   the plan's list that does not, because `object` is doing the parsing there and fuzzing it would
   measure that crate rather than this one.
+- **Fault injection** — `src/fault.rs`, behind the `fault-injection` Cargo feature. It is off by
+  default, so a release artifact holds none of the points and never reads `GINARY_FAULT`;
+  `mise run test`, `mise run test:fast`, `mise run test:nextest` and the CI test job all pass
+  `--features fault-injection`. The points are `after-extract:pause` (sleep with the temporary
+  tree on disk, so a test can `SIGKILL` the process and assert the next run sweeps it),
+  `rename:eexist` (the losing side of the extraction race), `unpack:corrupt` (a payload that
+  changes under the reader) and `launcher:panic` (a panic on the launcher path). The first three
+  are about *timing*, which is why no artifact a test can build reaches them, and each is paired
+  with an assertion that the **next** run recovers: a fault that is only shown to fail is half a
+  test. The fourth is about a promise: `main` installs a panic hook so that a bug in ginary is
+  one attributed line and exit 121 rather than a Rust backtrace, and a hook nothing can trigger
+  is a hook no test can check.
 - **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job.
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table

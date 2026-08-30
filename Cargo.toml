@@ -12,6 +12,12 @@ readme = "README.md"
 keywords = ["gleam", "erlang", "beam", "packaging", "single-binary"]
 categories = ["command-line-utilities", "development-tools"]
 
+[features]
+# Fault injection for the launcher tests. Off by default, so a release build
+# holds none of the points and never reads `GINARY_FAULT`; `mise run test` and
+# CI turn it on. See `src/fault.rs` and `docs/dev/testing.md`.
+fault-injection = []
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
@@ -21,6 +27,13 @@ flate2 = { version = "1.1.10", default-features = false, features = ["rust_backe
 # mismatch. Writing it by hand is four lines that nothing would test.
 hex = "0.4.3"
 object = { version = "0.40.0", default-features = false, features = ["read", "elf", "std"] }
+# Two system calls the launcher cannot do without and the standard library does
+# not expose: `getuid` for the `${TMPDIR}/ginary-<uid>` fallback, and `syncfs`
+# for the one-call durability barrier before a cache entry is renamed into
+# place. rustix wraps both safely, so the crate keeps `#![forbid(unsafe_code)]`
+# rather than opening an `unsafe` block on the launcher path; on Linux it uses
+# its own raw syscall backend, so nothing new is dynamically linked.
+rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 # The payload's checksum, the trailer's `sha256` and every entry of the index.

@@ -17,7 +17,12 @@ run = [
 
 [tasks.test]
 description = "Run the whole suite: unit, integration and documentation tests"
-run = "cargo test"
+# `--features fault-injection` compiles the launcher's named fault points in.
+# They are off by default so that a release artifact holds none of them and
+# never reads `GINARY_FAULT`; three of the launcher's guarantees — the sweep of
+# a killed extraction, the lost rename race, a payload that changes under the
+# reader — are about timing and cannot be reached any other way.
+run = "cargo test --features fault-injection"
 
 [tasks."test:fast"]
 description = "Run only the tests that need no external toolchain"
@@ -28,11 +33,11 @@ description = "Run only the tests that need no external toolchain"
 # `doctor`, which probes whatever is on `PATH`, bounded by
 # `doctor::PROBE_TIMEOUT`; see `docs/dev/testing.md`. The remaining targets are
 # outside this task because each holds a handful of `require_tools`-gated tests.
-run = "cargo test --lib --bins --test smoke_cli --test regressions"
+run = "cargo test --features fault-injection --lib --bins --test smoke_cli --test regressions"
 
 [tasks."test:nextest"]
 description = "Run the suite under nextest (no doc tests: nextest does not run them)"
-run = "cargo nextest run"
+run = "cargo nextest run --features fault-injection"
 
 [tasks.deny]
 description = "Check licences, advisories, bans and sources with cargo-deny"

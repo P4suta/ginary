@@ -1299,3 +1299,140 @@ fn stage_rewrites_the_listing_so_its_sizes_match_the_stripped_tree() {
         "the stub has to have changed the tree, or this test asserts nothing"
     );
 }
+
+// ------------------------------------------------------------ ginary cache --
+
+/// A `ginary` whose cache resolution is pinned to `root` and nothing else.
+///
+/// Every other variable is cleared: a cache test that read the developer's own
+/// `XDG_CACHE_HOME` would empty their cache and pass while doing it.
+fn ginary_with_cache(root: &Path) -> Command {
+    let mut command = ginary();
+    command.env_clear().env("GINARY_CACHE_DIR", root);
+    command
+}
+
+/// Plants `<root>/<app>/<key>/ginary.json`, the shape one complete entry has.
+fn plant_entry(root: &Path, app: &str, bytes: &[u8]) {
+    let entry = root.join(app).join("0123456789abcdef");
+    std::fs::create_dir_all(&entry).expect("create a cache entry");
+    std::fs::write(entry.join("ginary.json"), bytes).expect("write the marker");
+}
+
+#[test]
+fn cache_dir_prints_the_root_and_the_rule_that_produced_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "dir"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    assert_eq!(
+        stdout,
+        format!("cache dir: {} (from GINARY_CACHE_DIR)\n", root.display()),
+        "the provenance is the point: a path without it does not say why it is that path"
+    );
+}
+
+#[test]
+fn cache_dir_json_carries_the_provenance_and_the_fallback_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "dir", "--json"])
+        .assert()
+        .success();
+    let value: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("`cache dir --json` is JSON");
+    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["path"], Value::from(root.display().to_string()));
+    assert_eq!(value["origin"], Value::from("GINARY_CACHE_DIR"));
+    assert_eq!(value["is_fallback"], Value::from(false));
+}
+
+#[test]
+fn cache_dir_reports_the_temporary_fallback_when_nothing_is_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut command = ginary();
+    command.env_clear().env("TMPDIR", dir.path());
+    let assert = command.args(["cache", "dir", "--json"]).assert().success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+    assert_eq!(value["origin"], Value::from("TMPDIR fallback"));
+    assert_eq!(value["is_fallback"], Value::from(true));
+    assert!(
+        value["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with(&dir.path().display().to_string())),
+        "the fallback must live under TMPDIR, and it is {:?}",
+        value["path"]
+    );
+}
+
+#[test]
+fn cache_clean_empties_one_application_and_leaves_the_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    plant_entry(&root, "hello", b"{}");
+    plant_entry(&root, "other", b"{}");
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "clean", "--app", "hello"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains(&format!("removed {}", root.join("hello").display())),
+        "the removal must name what went, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("total: 1 directory, 2 bytes"),
+        "the summary must count what went, and it said:\n{stdout}"
+    );
+    assert!(!root.join("hello").exists());
+    assert!(
+        root.join("other").is_dir(),
+        "`--app` must not empty the whole cache"
+    );
+}
+
+#[test]
+fn cache_clean_without_an_application_empties_the_root_and_keeps_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    plant_entry(&root, "hello", b"{}");
+    plant_entry(&root, "other", b"{}");
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "clean", "--json"])
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["app"], Value::Null);
+    assert_eq!(value["bytes"], Value::from(4));
+    assert_eq!(
+        value["removed"],
+        Value::from(vec![
+            root.join("hello").display().to_string(),
+            root.join("other").display().to_string(),
+        ])
+    );
+    assert!(root.is_dir(), "the cache root itself stays");
+    assert_eq!(std::fs::read_dir(&root).expect("list the root").count(), 0);
+}
+
+#[test]
+fn cache_clean_of_a_cache_that_was_never_created_removes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("absent");
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "clean"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    assert_eq!(stdout, "total: 0 directories, 0 bytes\n");
+    assert!(!root.exists(), "cleaning must not create the root");
+}

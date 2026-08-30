@@ -21,7 +21,8 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)* or *(A2)* exist; the rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)* or *(A3b)* exist; the rest
+are the plan.
 
 ```
 build side
@@ -39,28 +40,29 @@ build side
   elf.rs           (A2) read-only inspection of a native binary
   strip.rs         (A2) `strip` on ELF, `beam_lib:strip_files` on .beam
   report.rs        (A2) size and dependency accounting
-  manifest.rs      ginary.json
-  payload.rs       deterministic tar + zstd; safe unpack
-  trailer.rs       the 64-byte trailer
+  manifest.rs      (A3a) ginary.json and ginary.index.json
+  payload.rs       (A3a) deterministic tar + zstd; safe unpack
+  trailer.rs       (A3a) the 64-byte trailer
   stub.rs          finds and validates the target's ginary binary
   sign_macos.rs    Mach-O section injection and ad-hoc signing
   verify.rs        re-hash, list dynamic dependencies, report issues
   bundle.rs        orchestrates the above
 
 launcher side
-  selfexe.rs       opens the running executable by inode
-  cache.rs         resolve, clean, extract, rename
-  launch.rs        builds the LaunchPlan (argv and env)
-  launcher.rs      the launcher-mode entry point
-  diag.rs          phase timing, GINARY_DEBUG, GINARY_TRACE
+  selfexe.rs       (A3b) opens the running executable by inode
+  cache.rs         (A3b) resolve, sweep, extract, rename, clean
+  launch.rs        (A3b) builds the LaunchPlan (argv and env), execs or supervises
+  launcher.rs      (A3b) the launcher-mode entry point and GINARY_CMD
+  diag.rs          (A3a) phase timing, GINARY_DEBUG, GINARY_TRACE
+  fault.rs         (A3b) named fault points, `fault-injection` feature only
 
 shared
   target.rs        (A0) <os>-<arch>[-<libc>]
-  cache_dir.rs     (A0) GINARY_CACHE_DIR > XDG_CACHE_HOME > HOME
+  cache_dir.rs     (A0) the build side's view of `cache::resolve`
   doctor.rs        (A0) toolchain and environment probing
   cli.rs           (A0) clap definitions and dispatch
   process.rs       (A1a) PATH search and a child process under a timeout
-  error.rs         exit-code mapping
+  error.rs         (A3b) LauncherError and the exit codes 121 to 125
 ```
 
 ## Build data flow
@@ -365,41 +367,85 @@ prints and says which file was odd.
 
 ## Launch data flow
 
+One packaged application, from `execve` to `execve`. Every arrow is a step the launcher takes
+before the Gleam code runs, and every dotted branch is a numbered exit that the application
+itself could never have produced.
+
 ```
-./my_gleam_app arg1 arg2
+$ ./my_gleam_app --name world
         |
         v
-  selfexe::open_self  ->  trailer::read_from  ->  payload::locate
+  main()
+    selfexe::open_self()            /proc/self/exe first: an artifact renamed or unlinked
+        |                           while it starts is still readable by inode
+        |  Err ......................> 121  ginary: cannot open the running executable
+        v
+    trailer::read_from(&file)       the last 64 bytes
+        |  Err ......................> 122  ginary: <what is wrong with the file>
+        |  Ok(None) .................> cli::run()   no magic: this copy is the build tool
+        v
+    error::install_panic_hook()     launcher path only; a panic becomes one line and 121
         |
         v
-  read entry 0 of the payload -> manifest::Manifest
+  launcher::run(file, path, trailer)
+    Diag::from_env                  GINARY_DEBUG=1 -> stderr, GINARY_TRACE=<file> -> JSONL
+    Env::from_env                   one snapshot; every decision below is a pure function of it
         |
+        +-- GINARY_CMD set? --------> directory     resolve only, print <cache>/<app>/<key>, 0
+        |                             extract-only  extract, print the entry, 0
+        |                             inspect       manifest + geometry + sha256 as JSON, 0
+        |                             anything else usage on stderr, 2
         v
-  cache_dir::resolve -> <cache>/<app>/<sha256[:16]>
+    payload::read_manifest          seek to payload_offset, read entry 0, stop
+        |                           a format_version this build does not read is 122, not 123
+        |                           Manifest::validate: `app` and every launch path is one
+        |                           relative component, before either reaches a join -> 122
+        v
+    cache::prepare                  GINARY_CACHE_DIR > XDG_CACHE_HOME/ginary > HOME/.cache/ginary
+        |                           EACCES/EROFS -> ${TMPDIR:-/tmp}/ginary-<uid> + one warning
+        |                           the fallback root is mkdir 0700, or checked: a directory,
+        |                           owned by this uid, that no group or other may write to
+        v
+    cache::ensure_extracted         the ten steps of ADR 0005
+        |   1  <key>/ginary.json a regular file?  -> hit, done
+        |   2  sweep .tmp-<pid>/.corrupt-<pid> whose /proc/<pid> is gone
+        |   3  mkdir .<key>.tmp-<pid>            (<app> dir is 0700)
+        |   4  seek -> Take(len) -> sha256 -> zstd -> tar
+        |   5  refuse symlinks, hardlinks, devices, `..`, absolute paths
+        |   6  digest must match the trailer   -> else remove tmp, 123
+        |   7  chmod 0755 under <bindir>
+        |   8  syncfs(tmp), else per-file sync_all; then fsync(<app> dir)
+        |   9  rename(tmp, <key>)  EEXIST/ENOTEMPTY/EISDIR -> a concurrent process won:
+        |                          verify its ginary.json, remove tmp, use its entry
+        |  10  no other marker: the rename is the completion marker
+        v
+    launch::preflight               erlexec, beam.smp, erl_child_setup, inet_gethost present
+        |                           and u+x; <boot>.boot present
+        |  Err -> remove the entry, extract once more, check again
+        |         still Err ........> 124  ginary: the runtime cache at <entry> is unusable: ...
+        v
+    launch::plan                    pure: program, argv, env set, env remove
+        |                           argv: -boot -noshell +B -start_epmd false -pa... <erl_flags>
+        |                                 $GINARY_ERL_FLAGS -eval -extra <the user's arguments>
+        v
+    Diag records the whole plan     argv and the environment difference, as JSON arrays
         |
-   hit? -+---- yes ---------------------------+
-        |                                     |
-        no                                    |
-        v                                     |
-  extract into .<key>.tmp-<pid>               |
-  verify SHA-256, then rename() (atomic)      |
-        |                                     |
-        +-------------------+-----------------+
-                            v
-                     launch::preflight
-             erlexec, beam.smp, erl_child_setup,
-             inet_gethost present and executable
-                            |
-                            v
-                     launch::plan -> LaunchPlan { program, argv, env }
-                            |
-                            v
-                   execve (the process is replaced)
+        +-- GINARY_SUPERVISE=1 ----> launch::supervise  spawn, wait, mirror the code
+        |                                               (signal -> 128 + signo)
+        v
+    launch::exec                    execve: this process becomes the runtime
+           Err ......................> 125  ginary: cannot start <program>: ...
+                                           + hint: ld-linux missing, or a noexec cache
 ```
 
 The rename is the completion marker: there is no partial rename, so the presence of
 `<key>/ginary.json` as a regular file is the only proof that a cache entry is complete.
 Concurrent first runs race on the rename, and the loser deletes its own temporary tree.
+
+The preflight retry is the one place the launcher guesses. An extracted tree that has lost a
+file was far more likely damaged *after* extraction — a `tmpwatch`, a half-finished `rm -rf` —
+than packed wrong, so the entry is removed and extracted once more. A second failure is 124 and
+names the file; a third extraction would be a loop, and a loop is what a user reports as a hang.
 
 ## Invariants
 

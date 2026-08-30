@@ -53,6 +53,18 @@
 //! - [`diag`] — `GINARY_DEBUG` and `GINARY_TRACE`, the launcher's only
 //!   observability.
 //!
+//! Milestone A3b adds the launcher itself, the half of the binary a packaged
+//! application actually runs:
+//!
+//! - [`error`] — the numbered exit codes 121 to 125 and the diagnostics that
+//!   go with them;
+//! - [`selfexe`] — opening the running executable by inode;
+//! - [`cache`] — where the runtime extracts, and the atomic extraction;
+//! - [`launch`] — the argument vector and the environment difference;
+//! - [`launcher`] — the launcher-mode entry point and `GINARY_CMD`;
+//! - [`fault`] — the named fault points the launcher tests arm, compiled in
+//!   only under the `fault-injection` feature.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -62,17 +74,23 @@
 pub mod appfile;
 pub mod assemble;
 pub mod beam;
+pub mod cache;
 pub mod cache_dir;
 pub mod cli;
 pub mod closure;
 pub mod diag;
 pub mod doctor;
 pub mod elf;
+pub mod error;
+pub mod fault;
+pub mod launch;
+pub mod launcher;
 pub mod manifest;
 pub mod otp;
 pub mod payload;
 pub mod process;
 pub mod report;
+pub mod selfexe;
 pub mod strip;
 pub mod target;
 pub mod trailer;

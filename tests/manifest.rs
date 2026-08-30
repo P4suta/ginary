@@ -391,3 +391,62 @@ fn a_manifest_carrying_no_unknown_keys_writes_none() {
         "`serde_json::Value` sorts them; the wire order is the snapshot's"
     );
 }
+
+#[test]
+fn the_manifest_this_build_writes_validates() {
+    sample_manifest()
+        .validate()
+        .expect("the sample manifest is safe");
+}
+
+/// Asserts that `app` is refused as an application name.
+///
+/// The application name is the `<app>` component of `<cache>/<app>/<key>`, so
+/// a value that is not a single path component is a manifest that chose a
+/// directory outside the cache for the launcher to create, chmod 0700 and
+/// extract into.
+fn an_app_is_refused(app: &str) {
+    let manifest = Manifest {
+        app: app.to_owned(),
+        ..sample_manifest()
+    };
+
+    let error = manifest
+        .validate()
+        .expect_err("an application name that is not one path component is refused");
+
+    assert_eq!(
+        error,
+        ManifestError::UnsafePath {
+            field: "app".to_owned(),
+            value: app.to_owned(),
+        }
+    );
+}
+
+#[test]
+fn an_application_name_that_walks_out_of_the_cache_is_refused() {
+    an_app_is_refused("..");
+    an_app_is_refused("../../etc");
+}
+
+#[test]
+fn an_application_name_with_a_separator_is_refused() {
+    an_app_is_refused("a/b");
+    an_app_is_refused("hello/../..");
+}
+
+#[test]
+fn an_absolute_application_name_is_refused() {
+    an_app_is_refused("/etc");
+}
+
+#[test]
+fn an_empty_application_name_is_refused() {
+    an_app_is_refused("");
+}
+
+#[test]
+fn a_current_directory_application_name_is_refused() {
+    an_app_is_refused(".");
+}
