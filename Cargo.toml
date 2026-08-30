@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "ginary"
+description = "Package a Gleam application and a trimmed BEAM runtime into one executable"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/P4suta/ginary"
+publish = false
+rust-version = "1.88"
+readme = "README.md"
+keywords = ["gleam", "erlang", "beam", "packaging", "single-binary"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+assert_cmd = "2.0.17"
+predicates = "3.1.3"
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1

@@ -1,0 +1,10 @@
+version = 1
+SPDX-PackageName = "ginary"
+SPDX-PackageSupplier = "ginary contributors"
+SPDX-PackageDownloadLocation = "https://github.com/P4suta/ginary"
+
+[[annotations]]
+path = ["**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 ginary contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"

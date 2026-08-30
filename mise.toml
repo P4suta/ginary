@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[tools]
+gleam = "1.18.1"
+erlang = "29.0.5"
+
+[env]
+# ~/.cargo/registry is read-only in the sandbox this project is developed in, so
+# every cargo invocation gets a project-local CARGO_HOME.
+CARGO_HOME = "{{config_root}}/.cache/cargo-home"
+
+[tasks.fmt]
+description = "Format all Rust sources"
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "Check formatting and run clippy with warnings denied"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+]
+
+[tasks.test]
+description = "Run the whole suite: unit, integration and documentation tests"
+run = "cargo test"
+
+[tasks."test:fast"]
+description = "Run only the tests that need no external toolchain"
+# Named explicitly rather than as plain `cargo test` minus something: no test in
+# the library, the binary or `tests/smoke_cli.rs` *requires* `gleam`, `erl`,
+# `strip` or `docker`. The smoke test does drive the real `doctor`, which probes
+# whatever is on `PATH`, bounded by `doctor::PROBE_TIMEOUT`; see
+# `docs/dev/testing.md`. When `require_tools` lands in A1 this becomes
+# `cargo test` with the gating doing the skipping.
+run = "cargo test --lib --bins --test smoke_cli"
+
+[tasks.doc]
+description = "Build the API documentation with rustdoc warnings denied"
+env = { RUSTDOCFLAGS = "-Dwarnings" }
+run = "cargo doc --no-deps"
+
+[tasks.build]
+description = "Build the release binary"
+run = "cargo build --release"
+
+# The plan lists `smoke` and `package` among the A0 tasks. They cannot do
+# anything until there is an artifact to smoke test, so they are declared here
+# and fail loudly rather than being silently absent.
+[tasks.smoke]
+description = "Clean-room artifact smoke test in Docker (not implemented until A5)"
+run = '''
+echo "smoke: not implemented until A5. It will run scripts/smoke.sh: build the" >&2
+echo "  hello fixture, then \`docker run --rm --network none ubuntu:24.04\` the" >&2
+echo "  artifact with no Erlang installed and assert the exit code propagates." >&2
+exit 1
+'''
+
+[tasks.package]
+description = "Package the fixture application into one executable (not implemented until A4)"
+run = '''
+echo "package: not implemented until A4. It will run \`ginary build\` over" >&2
+echo "  tests/fixtures/hello_ginary and report the artifact size breakdown." >&2
+exit 1
+'''
+
+[tasks.check]
+description = "The pull-request gate: lint, test and doc"
+run = [
+  "mise run lint",
+  "mise run test",
+  "mise run doc",
+]

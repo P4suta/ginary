@@ -1,0 +1,7 @@
+/target/
+/.cache/
+/build/
+/dist/
+erl_crash.dump
+tests/fixtures/*/build/
+*.log
