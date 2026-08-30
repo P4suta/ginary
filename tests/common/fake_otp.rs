@@ -69,6 +69,7 @@ pub struct FakeApp {
     vsn: String,
     description: Option<String>,
     applications: Vec<String>,
+    optional: Vec<String>,
     included: Vec<String>,
     modules: Vec<String>,
     registered: Vec<String>,
@@ -85,6 +86,7 @@ impl FakeApp {
             vsn: vsn.to_owned(),
             description: None,
             applications: Vec::new(),
+            optional: Vec::new(),
             included: Vec::new(),
             modules: vec![name.to_owned()],
             registered: Vec::new(),
@@ -105,6 +107,23 @@ impl FakeApp {
     #[must_use]
     pub fn applications(mut self, names: &[&str]) -> Self {
         self.applications = owned(names);
+        self
+    }
+
+    /// Sets the `optional_applications` property.
+    ///
+    /// Every name is also added to `applications` if it is not there already,
+    /// because that is OTP's own rule: `optional_applications` marks a subset
+    /// of `applications` whose absence at run time is tolerated. A builder
+    /// that let the two drift would produce `.app` files no real tool writes.
+    #[must_use]
+    pub fn optional(mut self, names: &[&str]) -> Self {
+        self.optional = owned(names);
+        for name in &self.optional {
+            if !self.applications.contains(name) {
+                self.applications.push(name.clone());
+            }
+        }
         self
     }
 
@@ -174,6 +193,12 @@ impl FakeApp {
             "{{applications, [{}]}}",
             atom_list(&self.applications)
         ));
+        if !self.optional.is_empty() {
+            props.push(format!(
+                "{{optional_applications, [{}]}}",
+                atom_list(&self.optional)
+            ));
+        }
         if !self.included.is_empty() {
             props.push(format!(
                 "{{included_applications, [{}]}}",

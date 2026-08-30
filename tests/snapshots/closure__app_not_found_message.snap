@@ -1,0 +1,11 @@
+---
+source: tests/closure.rs
+expression: rendered
+---
+application `crypto` was not found
+  required by: app -> gleam_crypto -> crypto
+  searched: <tmp>/shipment/crypto/ebin/crypto.app
+            <tmp>/otp/lib/crypto-<vsn>
+  hint: add it to `[erlang] extra_applications` (bundled and started) or
+        `[tools.ginary] otp_applications` (bundled only) in gleam.toml, or
+        check the dependency's .app file.

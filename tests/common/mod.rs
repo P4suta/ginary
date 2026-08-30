@@ -11,4 +11,5 @@
 
 pub mod fake_otp;
 pub mod script;
+pub mod snapshot;
 pub mod tools;

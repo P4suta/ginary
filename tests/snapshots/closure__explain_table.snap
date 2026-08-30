@@ -1,0 +1,11 @@
+---
+source: tests/closure.rs
+expression: rendered
+---
+name          vsn     source    origin
+crypto        5.9.2   otp       notify -> gleam_crypto -> crypto
+gleam_crypto  0.4.0   shipment  notify -> gleam_crypto
+kernel        11.0.3  otp       always
+notify        1.0.0   shipment  root
+sasl          4.3.1   otp       extra
+stdlib        8.0.3   otp       always

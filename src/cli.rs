@@ -7,14 +7,16 @@
 //! own flags rather than a shared flag bag.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::appfile::{self, AppResource};
+use crate::closure::{self, AppSet};
 use crate::doctor;
+use crate::otp;
 use crate::target::Target;
 
 /// Version of the `version --json` schema.
@@ -22,6 +24,9 @@ pub const VERSION_FORMAT_VERSION: u32 = 1;
 
 /// Version of the `appfile parse --json` schema.
 pub const APPFILE_FORMAT_VERSION: u32 = 1;
+
+/// Version of the `closure --json` schema.
+pub const CLOSURE_FORMAT_VERSION: u32 = 1;
 
 /// Width of the label column in the `appfile parse` table.
 ///
@@ -41,7 +46,8 @@ BEAM runtime into a single executable, so that the people who run a Gleam progra
 not need Erlang installed.
 
 Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version`, `doctor` and `appfile` only.",
+implemented yet; this version ships `version`, `doctor`, `appfile` and `closure`
+only.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -70,6 +76,35 @@ pub enum Command {
         /// What to do with the files.
         #[command(subcommand)]
         command: AppfileCommand,
+    },
+    /// Resolve every application a shipment needs, over the shipment and OTP.
+    ///
+    /// This is the debugging window into what `ginary build` will bundle: it
+    /// takes the same two trees, the same roots and the same extras, and
+    /// prints the applications it found, where each came from, and why.
+    Closure {
+        /// The directory `gleam export erlang-shipment` wrote.
+        #[arg(value_name = "SHIPMENT")]
+        shipment: PathBuf,
+        /// The OTP installation to resolve against. Defaults to the one `erl`
+        /// on `PATH` reports.
+        #[arg(long, value_name = "PATH")]
+        otp_root: Option<PathBuf>,
+        /// An application to start from. Repeatable, and required: there is no
+        /// reliable way to guess which application of a shipment is the one
+        /// being packaged.
+        #[arg(long = "root", value_name = "NAME", required = true)]
+        roots: Vec<String>,
+        /// An extra application to bundle, as `extra_applications` and
+        /// `otp_applications` do. Repeatable.
+        #[arg(long = "extra", value_name = "NAME")]
+        extra: Vec<String>,
+        /// Print a JSON object instead of a table.
+        #[arg(long, conflicts_with = "explain")]
+        json: bool,
+        /// Print the origin of every application instead of its `ebin` path.
+        #[arg(long)]
+        explain: bool,
     },
 }
 
@@ -108,6 +143,18 @@ pub struct ParsedApp {
     /// What the file declares.
     #[serde(flatten)]
     pub resource: AppResource,
+}
+
+/// The payload of `ginary closure --json`.
+#[derive(Debug, Serialize)]
+pub struct ClosureReport {
+    /// Version of this schema; see [`CLOSURE_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The OTP `lib` directory the closure resolved against.
+    pub otp_lib: String,
+    /// The applications, the warnings and the skipped optional applications.
+    #[serde(flatten)]
+    pub apps: AppSet,
 }
 
 /// The payload of `ginary version --json`.
@@ -157,7 +204,99 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Appfile {
             command: AppfileCommand::Parse { paths, json },
         } => write_appfile(paths, *json, out),
+        Command::Closure {
+            shipment,
+            otp_root,
+            roots,
+            extra,
+            json,
+            explain,
+        } => write_closure(
+            shipment,
+            otp_root.as_deref(),
+            roots,
+            extra,
+            *json,
+            *explain,
+            out,
+        ),
     }
+}
+
+/// Computes a closure and writes it in the requested form.
+///
+/// The OTP root is resolved through [`otp::discover`], so `--otp-root` gets
+/// the same validation the host installation does: a directory that is not an
+/// OTP root is refused here rather than producing an empty library listing and
+/// a confusing `AppNotFound` three applications later.
+fn write_closure(
+    shipment: &Path,
+    otp_root: Option<&Path>,
+    roots: &[String],
+    extra: &[String],
+    json: bool,
+    explain: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let otp = otp::discover(otp_root)?;
+    let apps = closure::app_dependency_closure(shipment, &otp.lib, roots, extra)?;
+
+    if json {
+        return write_json(
+            out,
+            &ClosureReport {
+                format_version: CLOSURE_FORMAT_VERSION,
+                otp_lib: otp.lib.display().to_string(),
+                apps,
+            },
+        );
+    }
+
+    let mut text = if explain {
+        closure::explain(&apps)
+    } else {
+        render_closure_table(&apps)
+    };
+    text.push_str(&render_closure_notes(&apps));
+    out.write_all(text.as_bytes())
+        .context("cannot write the closure to standard output")
+}
+
+/// Renders the default table: name, version, source and `ebin` directory.
+fn render_closure_table(apps: &AppSet) -> String {
+    let rows: Vec<[String; 4]> = apps
+        .iter()
+        .map(|app| {
+            [
+                app.name.clone(),
+                app.vsn.clone(),
+                closure::source_label(&app.source).to_owned(),
+                app.ebin.display().to_string(),
+            ]
+        })
+        .collect();
+    closure::render_table(["name", "vsn", "source", "ebin"], &rows)
+}
+
+/// Renders the warnings and the skipped optional applications, if any.
+///
+/// Both are silent when empty: a heading with nothing under it reads as a
+/// finding rather than as its absence.
+fn render_closure_notes(apps: &AppSet) -> String {
+    let mut text = String::new();
+    if !apps.warnings.is_empty() {
+        text.push_str("\nwarnings:\n");
+        for warning in &apps.warnings {
+            text.push_str(&format!("  {warning}\n"));
+        }
+    }
+    if !apps.skipped_optional.is_empty() {
+        text.push_str("\nskipped optional applications:\n");
+        for (name, requested_by) in &apps.skipped_optional {
+            text.push_str(&format!("  {name}, requested by {requested_by}\n"));
+        }
+    }
+    text
 }
 
 /// Reads every `.app` file and writes the result in the requested form.

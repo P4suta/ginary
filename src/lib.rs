@@ -23,6 +23,12 @@
 //! - [`process`] — finding a program on `PATH` and running it under a timeout,
 //!   shared by [`doctor`] and [`otp`].
 //!
+//! Milestone A1b adds the module that turns those two into a bill of
+//! materials:
+//!
+//! - [`closure`] — every application an artifact needs, resolved against the
+//!   shipment and the OTP library.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -32,6 +38,7 @@
 pub mod appfile;
 pub mod cache_dir;
 pub mod cli;
+pub mod closure;
 pub mod doctor;
 pub mod otp;
 pub mod process;

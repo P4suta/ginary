@@ -1,0 +1,5 @@
+---
+source: tests/closure.rs
+expression: rendered
+---
+`crypto` is in both trees; using the shipment copy at `<tmp>/shipment/crypto/ebin` and ignoring the OTP copy at `<tmp>/otp/lib/crypto-5.9.2/ebin`

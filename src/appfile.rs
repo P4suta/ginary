@@ -716,9 +716,9 @@ fn is_name_char(c: char) -> bool {
 
 /// What ginary needs to know about one OTP application resource file.
 ///
-/// Keys ginary does not use (`runtime_dependencies`, `optional_applications`,
-/// `maxT`, …) are parsed and discarded; only `env` is summarised, by key, since
-/// the values can be arbitrarily deep and nothing downstream reads them.
+/// Keys ginary does not use (`runtime_dependencies`, `maxT`, …) are parsed and
+/// discarded; only `env` is summarised, by key, since the values can be
+/// arbitrarily deep and nothing downstream reads them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AppResource {
     /// The application name, from `{application, Name, _}`.

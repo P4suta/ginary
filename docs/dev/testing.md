@@ -14,7 +14,8 @@
 | `tests/smoke_cli.rs` | the real binary: `--help`, `version`, `version --json`, no-argument exit 2, `doctor`, `doctor --json` |
 | `tests/appfile.rs` | the `.app` reader: the term grammar, `Term`'s re-serialisation, `AppResource`, the error positions, and every fixture under `tests/fixtures/app/` |
 | `tests/otp.rs` | `inspect_root` against fake roots that are whole and broken, `boot_lib_dirs`, and `discover` with and without an override |
-| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, its exit codes, and the `otp` field `doctor` now reports |
+| `tests/closure.rs` | the closure over fake shipment and OTP trees: seeds, edges, resolution order, determinism, the three errors, `explain` and `chain`, two property tests, and one gated run over a real shipment |
+| `tests/cli.rs` | the real binary: `appfile parse` as a table and as JSON, `closure` as a table, JSON, `--explain` and its two footers, and the `otp` field `doctor` now reports |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -23,9 +24,9 @@ bounded child, and its tests moved with it unchanged in substance.
 
 Run them with `mise run test` (or `cargo test`). `mise run test:fast` runs `cargo test --lib
 --bins --test smoke_cli --test regressions`, named explicitly because it is the subset that
-*requires* no external toolchain. `tests/appfile.rs`, `tests/otp.rs` and `tests/cli.rs` are
-outside it because each holds a handful of gated tests, even though the bulk of all three runs
-against fixtures and temporary directories.
+*requires* no external toolchain. `tests/appfile.rs`, `tests/otp.rs`, `tests/closure.rs` and
+`tests/cli.rs` are outside it because each holds a handful of gated tests, even though the bulk of
+all four runs against fixtures and temporary directories.
 
 The library and binary targets spawn only fake shell scripts in temporary directories, never a
 program from the machine's `PATH`. Four integration targets do reach it, each for a stated
@@ -35,7 +36,7 @@ reason:
 |---|---|---|
 | `tests/smoke_cli.rs` | `ginary doctor` probes whatever `gleam`, `erl`, `strip` and `docker` are there | none has to be present or to succeed; a hanging probe costs `doctor::PROBE_TIMEOUT` (10 s) before it is killed |
 | `tests/cli.rs` | the same, plus the `otp` field, which runs the ambient `erl` | the two `otp` assertions are gated on `require_tools(&["erl"])` |
-| `tests/otp.rs`, `tests/appfile.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
+| `tests/otp.rs`, `tests/appfile.rs`, `tests/closure.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
@@ -82,6 +83,13 @@ pretending to have covered anything.
 Setting `GINARY_REQUIRE_TOOLCHAIN=1` turns the same call into a panic, so a CI job that is
 supposed to have the toolchain cannot silently skip its coverage. CI sets it on the test job.
 
+A test can need more than a program. `tests/closure.rs` needs a real
+`gleam export erlang-shipment` output, which `require_tools` knows nothing about, so it reads
+`GINARY_TEST_SHIPMENT` (defaulting to the author's `notify` shipment) and applies the same rule by
+hand: a directory that is not there is a reported skip, and a failure under
+`GINARY_REQUIRE_TOOLCHAIN=1`. Any fixture a gated test needs from outside the repository is
+overridable and escalated the same way.
+
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
 
@@ -90,7 +98,9 @@ as a defect.
 `tests/common/fake_otp.rs` builds the two directory layouts every build-side module reads, in a
 temporary directory, in milliseconds, with no Erlang installed. `tests/common/script.rs` is the
 third builder: it writes an executable `/bin/sh` stub, which is how a test puts a chosen `erl`
-on a `PATH` of its own.
+on a `PATH` of its own. `tests/common/snapshot.rs` is the fourth helper, and exists because those
+trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
+with a placeholder, longest path first, so a snapshot pins the sentence rather than the machine.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -131,6 +141,50 @@ To test a *broken* root, build a whole one and break it: `fs::remove_file`, `fs:
 a second `erts-*`, or `fake_otp::make_non_executable`. The builder deliberately has no API for
 producing an invalid tree, so nothing can be broken by accident.
 
+## Closure scenarios
+
+`tests/closure.rs` builds a `FakeShipment` and a `FakeOtp` side by side in one temporary
+directory — the shipment at `<tmp>/shipment`, the runtime at `<tmp>/otp` — so a single placeholder
+scrubs every path that reaches a snapshot. Each test names the one behaviour it proves:
+
+| scenario | what it pins |
+|---|---|
+| seeds | `kernel` and `stdlib` are present with `seed = Always` when nothing lists them; a `--root` is `Root`, an `--extra` is `Extra`, a name that is both stays `Root` |
+| requesters | a seed records no requester even when another application lists it; nothing is ever its own requester; `requested_by` is sorted and deduplicated across two edges from one application |
+| edges | `applications` and `included_applications` are followed; an `optional_applications` entry that resolves is bundled, one that does not lands in `skipped_optional` with its requester and is *not* an error; the same name outside `optional_applications` still is one |
+| determinism | four permutations of two roots and two extras produce one identical `AppSet` |
+| resolution | an application in both trees comes from the shipment, with a warning naming both directories; `crypto-doc`, `crypto-5.9.2.bak`, `crypto-latest` and `crypto-` are not versions; `3` is; a regular file called `crypto-9.9.9` is neither a match nor an ambiguity |
+| errors | `crypto-5.9.2` beside `crypto-5.9.3` is `AmbiguousOtpApp` listing both; a missing application carries the exact chain `["app", "gleam_crypto", "crypto"]`, the two searched paths, and the `gleam.toml` hint; a missing *root* says nobody asked for it; a malformed `.app` in a dependency names the file |
+| termination | `a -> b -> a` and an application that lists itself both finish, with the expected `requested_by` |
+| output | `explain` over a six-application scenario, the borrowed-set iteration, and the JSON: paths as strings, `source` tagged `shipment` or `otp`, `seed` as `root`/`extra`/`always`/`none` |
+| properties | over random small DAGs, the closure only grows when `extra` grows, and feeding it its own names back as extras changes nothing |
+
+Four scenarios the first review of the module added, and they live in
+`tests/regressions/` rather than here because each one pins a fixed defect:
+a shipment copy shadowing a `lib` that holds two versions is a warning and not an
+error (`a1b_shadowed_otp_ambiguity_aborted_the_closure.rs`); an ambiguous
+`optional_applications` entry is skipped with a warning and not raised
+(`a1b_an_ambiguous_optional_edge_was_an_error.rs`); `ClosureError::AppFile` names
+the file and leaves the parse failure to its `source()`, so `ginary closure`
+prints it once rather than three times (`a1b_app_file_error_repeated_its_cause.rs`);
+and `../../escape`, `/etc`, `a/b` and an empty `--root` are refused as names
+before any path is built from them (`a1b_app_names_were_used_as_paths.rs`).
+
+Two things those tests need from the builders. `FakeApp::optional` writes `optional_applications`
+and adds each name to `applications` if it is not there already, because that is OTP's own rule
+and a builder that let the two drift would produce files no real tool writes. And neither builder
+can write a broken tree on purpose: a test that needs two versions of one application builds a
+whole root and copies a directory, the same way `tests/otp.rs` makes a second `erts-*`.
+
+The gated test at the end of the file runs the same closure over a real
+`gleam export erlang-shipment` output with `--root notify`, and asserts what only a real tree can
+show: `crypto` resolves to a version that exists under the host `lib/`, every OTP `ebin` is a
+directory under that `lib/`, and every shipment application has a directory. The shipment it uses
+is `GINARY_TEST_SHIPMENT` when that is set and a path on the author's machine otherwise, and a
+missing one is escalated exactly as a missing program is: a reported skip, or a failure under
+`GINARY_REQUIRE_TOOLCHAIN=1`. Without that escalation the only test that touches a real tree would
+evaporate silently on every machine but one.
+
 ## Fixture policy
 
 `tests/fixtures/app/` holds two kinds of file and `tests/fixtures/app/README.md` records which is
@@ -153,13 +207,17 @@ which is coverage the copies cannot give.
 ## Snapshots
 
 Textual output is asserted with `insta`, and the `.snap` files under `tests/snapshots/` are
-committed and reviewed like any other assertion. Three exist:
+committed and reviewed like any other assertion. Seven exist:
 
 | snapshot | what it pins |
 |---|---|
 | `appfile__nested_term_display.snap` | `Term`'s re-serialisation of the whole `nested.app` term |
 | `appfile__parse_error_messages.snap` | the sentences the two invalid fixtures produce |
 | `cli__appfile_parse_table.snap` | the table `ginary appfile parse` prints |
+| `closure__explain_table.snap` | `closure::explain` over the six-application scenario |
+| `closure__app_not_found_message.snap` | the whole `AppNotFound` message, hint included |
+| `closure__shadowed_otp_application_warning.snap` | the warning an application in both trees produces |
+| `cli__closure_explain_table.snap` | what `ginary closure --explain` prints, footer included |
 
 A snapshot is a contract, not a recording. `cargo insta review` is for reviewing a *deliberate*
 change to output; accepting a snapshot to make a red test pass is the same defect as weakening an
@@ -167,7 +225,8 @@ assertion.
 
 ## Planned infrastructure
 
-`tests/common/` already holds `tools.rs` and `fake_otp.rs`, described above. Still to come:
+`tests/common/` already holds `tools.rs`, `fake_otp.rs` and `snapshot.rs`, described above. Still
+to come:
 
 - **`FixtureProject` and `Artifact`** — copy a fixture into a temporary directory, run
   `ginary build` once per test binary behind a `OnceLock`, then run the artifact under a
