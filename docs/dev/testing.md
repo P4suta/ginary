@@ -46,9 +46,12 @@
 | `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, and a gated run over a real `ginary build` |
 | `tests/sbom.rs` | the SPDX 2.3 document: the namespace derived from the payload digest, the whole document as a snapshot, the fields SPDX requires, the two relationship kinds, hex against `NOASSERTION`, a Gleam `manifest.toml` read, one refused and one absent, determinism over two runs, the command's `--out`, and two gated builds pinning `ginary build --sbom` and `--sbom-out` down to the report's last line |
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
-| `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host |
+| `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
 | `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator |
+| `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
+| `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub |
+| `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -111,8 +114,53 @@ reason:
 | `tests/crashdump.rs` | one `erl` run that writes a real `erl_crash.dump`, so the parser is held against a file its author did not write | gated on `require_tools(&["erl"])`; the recipe is `erl -noshell -env ERL_CRASH_DUMP <tmp>/dump -eval 'spawn(fun() -> exit(kaboom) end), timer:sleep(100), erlang:halt("kaboom", [{flush,true}]).'`, which exits 1 and leaves a whole dump ending in `=end` |
 | `tests/doctor.rs`, `tests/verify.rs` | the host OTP's `crypto` NIF, and one real `ginary build` verified end to end | both gated on `require_tools`; `tests/verify.rs` also reads a shipment named by `GINARY_TEST_ARTIFACT` when one is set, and reports a skip when it is not |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
+| `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure too. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
+
+## The two flavors of the suite
+
+C2 split the crate with the `cli` feature, so there are now two binaries to hold to a contract
+and the suite runs twice:
+
+| task | build | what it covers |
+|---|---|---|
+| `mise run test` | `cargo test --features fault-injection` | everything, against the full command line tool |
+| `mise run test:stub` | `cargo test --no-default-features` | the launcher half, against a binary with no clap, no TOML reader and no commands |
+| `mise run lint:stub` | `cargo clippy --no-default-features --all-targets -- -D warnings` | that the stub build compiles clean, tests included |
+
+`check` runs all three. Without `test:stub` and `lint:stub` the stub configuration would be
+compiled by nothing until `stubs:build` failed on a developer's machine.
+
+**How a test target chooses.** A file whose every claim is about a module the `cli` feature
+carries opens with `#![cfg(feature = "cli")]` under its module documentation, so a stub-flavor
+run compiles it to an empty test binary rather than to an error. Twenty-three of the integration
+targets are in that group. What is left runs in both flavors: `tests/launcher.rs`,
+`tests/launch.rs`, `tests/cache.rs`, `tests/cache_lock.rs`, `tests/payload.rs`,
+`tests/manifest.rs`, `tests/trailer.rs`, `tests/target.rs`, `tests/diag.rs`, `tests/formal.rs`,
+`tests/stubid.rs`, `tests/stub_flavor.rs` and 29 of the 45 modules of `tests/regressions.rs`,
+which are gated one `mod` line at a time.
+
+That set is not an accident: it is exactly the modules a stub carries. `SyntheticArtifact` is
+built from `payload::pack`, `manifest::Index` and the staging *listing* types, and those are the
+items `assemble.rs` keeps outside its own `cli` gate, so the whole launcher contract — the
+argument vector, the environment difference, the cache, the lock, the five numbered exit codes —
+is asserted against the stub build as well as the full one.
+
+**A test that differs between the flavors asserts both branches rather than one.**
+`tests/stub_flavor.rs` is the pattern: the sentence a payloadless stub prints lives in
+`launcher::no_payload_line`, so both flavors can assert the string, and the *process* assertion
+branches on `cfg!(feature = "cli")` — a full build must print `Usage:` and must not claim to have
+no CLI, a stub build must print the sentence and nothing else.
+`launcher::the_magic_is_what_decides_the_mode` does the same where it breaks the magic: the claim
+is that the magic decided the mode, and what the other half turns out to *be* depends on which
+binary the suite built.
+
+**Two test helpers are gated.** `common::built` drives `bundle` and `common::fake_otp` drives
+`otp` and `beam`, so both carry `#[cfg(feature = "cli")]` in `tests/common/mod.rs`;
+`stubfile::cross_stub` names `stub::STUB_DIR_VAR` and is gated in place. `common::tools` calls
+`process::find_in_path` rather than the `doctor` re-export of it, which is what lets the
+launcher-side files that gate on `require_tools` compile without the feature.
 
 ## Conventions
 
@@ -216,6 +264,15 @@ on it. The fake's own `beam.smp` is a `/bin/sh` stub, which is why the *unseamed
 `erts_source::resolve` over one is the test for `NotAnElfRuntime`: the mistake that error exists
 for is a runtime tree assembled by hand, and the builder writes exactly that.
 
+C2 adds a second seam of the same shape one layer up. `doctor::probe_targets_with` takes the
+function that resolves a runtime, because the one row `doctor` actually reads is the host's own
+and reading it needs an Erlang on the machine. Both halves of that branch are pinned without a
+toolchain — a resolution that succeeds is a `yes` row carrying the provenance, the linkage and
+the minimum libc it was handed, and an `ErlNotFound` is a `not yet` row carrying the whole error
+chain — and the machine that *has* an `erl` is covered on top of that by two gated tests. It was
+the fix for a C1 defect: two ungated tests asserted that `resolvable` was true, so a machine with
+no Erlang on it saw a failure where this document promises a reported skip.
+
 `tests/common/repack.rs` is what B2 added, and it is the one helper that writes a tar archive
 itself rather than calling `payload::pack`. It has to: `pack` computes `ginary.index.json` from
 the same walk it packs, so an index that disagrees with the tree it describes cannot be produced
@@ -271,6 +328,31 @@ developer had Erlang installed has proved nothing.
 it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
 (`staging_tree`), and the two instruments those tests read through, `CountingReader` and
 `SharedSink`. The two policy sections below say why each exists.
+
+`tests/common/stubfile.rs` is what C2 added, and it builds the two shapes of fixture the stub
+half needs. `Marker` is the four fields of an identity marker held as *text*, so a test can write
+a version, a target, a format or a flavor no parser would ever produce, and `Marker::bytes`
+renders the whole 128-byte record with its NUL and its zero padding; `marker_from_body` goes one
+level lower and takes bytes, for a body that is not UTF-8. `with_markers` plants any number of
+those in `noise`, which is a seeded xorshift rather than anything random — a scanner bug that
+turns on one byte in ten thousand has to be a failure that reproduces, not a flake — and asserts
+its own bytes hold no needle, which is what makes it a negative fixture rather than an accident.
+The needle itself is assembled from `HEAD` and `TAIL` at run time for the same reason
+`stubid::scan` assembles its own: a helper holding `GINARY-STUB-ID\0` contiguously would put a
+second marker into every test binary that links it, and `tests/stubid.rs` would be scanning
+itself.
+
+`stub_copy` is the other shape: `stub::verify` reads a *file* and looks at its object header, so
+its fixtures have to be real executables. It copies this test run's own `ginary` and rewrites the
+marker in place — rather than fabricating an ELF — because the claim under test is what the gates
+do with a header a linker actually wrote; `stub_copy_without_marker` zeroes it instead, and
+`text_with_marker` writes a shell script carrying a perfectly good marker, which is what tells
+the marker gates and the object gate apart. `pe_bytes` and `pe_with_marker` are the Windows
+counterpart and are written by hand, the way `payload.rs` writes tar headers by hand: there is no
+Windows toolchain here, and the only fields `check_object` reads out of a PE are the format and
+the COFF machine. `cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
+a real cross-built stub, and it follows the `require_tools` rule: a printed skip, unless
+`GINARY_REQUIRE_TOOLCHAIN=1` says the file was supposed to be there.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -746,7 +828,7 @@ assertion.
 
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
-`cachefs.rs` and `repack.rs`, described above. Still to come:
+`cachefs.rs`, `repack.rs` and `stubfile.rs`, described above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

@@ -595,13 +595,31 @@ fn the_magic_is_what_decides_the_mode() {
     assert_eq!(
         plain.code(),
         2,
-        "without a magic the same bytes are the build tool, and no arguments is a usage error"
+        "without a magic the same bytes are not a packaged application, and running one with \
+         no arguments is a usage error"
     );
-    assert!(
-        plain.stderr_text().contains("Usage:"),
-        "expected the command line usage, and got:\n{}",
-        plain.stderr_text()
-    );
+    // What the other half *is* depends on which flavor this suite built. A
+    // full ginary is the command line tool; a stub carries the launcher and
+    // nothing else, and says so. Both are the same claim — the magic decided
+    // the mode — and asserting only the first would leave the stub flavor
+    // proving nothing here.
+    if cfg!(feature = "cli") {
+        assert!(
+            plain.stderr_text().contains("Usage:"),
+            "expected the command line usage, and got:\n{}",
+            plain.stderr_text()
+        );
+    } else {
+        assert!(
+            plain
+                .stderr_text()
+                .contains(&ginary::launcher::no_payload_line(
+                    ginary::target::Target::host()
+                )),
+            "expected the launcher stub's own sentence, and got:\n{}",
+            plain.stderr_text()
+        );
+    }
 }
 
 #[test]

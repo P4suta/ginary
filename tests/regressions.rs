@@ -7,34 +7,49 @@
 
 mod common;
 
+#[cfg(feature = "cli")]
 #[path = "regressions/a1a_display_left_reserved_words_bare.rs"]
 mod a1a_display_left_reserved_words_bare;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1a_doctor_dropped_the_otp_error.rs"]
 mod a1a_doctor_dropped_the_otp_error;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1a_env_duplicate_keys_were_unreported.rs"]
 mod a1a_env_duplicate_keys_were_unreported;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1b_an_ambiguous_optional_edge_was_an_error.rs"]
 mod a1b_an_ambiguous_optional_edge_was_an_error;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1b_app_file_error_repeated_its_cause.rs"]
 mod a1b_app_file_error_repeated_its_cause;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1b_app_names_were_used_as_paths.rs"]
 mod a1b_app_names_were_used_as_paths;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1b_shadowed_otp_ambiguity_aborted_the_closure.rs"]
 mod a1b_shadowed_otp_ambiguity_aborted_the_closure;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1c_a_non_utf8_file_name_was_dropped.rs"]
 mod a1c_a_non_utf8_file_name_was_dropped;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1c_a_symlinked_directory_looped_or_leaked.rs"]
 mod a1c_a_symlinked_directory_looped_or_leaked;
+#[cfg(feature = "cli")]
 #[path = "regressions/a1c_a_symlinked_ebin_or_priv_escaped_the_app.rs"]
 mod a1c_a_symlinked_ebin_or_priv_escaped_the_app;
+#[cfg(feature = "cli")]
 #[path = "regressions/a2_a_module_outside_ebin_was_never_stripped.rs"]
 mod a2_a_module_outside_ebin_was_never_stripped;
+#[cfg(feature = "cli")]
 #[path = "regressions/a2_a_shared_object_with_an_interpreter_was_fully_stripped.rs"]
 mod a2_a_shared_object_with_an_interpreter_was_fully_stripped;
+#[cfg(feature = "cli")]
 #[path = "regressions/a2_a_symlinked_priv_reached_an_excluded_directory.rs"]
 mod a2_a_symlinked_priv_reached_an_excluded_directory;
+#[cfg(feature = "cli")]
 #[path = "regressions/a2_an_unreadable_elf_file_failed_the_whole_stage.rs"]
 mod a2_an_unreadable_elf_file_failed_the_whole_stage;
+#[cfg(feature = "cli")]
 #[path = "regressions/a2_the_staged_root_became_a_wildcard.rs"]
 mod a2_the_staged_root_became_a_wildcard;
 #[path = "regressions/a3a_a_contiguous_entry_was_extracted.rs"]
@@ -49,24 +64,30 @@ mod a3a_a_zero_length_payload_looked_truncated;
 mod a3a_the_second_payload_entry_was_never_checked;
 #[path = "regressions/a3b_a_reserved_name_covered_only_the_exact_path.rs"]
 mod a3b_a_reserved_name_covered_only_the_exact_path;
+#[cfg(feature = "cli")]
 #[path = "regressions/a3b_cache_clean_app_escaped_the_root.rs"]
 mod a3b_cache_clean_app_escaped_the_root;
 #[path = "regressions/a3b_the_manifest_app_was_not_a_name.rs"]
 mod a3b_the_manifest_app_was_not_a_name;
 #[path = "regressions/a3b_the_move_aside_branch_deleted_a_complete_entry.rs"]
 mod a3b_the_move_aside_branch_deleted_a_complete_entry;
+#[cfg(feature = "cli")]
 #[path = "regressions/a4_a_non_utf8_output_path_failed_the_json_report.rs"]
 mod a4_a_non_utf8_output_path_failed_the_json_report;
+#[cfg(feature = "cli")]
 #[path = "regressions/a4_a_work_directory_that_could_not_be_removed_was_unreported.rs"]
 mod a4_a_work_directory_that_could_not_be_removed_was_unreported;
+#[cfg(feature = "cli")]
 #[path = "regressions/a4_an_unreadable_trailer_was_a_damaged_artifact.rs"]
 mod a4_an_unreadable_trailer_was_a_damaged_artifact;
+#[cfg(feature = "cli")]
 #[path = "regressions/a4_extra_bin_names_were_used_as_paths.rs"]
 mod a4_extra_bin_names_were_used_as_paths;
 #[path = "regressions/b1_a_locked_entry_blocked_the_launch.rs"]
 mod b1_a_locked_entry_blocked_the_launch;
 #[path = "regressions/b1_a_prune_that_could_not_rename_reported_nothing.rs"]
 mod b1_a_prune_that_could_not_rename_reported_nothing;
+#[cfg(feature = "cli")]
 #[path = "regressions/b1_an_unterminated_quote_hid_the_rest_of_an_args_file.rs"]
 mod b1_an_unterminated_quote_hid_the_rest_of_an_args_file;
 #[path = "regressions/b1_heart_command_was_not_shell_quoted.rs"]
@@ -79,21 +100,42 @@ mod b1_the_entry_could_vanish_between_the_preflight_and_the_lock;
 mod b1_the_prune_trace_named_nothing_it_removed;
 #[path = "regressions/b1_uninstall_removed_the_crash_dump.rs"]
 mod b1_uninstall_removed_the_crash_dump;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_a_directory_entry_was_an_index_orphan.rs"]
 mod b2_a_directory_entry_was_an_index_orphan;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_a_file_that_was_not_a_dump_echoed_its_bytes.rs"]
 mod b2_a_file_that_was_not_a_dump_echoed_its_bytes;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_a_reserved_name_past_the_front_matter_was_skipped.rs"]
 mod b2_a_reserved_name_past_the_front_matter_was_skipped;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_a_section_on_the_second_line_was_dropped.rs"]
 mod b2_a_section_on_the_second_line_was_dropped;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_an_escaping_entry_verified_clean.rs"]
 mod b2_an_escaping_entry_verified_clean;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_build_sbom_out_hid_the_artifact_it_had_written.rs"]
 mod b2_build_sbom_out_hid_the_artifact_it_had_written;
+#[cfg(feature = "cli")]
 #[path = "regressions/b2_verify_compared_only_the_digest.rs"]
 mod b2_verify_compared_only_the_digest;
+#[cfg(feature = "cli")]
 #[path = "regressions/c1_a_non_utf8_output_path_lost_its_suffix.rs"]
 mod c1_a_non_utf8_output_path_lost_its_suffix;
+#[cfg(feature = "cli")]
 #[path = "regressions/c1_a_runtime_that_could_not_be_read_still_resolved.rs"]
 mod c1_a_runtime_that_could_not_be_read_still_resolved;
+#[cfg(feature = "cli")]
+#[path = "regressions/c2_a_stub_that_was_a_directory_was_not_there.rs"]
+mod c2_a_stub_that_was_a_directory_was_not_there;
+#[cfg(feature = "cli")]
+#[path = "regressions/c2_a_target_sub_table_with_no_erts_passed_the_guard.rs"]
+mod c2_a_target_sub_table_with_no_erts_passed_the_guard;
+#[cfg(feature = "cli")]
+#[path = "regressions/c2_the_artifact_never_had_to_use_the_stub.rs"]
+mod c2_the_artifact_never_had_to_use_the_stub;
+#[cfg(feature = "cli")]
+#[path = "regressions/c2_the_pe_gate_was_never_exercised.rs"]
+mod c2_the_pe_gate_was_never_exercised;

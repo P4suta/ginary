@@ -6,6 +6,10 @@
 //! `--skip-export` looks for, or how a version line is read. The two that do
 //! run `gleam` are gated on it, because they are the only ones that can say
 //! whether the export ginary asks for is the one Gleam performs.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

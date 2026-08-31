@@ -39,9 +39,11 @@ const DRAIN_CHUNK: usize = 8 * 1024;
 
 /// The platform's bit bucket, used to keep child processes from writing files.
 #[cfg(windows)]
+#[cfg(feature = "cli")]
 pub(crate) const NULL_DEVICE: &str = "nul";
 /// The platform's bit bucket, used to keep child processes from writing files.
 #[cfg(not(windows))]
+#[cfg(feature = "cli")]
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
 
 /// What a bounded child process produced.

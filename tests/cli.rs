@@ -8,6 +8,10 @@
 //! `tests/smoke_cli.rs` covers the A0 commands. This file drives the same real
 //! binary and asserts only on the user-visible contract: exit codes, the table,
 //! and the JSON schema.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

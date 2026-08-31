@@ -91,41 +91,69 @@
 //! - [`sbom`] — the SPDX 2.3 bill of materials;
 //! - [`crashdump`] — the summary of an `erl_crash.dump`.
 //!
+//! Milestone C2 adds the two modules a cross-target build is made of, and the
+//! `cli` feature that makes a launcher-only build possible:
+//!
+//! - [`stubid`] — the identity marker every ginary binary carries, and the
+//!   scanner that reads it back;
+//! - [`stub`] — where the stub for a target comes from, and the gates it has
+//!   to pass before a payload is appended to it.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "cli")]
 pub mod appfile;
 pub mod assemble;
+#[cfg(feature = "cli")]
 pub mod beam;
+#[cfg(feature = "cli")]
 pub mod bundle;
 pub mod cache;
+#[cfg(feature = "cli")]
 pub mod cache_dir;
 pub mod cache_lock;
+#[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
 pub mod closure;
 pub mod config;
+#[cfg(feature = "cli")]
 pub mod crashdump;
 pub mod diag;
+#[cfg(feature = "cli")]
 pub mod doctor;
+#[cfg(feature = "cli")]
 pub mod elf;
 pub mod error;
+#[cfg(feature = "cli")]
 pub mod erts_source;
 pub mod fault;
+#[cfg(feature = "cli")]
 pub mod gleam;
+#[cfg(feature = "cli")]
 pub mod inspect;
 pub mod launch;
 pub mod launcher;
 pub mod manifest;
+#[cfg(feature = "cli")]
 pub mod otp;
 pub mod payload;
 pub mod process;
+#[cfg(feature = "cli")]
 pub mod report;
+#[cfg(feature = "cli")]
 pub mod sbom;
 pub mod selfexe;
+#[cfg(feature = "cli")]
 pub mod strip;
+#[cfg(feature = "cli")]
+pub mod stub;
+pub mod stubid;
 pub mod target;
 pub mod trailer;
+#[cfg(feature = "cli")]
 pub mod verify;

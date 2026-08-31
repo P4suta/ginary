@@ -25,3 +25,5 @@ only partly built, the record says so under `Consequences`.
   runtime, and pruning honours the lock
 - [0011](0011-verify-and-sbom.md) — What `verify` checks, and how the SBOM stays a function of
   the artifact
+- [0012](0012-stub-identity-and-feature-split.md) — A stub says what it is, and the `cli` feature
+  is what makes one

@@ -54,7 +54,7 @@ pub fn require_tools(names: &[&str]) -> Option<Toolchain> {
     let mut tools = BTreeMap::new();
 
     for name in names {
-        match ginary::doctor::find_in_path(name, path_var.as_deref()) {
+        match ginary::process::find_in_path(name, path_var.as_deref()) {
             Some(path) => {
                 tools.insert((*name).to_owned(), path);
             }

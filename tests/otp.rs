@@ -5,6 +5,10 @@
 //! directory, because the interesting cases are the broken ones and no machine
 //! has a broken Erlang installed on purpose. The handful of tests that do reach
 //! the host toolchain are gated and say so.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

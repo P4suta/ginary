@@ -20,6 +20,10 @@
 //! The one test that needs a real program is gated on `strip` itself, and it
 //! uses the running test binary as its native code: a real, unstripped,
 //! dynamically linked ELF that is on disk at a path the test can name.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

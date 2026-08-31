@@ -15,6 +15,10 @@
 //!
 //! Gated on `gleam`, `erl` and `strip`; a machine without them reports a skip,
 //! and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

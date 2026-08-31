@@ -12,6 +12,10 @@
 //! there: the whole point of an allowlist is that what is absent is as
 //! deliberate as what is present, and an assertion that only looks at what is
 //! present cannot see a file that should not have been copied.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

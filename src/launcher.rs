@@ -86,6 +86,21 @@ pub const SELFTEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 /// leaves for a usage error.
 pub const CMD_USAGE_EXIT: u8 = 2;
 
+/// The line a launcher-only build prints when it is run with no payload.
+///
+/// A stub is the half of ginary a cross-target artifact is made from: the
+/// launcher, and none of the command line. Run on its own it is a file nobody
+/// appended a payload to, and the useful answer is what it is and which
+/// target it is for — never a help text, because there is no command to help
+/// with. `main` prints it and exits [`CMD_USAGE_EXIT`].
+///
+/// The sentence lives here rather than in `main` so that both flavors of the
+/// test suite can assert it: the binary that prints it exists only in one of
+/// them.
+pub fn no_payload_line(target: crate::target::Target) -> String {
+    format!("this is a ginary launcher stub for {target}; it carries no payload and no CLI")
+}
+
 /// Decides which half of the binary this copy is.
 ///
 /// [`Some`] means the running executable ends in a trailer and is a packaged

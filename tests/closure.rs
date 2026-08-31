@@ -12,6 +12,10 @@
 //! changes on every run. And an assertion names a value, never a shape: the
 //! closure's whole reason to exist is that its answer is exact and
 //! reproducible.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

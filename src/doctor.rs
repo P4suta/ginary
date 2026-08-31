@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache_dir::{self, EnvSnapshot};
 use crate::config::{ProjectConfig, TargetConfig};
 use crate::elf::{self, ElfKind};
-use crate::erts_source::ErtsSourceSpec;
+use crate::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use crate::otp;
 use crate::process::{NULL_DEVICE, run_with_timeout};
 use crate::target::Target;
@@ -883,14 +883,38 @@ pub fn probe_targets(
     targets: &[Target],
     config: &BTreeMap<String, TargetConfig>,
 ) -> Vec<TargetProbe> {
+    probe_targets_with(targets, config, crate::erts_source::resolve)
+}
+
+/// [`probe_targets`], with the host runtime's resolution injected.
+///
+/// The one row that reads a runtime is the host's own, and reading it needs an
+/// Erlang on the machine. Without this seam every assertion about that row
+/// would be toolchain-gated, and the rule the column states — the host's
+/// runtime resolves, and a machine whose installation cannot be read answers
+/// `not yet` with the reason beside it — would go untested exactly where it
+/// matters most, on a machine that has no Erlang.
+///
+/// `resolve` is [`crate::erts_source::resolve`] in the wrapper above. It is
+/// called for the host's own row and for nothing else, so a probe of any other
+/// target never reaches it.
+pub fn probe_targets_with(
+    targets: &[Target],
+    config: &BTreeMap<String, TargetConfig>,
+    resolve: impl Fn(&ErtsSourceSpec, &Target) -> Result<ResolvedErts, ErtsError>,
+) -> Vec<TargetProbe> {
     targets
         .iter()
-        .map(|target| probe_target(*target, config.get(&target.name())))
+        .map(|target| probe_target(*target, config.get(&target.name()), &resolve))
         .collect()
 }
 
 /// One row: what the target's `erts` says, and what can be done about it.
-fn probe_target(target: Target, config: Option<&TargetConfig>) -> TargetProbe {
+fn probe_target(
+    target: Target,
+    config: Option<&TargetConfig>,
+    resolve: &impl Fn(&ErtsSourceSpec, &Target) -> Result<ResolvedErts, ErtsError>,
+) -> TargetProbe {
     let name = target.name();
     let spec = match config.map_or_else(|| Ok(ErtsSourceSpec::Host), TargetConfig::erts_spec) {
         Ok(spec) => spec,
@@ -929,7 +953,7 @@ fn probe_target(target: Target, config: Option<&TargetConfig>) -> TargetProbe {
     // `doctor` describes the machine, and inspecting a runtime root is half of
     // a build.
     if spec == ErtsSourceSpec::Host && target == Target::host() {
-        return match crate::erts_source::resolve(&spec, &target) {
+        return match resolve(&spec, &target) {
             Ok(erts) => TargetProbe {
                 name,
                 erts: spec.label(),

@@ -3,6 +3,10 @@
 //!
 //! These tests drive the real binary through `assert_cmd` and only assert on the
 //! user-visible contract: exit codes, human output shape and the JSON schemas.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 use assert_cmd::Command;
 use predicates::prelude::*;

@@ -21,8 +21,8 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)* or
-*(B2)* exist; the rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)*,
+*(B2)*, *(C1)* or *(C2)* exist; the rest are the plan.
 
 ```
 build side
@@ -43,7 +43,7 @@ build side
   manifest.rs      (A3a) ginary.json and ginary.index.json
   payload.rs       (A3a) deterministic tar + zstd; safe unpack
   trailer.rs       (A3a) the 64-byte trailer
-  stub.rs          finds and validates the target's ginary binary
+  stub.rs          (C2) finds a target's ginary binary and proves it is one
   sign_macos.rs    Mach-O section injection and ad-hoc signing
   verify.rs        (B2) the deep check: every file against the index, every ELF
   sbom.rs          (B2) the SPDX 2.3 bill of materials for one artifact
@@ -61,6 +61,7 @@ launcher side
 
 shared
   target.rs        (A0) <os>-<arch>[-<libc>]
+  stubid.rs        (C2) the 128-byte identity marker, and the scanner for it
   cache_dir.rs     (A0) the build side's view of `cache::resolve`
   doctor.rs        (A0) toolchain and environment probing; (B2) the cache probe,
                    the project context and the crypto NIF
@@ -101,15 +102,20 @@ gleam.toml [tools.ginary]        CLI flags
    payload::pack (sorted tar, deterministic headers, zstd)
                     |
                     v
-   stub::resolve(target) -> copy -> append payload -> append trailer
+   stub::locate + verify -> copy -> append payload -> append trailer
                     |
                     v
         build/ginary/<app>-<target>[.exe]
 ```
 
-That is the finished shape. A4 implements the host half of it — `erts_source::resolve` is
-`otp::discover` and `stub::resolve` is the running executable, so the artifact is
-`build/ginary/<app>` with no target suffix; see "One build, end to end" below.
+That is the finished shape. A4 implemented the host half of it — `erts_source::resolve` was
+`otp::discover` and the stub was the running executable, so the artifact was
+`build/ginary/<app>` with no target suffix; see "One build, end to end" below. C2 finished the
+stub half for every target: `stub::locate` searches `--stub`, `$GINARY_STUB_DIR`, the running
+executable and the cache, and `stub::verify` proves the file is a ginary of this version, for
+this target, that reads this payload format and carries no payload of its own. The runtime half
+of a cross build is still manual — a target other than the host must name its `erts` — and
+`bundle` refuses one that does not, before the export.
 
 `process.rs` exists because two callers need the same bounded child process and
 neither may hang: `doctor` probes four tools, `otp` asks `erl` for its code root.
@@ -118,6 +124,22 @@ cannot outlive the caller's timeout; only the direct child is killed and reaped.
 Both output streams are returned, because a program that fails writes its
 diagnosis to standard error and nothing at all to standard output.
 Nothing on the launcher path uses it.
+
+## Two flavors of the binary
+
+The `cli` feature (default on) is what makes a *stub*: `cargo build --no-default-features` is
+the launcher, the payload reader, the cache and nothing else — no clap, no TOML reader, no
+build-side module. The order the split is written in is the point: everything the launcher path
+needs is unconditional, and everything else is behind `cli`. Two modules are split rather than
+gated whole, because the launcher needs a few items out of each — `assemble` keeps the staging
+listing types that `manifest::Index` and `payload::pack` are written in terms of, and `config`
+keeps the filename-encoding table that `launch` maps to an emulator flag.
+
+Both flavors carry `stubid::GINARY_STUB_ID`, the 128-byte record naming the version, target,
+payload format and flavor of the build; `docs/format.md` specifies it and
+[ADR 0012](../adr/0012-stub-identity-and-feature-split.md) says why it is there. `build.rs` is
+what makes it possible: it maps Cargo's `TARGET` onto the canonical target name, which is the
+one fact a cross-compiled binary cannot read off the machine it was built on.
 
 ## The application closure
 

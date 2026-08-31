@@ -13,6 +13,10 @@
 //!   a later build recognises as the residue of a killed one;
 //! * the report's two rendered forms, which are pure functions of numbers a
 //!   test can choose.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 
@@ -303,26 +307,32 @@ fn foreign_target() -> Target {
 }
 
 #[test]
-fn a_build_for_a_target_this_ginary_cannot_make_is_refused() {
+fn a_build_for_a_target_whose_stub_is_not_there_is_refused() {
+    // The running executable is a stub for this machine and nothing else, so
+    // a cross build has to be handed one. `--stub` is the instruction form of
+    // that, and an instruction that cannot be followed is a refusal rather
+    // than a search: the message names the file the user typed.
     let project = TempProject::named("hello");
     let foreign = foreign_target();
-    let options = build_options_for(&project, &[foreign]);
+    let missing = project.root().join("no-such-stub");
+    let options = BuildOptions {
+        stub: Some(missing.clone()),
+        ..build_options_for(&project, &[foreign])
+    };
 
     let error = bundle::build_with_stub(&options, &ginary_bin(), &Diag::disabled())
-        .expect_err("a cross build is not possible yet");
+        .expect_err("a cross build needs a stub for its target");
 
     assert!(
-        matches!(
-            &error,
-            BundleError::CrossTargetNotAvailable { target, host }
-                if *target == foreign && *host == Target::host()
-        ),
-        "expected BundleError::CrossTargetNotAvailable, got {error:?}"
+        matches!(&error, BundleError::Stub { target, .. } if *target == foreign),
+        "expected BundleError::Stub for {foreign}, got {error:?}"
     );
-    let message = error.to_string();
+    let cause = std::error::Error::source(&error)
+        .expect("the refusal carries the gate that refused")
+        .to_string();
     assert!(
-        message.contains("cross builds arrive with the stub/catalog milestones"),
-        "the message says when it will work: {message}"
+        cause.contains(&missing.display().to_string()) && cause.contains("is not there"),
+        "the refusal names the file `--stub` pointed at: {cause}"
     );
 }
 

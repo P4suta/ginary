@@ -22,6 +22,10 @@
 //! index can be made to disagree with the tree it describes, and copies this
 //! test run's own binary in as a real object. The gated test at the end runs
 //! the whole thing over a real `ginary build`.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

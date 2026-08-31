@@ -1,0 +1,14 @@
+---
+source: tests/stubid.rs
+expression: rendered
+---
+no ginary identity marker: this file was not built by ginary
+2 ginary identity markers: exactly one is a stub, so this file is not one
+the marker at offset 4096 is not terminated within its 128 bytes
+the marker at offset 4096 is not UTF-8
+the marker has no `t` field; a ginary marker names v, t, f and k
+the marker names the unknown field `x`; a ginary marker names v, t, f and k
+the marker names the target `plan9-mips`, which this ginary has no name for
+the marker's format version `one` is not a number
+the marker's flavor `lite` is neither `full` nor `stub`
+the marker at offset 4096 has a non-zero byte at 127 of its padding

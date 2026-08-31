@@ -15,6 +15,10 @@
 //! runtime as far as the plumbing above the reader is concerned. The two
 //! gated tests at the end run the real reader over the host's own `beam.smp`,
 //! which is the half a fake cannot cover.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

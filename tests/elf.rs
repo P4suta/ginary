@@ -13,6 +13,10 @@
 //! that file is a Mach-O and the assertions would be about the wrong format.
 //! The rest — the magic check, the version comparison, the never-panic
 //! properties — is portable and always runs.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

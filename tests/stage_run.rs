@@ -13,6 +13,10 @@
 //! a skip. `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure, which
 //! is what CI sets: this is the coverage that would be worth the most and cost
 //! the least to lose silently.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

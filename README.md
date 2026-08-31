@@ -154,14 +154,16 @@ table. `--target` is repeatable and replaces the list rather than adding to it. 
 `host`, `all` — every target ginary models — or a canonical `<os>-<arch>[-<libc>]` name, and a
 target named twice is built once.
 
-**Cross builds arrive later.** Only the host target builds today: naming any other one is
-refused, in as many words, before the project is exported. The plumbing is here so that a
-`gleam.toml` can be written ahead of the milestones that fill it in — an `erts` of `catalog`,
-`tarball:` or `docker:` parses now and is refused at build time, naming the milestone it arrives
-with. `host` and `dir:PATH` are the two sources that resolve, and a relative `dir:` or `tarball:`
-path is relative to the project, as `vm_args` and `sys_config` are. An entry of `targets` that
-names no target is refused where the manifest is read, so `ginary doctor` reports the list rather
-than printing a row for a build nobody can run.
+**A cross build needs two things, and one of them is still manual.** The artifact for another
+machine is that machine's *stub* — a ginary of this exact version, cross-compiled — with the
+payload appended to it, and the payload holds a BEAM runtime for that machine too. The stub half
+works: see "Stubs" below. The runtime half has no catalogue yet, so a target other than the host
+has to be told where its runtime is, with `[tools.ginary.target.<name>] erts = "dir:PATH"` or a
+`tarball:`; a build that is not told refuses and quotes the table to write. An `erts` of
+`catalog` or `docker:` parses now and is refused at build time, naming the milestone it arrives
+with. A relative `dir:` or `tarball:` path is relative to the project, as `vm_args` and
+`sys_config` are. An entry of `targets` that names no target is refused where the manifest is
+read, so `ginary doctor` reports the list rather than printing a row for a build nobody can run.
 
 Whatever a source claims, the bundled `beam.smp` itself is read: the target, the linkage and the
 minimum glibc come out of that file, and a runtime for another target fails the build naming
@@ -184,6 +186,51 @@ today and for this machine: a source that arrives with a later milestone reads `
 does a runtime that is on this machine and cannot be read — the row says which root was refused
 and why. A target that is not this machine and names `erts = "host"` reads `not yet` too: the
 host's own emulator is for the host, and a build would refuse it.
+
+### Stubs
+
+A stub is the same ginary, built with `--no-default-features`: the launcher, the payload reader
+and the cache, and none of the command line. It is what a cross-target artifact is made of, and
+running one on its own prints what it is and which target it is for rather than a help text
+there are no commands behind.
+
+Every ginary binary — both flavors — carries a 128-byte identity marker naming the version, the
+target, the payload format and the flavor, so a file that claims to be a stub can be checked
+rather than trusted. `docs/format.md` specifies it.
+
+**Stubs are version-locked.** The launcher inside a stub reads the payload this ginary writes, so
+a stub built by another ginary is refused by name rather than assumed compatible. A build for a
+target other than this machine looks for one in this order:
+
+1. `--stub PATH`, which is an instruction: the file named there is used or the build fails, and
+   nothing else is tried.
+2. `$GINARY_STUB_DIR/ginary-stub-<version>-<target>`, then
+   `$GINARY_STUB_DIR/ginary-<version>-<target>`.
+3. The running executable, when the target is this machine.
+4. `<cache>/stubs/<version>/<target>`, where a fetched stub will be kept.
+
+A target with no stub anywhere is refused with every path that was tried and how to make one.
+Downloading a stub from a release arrives with the catalogue milestone.
+
+Building them is one task, and it needs `cross` and a Docker daemon:
+
+```console
+$ mise run stubs:build          # target/stubs/ginary-stub-<version>-<target>[.exe]
+$ export GINARY_STUB_DIR=$PWD/target/stubs
+$ ginary build --target linux-aarch64-musl
+```
+
+It attempts five targets. The four Linux ones build today. `windows-x86_64` does **not** yet:
+the launcher path is Unix-only, so the crate does not compile for `x86_64-pc-windows-gnu` — the
+task keeps the target, prints `FAILED windows-x86_64` and exits non-zero rather than dropping it,
+and the Windows launcher is Phase D. The two macOS stubs are not attempted at all and cannot be:
+there is no macOS toolchain in a Linux container, so they come from the release build on a macOS
+runner and from nowhere else.
+
+Whatever the stub came from, it has to pass every gate before a payload is appended: exactly one
+identity marker, this ginary's version, this payload format, the target that was asked for, an
+ELF or PE header that agrees with the marker, and no trailer of its own — a file that already
+carries a payload is an artifact, not a stub.
 
 ### The runtime settings
 
@@ -273,6 +320,7 @@ usage error.
 | `GINARY_TRACE=<file>` | both | One JSON object per phase, appended to the file. |
 | `GINARY_SUPERVISE=1` | the artifact | Spawn and wait instead of `execve`; a child killed by a signal exits `128 + signo`. |
 | `GINARY_PRUNE_DAYS` | the artifact | How many days an unused cache entry of this application may live. Defaults to 14; `0` turns pruning off. A value that is not a count of days falls back to the default rather than failing a launch. |
+| `GINARY_STUB_DIR` | `ginary build` | A directory of prebuilt stubs, searched for `ginary-stub-<version>-<target>` and then `ginary-<version>-<target>` before the cache. `mise run stubs:build` fills one. |
 | `SOURCE_DATE_EPOCH` | `ginary build` | Pins the manifest's `created_at`, so two builds of one project produce byte-identical artifacts. |
 
 Every run prunes its own application's stale entries as it starts, best effort and never fatal;
@@ -310,11 +358,16 @@ forwarding, and the application receives its arguments exactly as typed.
 
 ## Limitations
 
-- **Linux x86_64 only, against the host's OTP.** The runtime that goes into an artifact is the
-  one `erl` reports on the build machine, or the one `--otp-root` or a `dir:` source names.
-  `--target` exists and accepts the host; any other target is refused, naming the milestone that
-  brings it. Prebuilt runtime downloads and the musl variants are Phase C of
+- **A cross build still has to be handed its runtime.** The stub for another target is found and
+  proved — `--stub`, `$GINARY_STUB_DIR`, the cache — but the BEAM that goes into the payload is
+  the one `erl` reports on the build machine, or the one `--otp-root` or a `dir:`/`tarball:`
+  source names. A target other than the host with no `erts` named for it is refused, quoting the
+  table to write. Prebuilt runtime downloads and the musl variants are Phase C of
   [the roadmap](docs/dev/log/).
+- **Only the four Linux stubs build here.** `mise run stubs:build` attempts them and
+  `windows-x86_64`; the Windows one does not compile yet, because the launcher path is Unix-only
+  (Phase D), and the task says so and exits non-zero. No macOS stub can be built on Linux at all;
+  the two of them come from the release build on a macOS runner.
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,

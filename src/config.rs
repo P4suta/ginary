@@ -20,29 +20,40 @@
 //! that the message can name which of the seven sub-tables holds it; see
 //! [`TargetConfig::unknown`].
 
+#[cfg(feature = "cli")]
 use std::collections::BTreeMap;
+#[cfg(feature = "cli")]
 use std::ffi::OsString;
+#[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "cli")]
 use serde::Deserialize;
 
+#[cfg(feature = "cli")]
 use crate::erts_source::{ErtsSourceSpec, SpecError};
+#[cfg(feature = "cli")]
 use crate::strip::StripOptions;
+#[cfg(feature = "cli")]
 use crate::target::Target;
 
 /// Where an artifact is written when `[tools.ginary] output` says nothing.
 ///
 /// A directory relative to the project root; the artifact lands at
 /// `<project>/build/ginary/<app>`.
+#[cfg(feature = "cli")]
 pub const DEFAULT_OUTPUT: &str = "build/ginary";
 
 /// The zstd level the payload is packed at by default.
+#[cfg(feature = "cli")]
 pub const DEFAULT_COMPRESSION_LEVEL: i32 = 19;
 
 /// The lowest zstd level `compression_level` may name.
+#[cfg(feature = "cli")]
 pub const MIN_COMPRESSION_LEVEL: i32 = 1;
 
 /// The highest zstd level `compression_level` may name.
+#[cfg(feature = "cli")]
 pub const MAX_COMPRESSION_LEVEL: i32 = 22;
 
 /// The emulator flags `[tools.ginary] erl_flags` may not repeat.
@@ -51,6 +62,7 @@ pub const MAX_COMPRESSION_LEVEL: i32 = 22;
 /// manifest, at run time. A second copy in `erl_flags` either contradicts the
 /// one ginary passes or silently changes what the artifact does, so the build
 /// refuses it and says which one the launcher owns. See [`erl_flag_reason`].
+#[cfg(feature = "cli")]
 pub const REJECTED_ERL_FLAGS: [&str; 5] = ["-boot", "-extra", "-noshell", "-pa", "-pz"];
 
 /// The filename encoding an artifact uses when the project says nothing.
@@ -71,6 +83,7 @@ pub const FILENAME_ENCODINGS: [&str; 3] = ["utf8", "latin1", "auto"];
 /// contradicts it or silently changes what the artifact does. `-args_file`
 /// itself is refused because `erl` follows the nesting and a file that
 /// includes another is a file whose content ginary has not linted.
+#[cfg(feature = "cli")]
 pub const REJECTED_ARGS_FILE_FLAGS: [&str; 7] = [
     "-args_file",
     "-boot",
@@ -88,12 +101,14 @@ pub const REJECTED_ARGS_FILE_FLAGS: [&str; 7] = [
 /// `env` *after* the scrub. A default that could be reintroduced there would
 /// be the artifact putting back the very variable the launcher removed to make
 /// the run reproducible, so the name is refused at build time instead.
+#[cfg(feature = "cli")]
 pub const REJECTED_ENV_PREFIX: &str = "ERL_";
 
 /// The variables `[tools.ginary] env` may not name, sorted.
 ///
 /// The four the launcher derives from the extracted root, plus `HOME`, which
 /// it defaults only when the caller has not set one.
+#[cfg(feature = "cli")]
 pub const REJECTED_ENV_NAMES: [&str; 5] = ["BINDIR", "EMU", "HOME", "PROGNAME", "ROOTDIR"];
 
 /// Why a name in `erts_extra_bins` or `--extra-bin` may be refused.
@@ -103,20 +118,25 @@ pub const REJECTED_ENV_NAMES: [&str; 5] = ["BINDIR", "EMU", "HOME", "PROGNAME", 
 /// writes outside both trees. It is the same rule the closure applies to an
 /// application name, for the same reason: the value is interpolated into a
 /// path.
+#[cfg(feature = "cli")]
 pub const EXTRA_BIN_REASON: &str =
     "a program name is a file name in the runtime's bin directory, not a path";
 
 /// The target selection a project that names none builds for.
+#[cfg(feature = "cli")]
 pub const DEFAULT_TARGETS: [&str; 1] = ["host"];
 
 /// The two values `[tools.ginary.target.<name>] otp_variant` accepts.
+#[cfg(feature = "cli")]
 pub const OTP_VARIANTS: [&str; 2] = ["static", "dynamic"];
 
 /// Why `host` and `all` may not name a per-target sub-table.
+#[cfg(feature = "cli")]
 pub const TARGET_TABLE_PSEUDO: &str =
     "a sub-table configures one target, and `host` and `all` name a set of them";
 
 /// The four keys `[tools.ginary.target.<name>]` has, in declaration order.
+#[cfg(feature = "cli")]
 pub const TARGET_KEYS: [&str; 4] = ["erts", "otp_variant", "native", "codesign"];
 
 /// The settings of one target, `[tools.ginary.target.<name>]`.
@@ -131,6 +151,7 @@ pub const TARGET_KEYS: [&str; 4] = ["erts", "otp_variant", "native", "codesign"]
 /// setting its author believes is in force.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
+#[cfg(feature = "cli")]
 pub struct TargetConfig {
     /// Where this target's runtime comes from; see
     /// [`crate::erts_source::ErtsSourceSpec`].
@@ -152,6 +173,7 @@ pub struct TargetConfig {
     pub unknown: BTreeMap<String, toml::Value>,
 }
 
+#[cfg(feature = "cli")]
 impl TargetConfig {
     /// The ERTS source this target names, or [`ErtsSourceSpec::Host`].
     ///
@@ -174,6 +196,7 @@ impl TargetConfig {
 /// the `strip` / `strip_elf` / `strip_beams` precedence in one place.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[cfg(feature = "cli")]
 pub struct ToolsConfig {
     /// The directory the artifact is written into, relative to the project.
     pub output: Option<String>,
@@ -214,6 +237,7 @@ pub struct ToolsConfig {
     pub target: BTreeMap<String, TargetConfig>,
 }
 
+#[cfg(feature = "cli")]
 impl Default for ToolsConfig {
     /// Every setting at its default, which is what a project with no
     /// `[tools.ginary]` table builds with.
@@ -246,6 +270,7 @@ impl Default for ToolsConfig {
     }
 }
 
+#[cfg(feature = "cli")]
 impl ToolsConfig {
     /// The output directory, or [`DEFAULT_OUTPUT`].
     pub fn output(&self) -> &str {
@@ -444,6 +469,7 @@ impl ToolsConfig {
 }
 
 /// [`TARGET_KEYS`] as the comma-separated list an error lists them in.
+#[cfg(feature = "cli")]
 fn key_list() -> String {
     TARGET_KEYS
         .iter()
@@ -454,6 +480,7 @@ fn key_list() -> String {
 
 /// What a project's `gleam.toml` says, as far as ginary reads it.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(feature = "cli")]
 pub struct ProjectConfig {
     /// The project name, which is also the application name and the artifact's
     /// file name.
@@ -464,6 +491,7 @@ pub struct ProjectConfig {
     pub tools: ToolsConfig,
 }
 
+#[cfg(feature = "cli")]
 impl ProjectConfig {
     /// Reads and validates the `gleam.toml` at `path`.
     ///
@@ -521,6 +549,7 @@ impl ProjectConfig {
 /// and underscores. The rule matters here rather than in Gleam because the
 /// name is interpolated into a path, into the manifest's `app`, and into the
 /// `-eval` expression the launcher passes to the emulator.
+#[cfg(feature = "cli")]
 pub fn is_gleam_name(name: &str) -> bool {
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
@@ -536,6 +565,7 @@ pub fn is_gleam_name(name: &str) -> bool {
 ///
 /// The reason is the actionable half of the message: a user who is told that
 /// `-pa` is refused still has to be told who sets it instead.
+#[cfg(feature = "cli")]
 pub fn erl_flag_reason(flag: &str) -> Option<&'static str> {
     match flag {
         "-boot" => Some("ginary boots the runtime from the bundled bin/no_dot_erlang"),
@@ -564,6 +594,7 @@ pub fn filename_encoding_flag(name: &str) -> Option<&'static str> {
 ///
 /// The reason is the actionable half: a user told that `-pa` is refused still
 /// has to be told who sets it instead. See [`REJECTED_ARGS_FILE_FLAGS`].
+#[cfg(feature = "cli")]
 pub fn args_file_flag_reason(flag: &str) -> Option<&'static str> {
     match flag {
         "-args_file" => Some(
@@ -579,6 +610,7 @@ pub fn args_file_flag_reason(flag: &str) -> Option<&'static str> {
 /// Why a variable may not appear in `[tools.ginary] env`, or [`None`].
 ///
 /// See [`REJECTED_ENV_PREFIX`] and [`REJECTED_ENV_NAMES`].
+#[cfg(feature = "cli")]
 pub fn env_name_reason(name: &str) -> Option<&'static str> {
     if name.starts_with(REJECTED_ENV_PREFIX) {
         return Some(
@@ -602,6 +634,7 @@ pub fn env_name_reason(name: &str) -> Option<&'static str> {
 /// because it is the only thing that makes a refusal actionable: an args file
 /// is a list of flags with no other structure.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "cli")]
 pub struct ArgsToken {
     /// The 1-based line the token started on.
     pub line: u32,
@@ -614,6 +647,7 @@ pub struct ArgsToken {
 /// Whitespace separates tokens; `'` and `"` quote a run of characters,
 /// including whitespace, and are not part of the token; `#` starts a comment
 /// that runs to the end of the line, unless it is inside quotes.
+#[cfg(feature = "cli")]
 pub fn tokenize_args_file(text: &str) -> Vec<ArgsToken> {
     scan_args_file(text).0
 }
@@ -624,6 +658,7 @@ pub fn tokenize_args_file(text: &str) -> Vec<ArgsToken> {
 /// never closed swallows the rest of the file into one token, so every token
 /// after it is a guess, and a caller that lints tokens has to know. See
 /// [`ConfigError::ArgsFileQuote`].
+#[cfg(feature = "cli")]
 fn scan_args_file(text: &str) -> (Vec<ArgsToken>, Option<u32>) {
     let mut tokens = Vec::new();
     // The token being built, with the line it started on. A quote opens one
@@ -673,6 +708,7 @@ fn scan_args_file(text: &str) -> (Vec<ArgsToken>, Option<u32>) {
 }
 
 /// Adds one character to the token being built, starting one if there is none.
+#[cfg(feature = "cli")]
 fn push(pending: &mut Option<(u32, String)>, line: u32, character: char) {
     pending
         .get_or_insert_with(|| (line, String::new()))
@@ -681,6 +717,7 @@ fn push(pending: &mut Option<(u32, String)>, line: u32, character: char) {
 }
 
 /// Ends the token being built, if there is one.
+#[cfg(feature = "cli")]
 fn flush(pending: &mut Option<(u32, String)>, tokens: &mut Vec<ArgsToken>) {
     if let Some((line, text)) = pending.take() {
         tokens.push(ArgsToken { line, text });
@@ -698,6 +735,7 @@ fn flush(pending: &mut Option<(u32, String)>, tokens: &mut Vec<ArgsToken>) {
 /// first because it decides what the tokens are, and then
 /// [`ConfigError::ArgsFileFlag`] for the first token of
 /// [`REJECTED_ARGS_FILE_FLAGS`] the file holds.
+#[cfg(feature = "cli")]
 pub fn lint_args_file(text: &str, path: &Path) -> Result<(), ConfigError> {
     let (tokens, unterminated) = scan_args_file(text);
     // Before the flags, because it decides what the flags even are: with a
@@ -730,6 +768,7 @@ pub fn lint_args_file(text: &str, path: &Path) -> Result<(), ConfigError> {
 /// [`ConfigError::SysConfigSyntax`] carrying the line and column
 /// [`crate::appfile::parse_terms`] reported, and
 /// [`ConfigError::SysConfigShape`] when the file parses and is not one list.
+#[cfg(feature = "cli")]
 pub fn validate_sys_config(text: &str, path: &Path) -> Result<(), ConfigError> {
     use crate::appfile::Term;
 
@@ -757,6 +796,7 @@ pub fn validate_sys_config(text: &str, path: &Path) -> Result<(), ConfigError> {
 }
 
 /// What one term is, as the phrase [`ConfigError::SysConfigShape`] reads with.
+#[cfg(feature = "cli")]
 fn describe_term(term: &crate::appfile::Term) -> &'static str {
     use crate::appfile::Term;
 
@@ -778,6 +818,7 @@ fn describe_term(term: &crate::appfile::Term) -> &'static str {
 /// the application name is appended to it; anything else is the artifact's own
 /// path. Without `--out` the answer is `<root>/<configured>/<app>`, because
 /// `[tools.ginary] output` is always a directory.
+#[cfg(feature = "cli")]
 pub fn resolve_output(root: &Path, configured: &str, flag: Option<&Path>, app: &str) -> PathBuf {
     match flag {
         Some(out) if names_a_directory(out) => out.join(app),
@@ -792,6 +833,7 @@ pub fn resolve_output(root: &Path, configured: &str, flag: Option<&Path>, app: &
 /// only say so with a trailing separator, and it has to be able to:
 /// `ginary build --out out/` must write `out/<app>` rather than a *file*
 /// called `out`.
+#[cfg(feature = "cli")]
 fn names_a_directory(path: &Path) -> bool {
     if path.is_dir() {
         return true;
@@ -809,6 +851,7 @@ fn names_a_directory(path: &Path) -> bool {
 /// values are what clap parsed and nothing more: the merge, the defaults and
 /// the validation all happen in [`BuildOptions::merge`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg(feature = "cli")]
 pub struct BuildFlags {
     /// Where to start looking for `gleam.toml`. The working directory when the
     /// caller does not say otherwise.
@@ -841,6 +884,8 @@ pub struct BuildFlags {
     pub sys_config: Option<PathBuf>,
     /// `--target`, repeatable: `host`, `all` or a canonical target name.
     pub targets: Vec<String>,
+    /// `--stub`, the stub every target's artifact is built from.
+    pub stub: Option<PathBuf>,
     /// `--explain`.
     pub explain: bool,
     /// `-v`, counted, so that `-vv` stays open.
@@ -854,6 +899,7 @@ pub struct BuildFlags {
 /// left for a later stage to default, because a default applied twice is a
 /// default that can disagree with itself.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(feature = "cli")]
 pub struct BuildOptions {
     /// The project root, the directory holding `gleam.toml`.
     pub root: PathBuf,
@@ -898,12 +944,19 @@ pub struct BuildOptions {
     pub named_targets: bool,
     /// The per-target sub-tables, keyed by canonical target name.
     pub target_config: BTreeMap<String, TargetConfig>,
+    /// `--stub`, used as typed and never fallen back from.
+    ///
+    /// [`None`] is the search [`crate::stub::locate`] performs; a value is an
+    /// instruction, so a build that cannot use the file it names refuses
+    /// rather than looking elsewhere.
+    pub stub: Option<PathBuf>,
     /// Whether to print the closure and staging accounts before the report.
     pub explain: bool,
     /// How much the build says about itself on standard error.
     pub verbose: u8,
 }
 
+#[cfg(feature = "cli")]
 impl BuildOptions {
     /// Whether the artifacts carry a `-<target>` suffix.
     ///
@@ -1073,6 +1126,7 @@ impl BuildOptions {
             targets: crate::target::resolve_targets(&flags.targets, &config.tools.targets)?,
             named_targets: crate::target::names_a_target(&flags.targets, &config.tools.targets),
             target_config: config.tools.target.clone(),
+            stub: flags.stub.clone(),
             explain: flags.explain,
             verbose: flags.verbose,
         })
@@ -1086,6 +1140,7 @@ impl BuildOptions {
 /// project's own, and is joined onto `root` for the reason
 /// `[tools.ginary] output` is: a value in `gleam.toml` describes the project
 /// rather than the terminal it is built from.
+#[cfg(feature = "cli")]
 fn resolve_file(root: &Path, flag: Option<&Path>, configured: Option<&str>) -> Option<PathBuf> {
     match (flag, configured) {
         (Some(path), _) => Some(path.to_path_buf()),
@@ -1100,6 +1155,7 @@ fn resolve_file(root: &Path, flag: Option<&Path>, configured: Option<&str>) -> O
 /// `--strip-beams-only` against a table that says `strip_beams = false` turns
 /// the beam half on. Without a flag the table answers, through
 /// [`ToolsConfig::strip_options`].
+#[cfg(feature = "cli")]
 fn merge_strip(tools: &ToolsConfig, flags: &BuildFlags) -> StripOptions {
     if flags.no_strip {
         return StripOptions {
@@ -1127,6 +1183,7 @@ fn merge_strip(tools: &ToolsConfig, flags: &BuildFlags) -> StripOptions {
 /// The table's order comes first because it is the project's stated intent;
 /// the flags are an addition to it, not a replacement, and a name asked for
 /// twice is bundled once.
+#[cfg(feature = "cli")]
 fn append_unique(base: &[String], extra: &[String]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::with_capacity(base.len() + extra.len());
     for name in base.iter().chain(extra) {
@@ -1145,6 +1202,7 @@ fn append_unique(base: &[String], extra: &[String]) -> Vec<String> {
 /// strictness belongs one level down, on [`ToolsConfig`], which is the table
 /// ginary owns.
 #[derive(Debug, Default, Deserialize)]
+#[cfg(feature = "cli")]
 struct RawManifest {
     /// The project name; required, but reported by
     /// [`ConfigError::MissingName`] rather than by serde, so the message names
@@ -1159,6 +1217,7 @@ struct RawManifest {
 
 /// The `[tools]` table, of which ginary reads exactly one member.
 #[derive(Debug, Default, Deserialize)]
+#[cfg(feature = "cli")]
 struct RawTools {
     /// `[tools.ginary]`.
     ginary: Option<ToolsConfig>,
@@ -1166,6 +1225,7 @@ struct RawTools {
 
 /// Why a project's configuration is not usable.
 #[derive(Debug, thiserror::Error)]
+#[cfg(feature = "cli")]
 pub enum ConfigError {
     /// The manifest could not be opened.
     #[error("cannot read {path}")]

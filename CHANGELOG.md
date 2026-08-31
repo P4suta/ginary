@@ -10,6 +10,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Every ginary binary carries a 128-byte identity marker naming the version it was built by, the
+  target it runs on, the payload format it reads and whether it holds the command line half.
+  `docs/format.md` specifies it.
+- The `cli` Cargo feature, on by default. `cargo build --no-default-features` produces a
+  launcher-only *stub* — no clap, no TOML reader and none of the build-side modules — which is
+  what a cross-target artifact is made of. Run on its own it prints what it is and which target
+  it is for. `mise run lint:stub` and `mise run test:stub` hold that build to the same gate as
+  the full one, and both are in `check`.
+- `ginary build --stub PATH`, and a search for one: `$GINARY_STUB_DIR/ginary-stub-<version>-
+  <target>`, then `ginary-<version>-<target>`, then the running executable when the target is the
+  host, then `<cache>/stubs/<version>/<target>`. Stubs are version-locked, and a file has to pass
+  seven gates — size, exactly one marker, version, payload format, target, an object header that
+  agrees with the marker, and no trailer of its own — before a payload is appended to it. A
+  target with no stub is refused with every path that was tried.
+- `mise run stubs:build` cross-builds the launcher-only stubs into `target/stubs`. It attempts
+  the four Linux targets and `windows-x86_64`; the four Linux ones build, the Windows one does
+  not compile yet because the launcher path is Unix-only, and the task reports it and exits
+  non-zero rather than dropping it. macOS stubs cannot be built on Linux and come from the
+  release build.
+
+### Changed
+
+- A build for a target other than the host is no longer refused outright. What it needs now is a
+  stub, which can be built, and a runtime, which still has to be named:
+  `[tools.ginary.target.<name>] erts = "dir:..."`. A cross target with no runtime named for it is
+  refused before the project is exported, quoting the table to write.
+
 - `ginary build`: a Gleam project in, one executable out. It reads `[tools.ginary]` from
   `gleam.toml`, runs `gleam export erlang-shipment`, resolves the application closure against
   the host OTP installation, stages a trimmed runtime, strips it, packs a deterministic

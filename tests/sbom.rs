@@ -18,6 +18,10 @@
 //! function of the artifact. An SPDX document needs a unique namespace, the
 //! usual answer is a random UUID and a clock, and either would make the bill
 //! of materials the one part of a reproducible build that is not reproducible.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

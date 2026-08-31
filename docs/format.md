@@ -338,6 +338,40 @@ guessed a second time, so the index and the listing cannot disagree about what a
 The index is what makes `ginary verify` possible without extracting an artifact, and it is why
 `ginary.stage.json` does not travel.
 
+## The stub identity marker
+
+Every ginary binary — the command line tool and the launcher-only stub alike — carries a
+128-byte record naming what it is. It is not part of the payload format: it is in the *stub*, so
+it is at some offset the linker chose and it is there before any payload is appended. A build for
+another target reads it to decide whether a file it was handed may be built on.
+
+```
+GINARY-STUB-ID\0 v=<version>;t=<target>;f=<format>;k=<flavor> \0 <zero padding to 128>
+|-------------|  |---------------------------------------|
+   15 bytes                  the body, US-ASCII
+```
+
+| field | meaning                                                                    |
+|-------|----------------------------------------------------------------------------|
+| `v`   | the `ginary` version that built the file, as in `Cargo.toml`               |
+| `t`   | the canonical target name, `<os>-<arch>[-<libc>]`                          |
+| `f`   | the manifest `format_version` this build reads and writes                  |
+| `k`   | `full` for the command line build, `stub` for `--no-default-features`      |
+
+The four fields appear in that order, separated by `;`, each written `<key>=<value>`. The body is
+terminated by a NUL and every byte after that NUL to the end of the 128 is zero: the padding is
+part of the record, so two builds of one ginary for one target produce the same bytes and a
+marker whose tail holds anything else was not written by a ginary build.
+
+**Exactly one occurrence is a stub.** A reader scans the whole file for the 15-byte name. None
+means the file was not built by ginary; more than one means the file holds a copy of another
+ginary — a concatenation, a fixture, an artifact whose payload was not compressed — and a file
+with two identities has none. A reader must therefore assemble the name it searches for at run
+time out of two halves rather than storing it, or its own binary would match itself.
+
+The record is data nothing reads at run time, so a build has to keep the linker from collecting
+it: ginary marks the array `#[used]` and takes its address once in `main`.
+
 ## Determinism
 
 Packing the same staging root with the same manifest produces the same bytes, on any machine.
@@ -495,3 +529,15 @@ is a change to a *released* format: v1 has not shipped.
   artifact and does not read the copy; nothing but a reader of the directory does.
   A bare host build, which writes `build/ginary/<app>`, writes no copy: one artifact in a
   directory is its own manifest.
+
+### v1, milestone C2 — the stub identity marker
+
+- **The stub half of an artifact now says what it is.** "The stub identity marker" above
+  specifies the 128-byte record every ginary binary carries. It is additive to this document and
+  changes neither the trailer nor `format_version`: the marker lives in the stub, an artifact's
+  payload and trailer are byte-identical with or without it, and no launcher reads it. What reads
+  it is `ginary build --target`, before it appends anything, and `ginary verify` will.
+- **The marker's `f` field is this document's `format_version`.** That is what makes a stub
+  version-locked in a way a reader can check: a stub whose `f` is not the format the building
+  ginary writes carries a launcher that would be handed a payload it does not read, and it is
+  refused rather than packaged.

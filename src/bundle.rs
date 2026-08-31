@@ -45,6 +45,7 @@ use crate::otp::OtpError;
 use crate::payload::PayloadError;
 use crate::report::{ReportError, SizeReport};
 use crate::strip::{StripError, StripReport};
+use crate::stub::StubOpts;
 use crate::target::Target;
 use crate::trailer::{TRAILER_LEN, Trailer, TrailerError};
 
@@ -403,9 +404,12 @@ pub fn build_with_stub(
     // runtime before saying so would have wasted minutes to say it.
     let stub_len = check_stub(stub)?;
 
-    // Second, and for the same reason: the remedy for a target this ginary
-    // cannot make is a different command line.
+    // Second, and for the same reason: everything below is a fault in the
+    // command line or in `gleam.toml`, and each of them is cheaper to report
+    // than the export that would otherwise come first.
     let targets = build_targets(opts)?;
+    let stubs = resolve_stubs(opts, stub, stub_len, &targets)?;
+    check_cross_erts(opts, &targets)?;
 
     let project = ProjectDir::new(opts.root.clone());
     let shipment = if opts.skip_export {
@@ -415,7 +419,7 @@ pub fn build_with_stub(
     };
 
     let work = work_dir(&opts.root, std::process::id());
-    let outcome = build_each_target(opts, &targets, stub, stub_len, &shipment, &work, diag);
+    let outcome = build_each_target(opts, &stubs, &shipment, &work, diag);
 
     if opts.keep_staging {
         outcome.map(|mut report| {
@@ -466,26 +470,143 @@ pub fn remove_work_dir(work: &Path) -> Option<String> {
     }
 }
 
-/// The targets one build produces, refusing every one it cannot make.
+/// The targets one build produces.
 ///
 /// [`BuildOptions::merge`] resolves at least the host, so a list that is empty
 /// here came from options something else assembled, and building the host
-/// anyway would produce an artifact nobody asked for.
+/// anyway would produce an artifact nobody asked for. Nothing else is refused
+/// here: which stub a target needs is [`resolve_stubs`]'s question and which
+/// runtime it needs is [`check_cross_erts`]'s.
 ///
 /// # Errors
 ///
-/// [`BundleError::NoTargets`] when the list is empty, and
-/// [`BundleError::CrossTargetNotAvailable`] for the first target that is not
-/// the host.
+/// [`BundleError::NoTargets`] when the list is empty.
 fn build_targets(opts: &BuildOptions) -> Result<Vec<Target>, BundleError> {
     if opts.targets.is_empty() {
         return Err(BundleError::NoTargets);
     }
-    let host = Target::host();
-    if let Some(target) = opts.targets.iter().copied().find(|target| *target != host) {
-        return Err(BundleError::CrossTargetNotAvailable { target, host });
-    }
     Ok(opts.targets.clone())
+}
+
+/// One target and the file its artifact is built on top of.
+///
+/// Resolved before the project is exported, for the reason
+/// [`BundleError::BundledStub`] is: a stub that is missing, is another
+/// ginary's or is for another machine is a fault in the command line, and a
+/// build that staged a runtime before saying so would have spent minutes to
+/// say it.
+#[derive(Clone, Debug)]
+struct TargetStub {
+    /// The target this stub is for.
+    target: Target,
+    /// The file the artifact starts with.
+    path: PathBuf,
+    /// Its length, which is the payload's offset.
+    len: u64,
+}
+
+/// Where [`crate::stub::locate`] may look, for this process.
+///
+/// `--stub` first, then `GINARY_STUB_DIR`, then the resolved cache root. The
+/// cache root is required even when nothing is in it, because a search that
+/// silently dropped its last source would report a shorter list of paths than
+/// it tried.
+///
+/// # Errors
+///
+/// [`BundleError::CacheDir`] when no cache root can be resolved at all.
+fn stub_opts(opts: &BuildOptions) -> Result<StubOpts, BundleError> {
+    let cache = crate::cache_dir::resolve(&crate::cache_dir::EnvSnapshot::from_env())
+        .map_err(BundleError::CacheDir)?;
+    Ok(StubOpts {
+        explicit: opts.stub.clone(),
+        env_dir: std::env::var_os(crate::stub::STUB_DIR_VAR).map(PathBuf::from),
+        cache_dir: cache.path,
+    })
+}
+
+/// The stub every target is built from, resolved and proved.
+///
+/// The host is the running executable unless `--stub` names something else:
+/// it is a ginary of this version, for this target, and it is already open.
+/// Every other target is located and then verified, which is where a stub of
+/// another ginary, for another machine, or one that is really an artifact is
+/// refused by name.
+///
+/// # Errors
+///
+/// [`BundleError::Stub`] naming the target and the file, and
+/// [`BundleError::CacheDir`] when the search cannot even be described.
+fn resolve_stubs(
+    opts: &BuildOptions,
+    self_stub: &Path,
+    self_len: u64,
+    targets: &[Target],
+) -> Result<Vec<TargetStub>, BundleError> {
+    let host = Target::host();
+    let mut resolved = Vec::with_capacity(targets.len());
+    for target in targets.iter().copied() {
+        if target == host && opts.stub.is_none() {
+            resolved.push(TargetStub {
+                target,
+                path: self_stub.to_path_buf(),
+                len: self_len,
+            });
+            continue;
+        }
+        let search = stub_opts(opts)?;
+        let (path, _source) =
+            crate::stub::locate(&target, &search).map_err(|source| BundleError::Stub {
+                target,
+                source: Box::new(source),
+            })?;
+        crate::stub::verify(&path, &target).map_err(|source| BundleError::Stub {
+            target,
+            source: Box::new(source),
+        })?;
+        let len = std::fs::metadata(&path)
+            .map_err(|source| BundleError::Io {
+                what: format!("cannot stat the stub at {}", path.display()),
+                source,
+            })?
+            .len();
+        resolved.push(TargetStub { target, path, len });
+    }
+    Ok(resolved)
+}
+
+/// Refuses a cross target whose runtime nothing names.
+///
+/// The catalogue that would fetch one arrives with a later milestone, so
+/// today a target other than the host has to be told where its runtime is.
+/// Checked before the export for the same reason the stub is: it is a fault
+/// in `gleam.toml`, and finding it after `gleam export` would cost minutes.
+///
+/// The question is whether the target names an `erts`, not whether it has a
+/// sub-table: three of that table's four keys — `otp_variant`, `native` and
+/// `codesign` — are recorded rather than acted on today, so a table holding
+/// only those says nothing about where the runtime comes from and
+/// [`crate::config::TargetConfig::erts_spec`] would answer `Host` for it. See
+/// `tests/regressions/c2_a_target_sub_table_with_no_erts_passed_the_guard.rs`.
+///
+/// # Errors
+///
+/// [`BundleError::CrossErtsNotConfigured`] for the first such target.
+fn check_cross_erts(opts: &BuildOptions, targets: &[Target]) -> Result<(), BundleError> {
+    if opts.otp_root.is_some() {
+        return Ok(());
+    }
+    let host = Target::host();
+    for target in targets.iter().copied() {
+        let named = opts
+            .target_config
+            .get(&target.name())
+            .is_some_and(|config| config.erts.is_some());
+        if target != host && !named {
+            return Err(BundleError::CrossErtsNotConfigured { target });
+        }
+    }
+    Ok(())
 }
 
 /// Where one target's runtime comes from.
@@ -548,19 +669,18 @@ fn erts_spec_for(
 /// has already refused.
 fn build_each_target(
     opts: &BuildOptions,
-    targets: &[Target],
-    stub: &Path,
-    stub_len: u64,
+    stubs: &[TargetStub],
     shipment: &Path,
     work: &Path,
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
     let mut whole: Option<BuildReport> = None;
-    let mut rows: Vec<TargetBuild> = Vec::with_capacity(targets.len());
+    let mut rows: Vec<TargetBuild> = Vec::with_capacity(stubs.len());
     let mut warnings: Vec<String> = Vec::new();
-    let attributed = targets.len() > 1;
+    let attributed = stubs.len() > 1;
 
-    for target in targets {
+    for entry in stubs {
+        let target = &entry.target;
         let spec = erts_spec_for(opts, *target)?;
         let erts = {
             let _phase = diag.phase("erts");
@@ -591,7 +711,7 @@ fn build_each_target(
             erts: &erts,
             set: &set,
         };
-        let mut report = assemble_and_write(opts, &job, stub, stub_len, work, diag)?;
+        let mut report = assemble_and_write(opts, &job, &entry.path, entry.len, work, diag)?;
         rows.extend(report.targets.iter().cloned());
         warnings.extend(
             std::mem::take(&mut report.warnings)
@@ -1073,23 +1193,36 @@ fn write_artifact(
 /// Why a build did not produce an artifact.
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
-    /// The build asked for a target other than the host.
+    /// One target's stub could not be found or could not be proved.
     ///
-    /// Every phase below `bundle` is target-aware now, and two things a cross
-    /// build needs are not here yet: the stub for the other target, and a
-    /// runtime for it. Refused before the export, for the same reason
-    /// [`BundleError::BundledStub`] is: the remedy is a different command
-    /// line, and a build that exported and staged before saying so would have
-    /// spent minutes to say it.
-    #[error(
-        "this ginary cannot build for {target}: cross builds arrive with the stub/catalog \
-         milestones; build for {host} today"
-    )]
-    CrossTargetNotAvailable {
-        /// The target that was asked for.
+    /// Boxed because [`crate::stub::StubError`] carries a search list and this
+    /// enum is returned by value from every phase of a build.
+    #[error("cannot use a stub for {target}")]
+    Stub {
+        /// The target a stub was wanted for.
         target: Target,
-        /// The host, which is the one target that does work.
-        host: Target,
+        /// Which of the search's or the proof's gates refused it.
+        #[source]
+        source: Box<crate::stub::StubError>,
+    },
+    /// The stub search could not even be described.
+    #[error("cannot decide where to look for a stub")]
+    CacheDir(#[from] crate::cache_dir::CacheDirError),
+    /// A cross target names no runtime, and there is no catalogue yet.
+    ///
+    /// The stub half of a cross build works; the runtime half still has to be
+    /// pointed at a tree for the target, because the signed catalogue that
+    /// would fetch one arrives with a later milestone. Bundling the host's own
+    /// runtime instead would produce an artifact that cannot start on the
+    /// machine it names.
+    #[error(
+        "no runtime is configured for {target}: this ginary has no OTP catalogue yet, so a \
+         cross build needs `[tools.ginary.target.\"{target}\"] erts = \"dir:<a runtime root \
+         for {target}>\"` in gleam.toml (or `tarball:<file>`, or `--otp-root`)"
+    )]
+    CrossErtsNotConfigured {
+        /// The target with no runtime named for it.
+        target: Target,
     },
     /// The runtime for one target could not be resolved.
     #[error("cannot resolve the runtime to bundle")]
@@ -1264,6 +1397,90 @@ mod tests {
             vec!["epmd".to_owned(), "dyn_erl".to_owned()],
             "the project's own order is kept and nothing is asked for twice"
         );
+    }
+
+    // ------------------------------------------- the cross runtime rule --
+
+    #[test]
+    fn a_host_only_build_needs_no_target_sub_table() {
+        let opts = options(Path::new("/w/hello"), "");
+
+        assert!(check_cross_erts(&opts, &[Target::host()]).is_ok());
+    }
+
+    #[test]
+    fn a_cross_target_with_no_sub_table_is_refused_and_says_what_to_write() {
+        // The half of a cross build that is still manual: the stub for another
+        // machine can be built today, and the runtime for it cannot be
+        // fetched until the catalogue milestone. Bundling the host's own
+        // runtime instead would produce an artifact whose name promises a
+        // machine it cannot start on, so the build stops and dictates the
+        // table to write.
+        let target: Target = "linux-aarch64-musl".parse().expect("a target name");
+        let opts = options(Path::new("/w/hello"), "");
+
+        let error = check_cross_erts(&opts, &[Target::host(), target])
+            .expect_err("a cross target needs a runtime named for it");
+
+        assert!(
+            matches!(&error, BundleError::CrossErtsNotConfigured { target: named }
+                if *named == target),
+            "expected BundleError::CrossErtsNotConfigured, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("[tools.ginary.target.\"linux-aarch64-musl\"]")
+                && message.contains("erts = \"dir:"),
+            "the message dictates the table to write: {message}"
+        );
+    }
+
+    #[test]
+    fn a_cross_target_that_names_its_runtime_passes() {
+        let opts = options(
+            Path::new("/w/hello"),
+            "[tools.ginary.target.linux-aarch64-musl]\nerts = \"dir:/opt/otp-aarch64\"\n",
+        );
+        let target: Target = "linux-aarch64-musl".parse().expect("a target name");
+
+        assert!(check_cross_erts(&opts, &[target]).is_ok());
+    }
+
+    #[test]
+    fn a_cross_target_whose_sub_table_names_no_runtime_is_refused() {
+        // The table exists and says nothing about the runtime: `otp_variant`
+        // is recorded for the catalogue milestone and read by nothing today.
+        // A guard that asked whether the sub-table was *there* let this
+        // through and left C1's runtime mismatch to raise the alarm minutes
+        // later, after the export. See
+        // `tests/regressions/c2_a_target_sub_table_with_no_erts_passed_the_guard.rs`.
+        let opts = options(
+            Path::new("/w/hello"),
+            "[tools.ginary.target.linux-aarch64-musl]\notp_variant = \"dynamic\"\n",
+        );
+        let target: Target = "linux-aarch64-musl".parse().expect("a target name");
+
+        let error = check_cross_erts(&opts, &[target])
+            .expect_err("a table that names no runtime names no runtime");
+
+        assert!(
+            matches!(&error, BundleError::CrossErtsNotConfigured { target: named }
+                if *named == target),
+            "expected BundleError::CrossErtsNotConfigured, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_otp_root_flag_answers_for_every_target() {
+        // `--otp-root` is a runtime root the user typed just now, and it wins
+        // over the project's table for every target of the build; a check that
+        // ignored it would refuse a build that had already been told where to
+        // look.
+        let mut opts = options(Path::new("/w/hello"), "");
+        opts.otp_root = Some(PathBuf::from("/opt/otp"));
+        let target: Target = "linux-aarch64-musl".parse().expect("a target name");
+
+        assert!(check_cross_erts(&opts, &[target]).is_ok());
     }
 
     // -------------------------------------------------- the node's name --

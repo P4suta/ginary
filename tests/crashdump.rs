@@ -11,6 +11,10 @@
 //! Nothing here reads a dump into memory. `parse` takes a
 //! [`std::io::BufRead`], and the bound on a single line is asserted rather
 //! than assumed.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

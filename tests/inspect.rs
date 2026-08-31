@@ -11,6 +11,10 @@
 //! Nothing here extracts anything. Inspecting a stranger's artifact must write
 //! nothing at all, and `--verify` streams the payload past a hasher rather
 //! than unpacking it.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

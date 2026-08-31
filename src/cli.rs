@@ -148,6 +148,14 @@ pub enum Command {
         /// keeps the plain name a bare build writes.
         #[arg(long = "target", value_name = "TARGET")]
         targets: Vec<String>,
+        /// The stub to build every artifact from.
+        ///
+        /// A ginary of this version, cross-compiled for the target, as
+        /// `mise run stubs:build` produces. Without it a build for a target
+        /// other than this machine searches `$GINARY_STUB_DIR` and then the
+        /// cache; with it, the file named here is used or the build fails.
+        #[arg(long, value_name = "PATH")]
+        stub: Option<PathBuf>,
         /// The OTP installation to bundle. Defaults to the one `erl` reports.
         #[arg(long, value_name = "PATH")]
         otp_root: Option<PathBuf>,
@@ -714,6 +722,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             strip_elf_only,
             strip_beams_only,
             targets,
+            stub,
             otp_root,
             skip_export,
             keep_staging,
@@ -745,6 +754,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 vm_args: vm_args.clone(),
                 sys_config: sys_config.clone(),
                 targets: targets.clone(),
+                stub: stub.clone(),
                 explain: *explain,
                 verbose: *verbose,
             },

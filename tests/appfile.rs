@@ -6,6 +6,10 @@
 //! fail for different reasons and a test that mixed them would not say which
 //! broke: [`parse_terms`] over source text, [`AppResource`] over terms, and
 //! [`parse_app_file`] over a file on disk.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

@@ -19,6 +19,15 @@ run = [
   "cargo clippy --all-targets --all-features -- -D warnings",
 ]
 
+[tasks."lint:stub"]
+description = "Run clippy over the launcher-only stub build, with warnings denied"
+# The third feature set the gate has to hold: `--no-default-features` is the
+# stub a cross-target artifact is made from, and nothing in `lint` or
+# `lint:plain` compiles it. Without this task a module the `cli` feature was
+# supposed to gate could stop compiling without it and nobody would find out
+# until `stubs:build`.
+run = "cargo clippy --no-default-features --all-targets -- -D warnings"
+
 [tasks."lint:plain"]
 description = "Run clippy over the default feature set, with warnings denied"
 # `lint` passes `--all-features`, which compiles the `fault-injection` tests in
@@ -47,6 +56,21 @@ description = "Run only the tests that need no external toolchain"
 # `doctor::PROBE_TIMEOUT`; see `docs/dev/testing.md`. The remaining targets are
 # outside this task because each holds a handful of `require_tools`-gated tests.
 run = "cargo test --features fault-injection --lib --bins --test smoke_cli --test regressions"
+
+[tasks."test:stub"]
+description = "Run the suite as the launcher-only stub build compiles it"
+# The other flavor of the same suite. A test target whose claims are all about
+# the command line half carries `#![cfg(feature = "cli")]` and runs nothing
+# here; what remains is the launcher contract, the payload, the cache and the
+# identity marker — the half a stub actually carries — asserted against a
+# binary built without clap, without a TOML reader and without a `main` that
+# has any commands. `tests/stub_flavor.rs` is the seam that makes the
+# difference itself an assertion.
+#
+# No `--features fault-injection`: the fault points are a launcher feature and
+# compile in either flavor, and `test` already runs them. This task exists to
+# prove the stub build works, not to run the timing tests twice.
+run = "cargo test --no-default-features"
 
 [tasks."test:nextest"]
 description = "Run the suite under nextest (no doc tests: nextest does not run them)"
@@ -174,12 +198,94 @@ java -XX:+UseParallelGC -jar "$jar" \
   "$root/formal/Cache.tla"
 """
 
+[tasks."stubs:build"]
+description = "Cross-build the launcher-only stubs into target/stubs and print their sizes"
+# The developer's stub directory. `ginary build --target <t>` looks in
+# `$GINARY_STUB_DIR` before anything else, so:
+#
+#     mise run stubs:build
+#     export GINARY_STUB_DIR=$PWD/target/stubs
+#
+# is the whole cross-build loop for the stub half. `cross` runs the compiler in
+# a container per target and falls back to plain `cargo` for the host triple,
+# so the host stub is built without a docker daemon and the other four need
+# one.
+#
+# Five targets, not seven: there is no macOS toolchain here and none that can
+# be installed in a Linux container, so `macos-x86_64` and `macos-aarch64`
+# stubs come from the CI release build on a macOS runner and from nowhere else.
+# A `ginary build --target macos-*` on this machine finds no stub and says so,
+# which is the honest answer.
+#
+# A target that fails to build is reported and the task carries on to the next
+# one, then exits non-zero: a stub directory that is missing one target is
+# still useful for the other four, and a task that hid the failure would let a
+# broken target sit unnoticed. See `docs/dev/log/C2.md` for what built here.
+run = '''
+set -u
+root="${MISE_PROJECT_ROOT:-$PWD}"
+out="$root/target/stubs"
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
+mkdir -p "$out"
+failed=""
+# `cross` mounts the project at a path of its own choosing inside the
+# container, so a host `--manifest-path` names a file that is not there. The
+# working directory is what it maps, and it is the only way to tell it which
+# project to build.
+cd "$root"
+# A target directory of its own, and this is not tidiness. Build scripts are
+# compiled for the *host* and then run, and the host's are linked against this
+# machine's glibc while the container's is years older: reusing `target/` makes
+# every cross build fail on `version GLIBC_2.34 not found` in a build script
+# nobody asked for. A separate directory means the container compiles and runs
+# its own.
+export CARGO_TARGET_DIR=target/cross
+
+build() {
+  name="$1"; triple="$2"; suffix="${3:-}"
+  echo "stubs:build: $name ($triple)"
+  # The copy is part of the success condition, not a step after it: a build
+  # that produced a binary nothing could put in `$out` — a full disk, a
+  # directory that is not writable, a suffix this table has wrong — is a
+  # target that did not end up in the stub directory, and reporting it as
+  # built would be exactly the silent skip `CLAUDE.md` forbids.
+  if cross build --release --target "$triple" --no-default-features \
+     && cp "$root/target/cross/$triple/release/ginary$suffix" \
+           "$out/ginary-stub-$version-$name$suffix"; then
+    :
+  else
+    echo "stubs:build: FAILED $name ($triple)" >&2
+    failed="$failed $name"
+  fi
+}
+
+build linux-x86_64-gnu    x86_64-unknown-linux-gnu
+build linux-x86_64-musl   x86_64-unknown-linux-musl
+build linux-aarch64-gnu   aarch64-unknown-linux-gnu
+build linux-aarch64-musl  aarch64-unknown-linux-musl
+build windows-x86_64      x86_64-pc-windows-gnu .exe
+
+echo
+echo "stubs in $out (ginary $version):"
+ls -l "$out" | awk 'NR>1 { printf "  %-48s %10d bytes\n", $9, $5 }'
+echo
+echo "macos-x86_64 and macos-aarch64: no macOS toolchain here; those stubs come"
+echo "from the CI release build and from nowhere else."
+
+if [ -n "$failed" ]; then
+  echo "stubs:build: these targets did not build:$failed" >&2
+  exit 1
+fi
+'''
+
 [tasks.check]
-description = "The pull-request gate: lint, lint:plain, test, doc and deny"
+description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc and deny"
 run = [
   "mise run lint",
   "mise run lint:plain",
+  "mise run lint:stub",
   "mise run test",
+  "mise run test:stub",
   "mise run doc",
   "mise run deny",
 ]

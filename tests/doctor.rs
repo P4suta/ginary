@@ -12,6 +12,10 @@
 //!
 //! The project half needs no such seam: a Gleam project is a directory with a
 //! `gleam.toml` in it, and `tests/common/project.rs` writes one.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 
@@ -26,7 +30,9 @@ use ginary::doctor::{
     TargetProbe,
 };
 use ginary::elf::ElfKind;
-use ginary::target::Target;
+use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
+use ginary::otp::{OtpError, OtpInfo};
+use ginary::target::{Linkage, Target};
 use serde_json::Value;
 
 use crate::common::fake_otp::FakeOtp;
@@ -542,9 +548,42 @@ fn sample_probes() -> Vec<TargetProbe> {
     ]
 }
 
+/// The host runtime a resolution that succeeded would report.
+///
+/// `probe_targets_with` takes the resolution as a value, so the host's row is
+/// assertable on a machine with no Erlang on it. Every field is one a real
+/// [`ginary::erts_source::resolve`] fills in; none is read off a file, and the
+/// two the row copies — the linkage and the minimum libc — are given values
+/// this machine's own installation need not have.
+fn resolved_host_runtime() -> ResolvedErts {
+    let root = PathBuf::from("/opt/otp-29");
+    ResolvedErts {
+        otp: OtpInfo {
+            erts_bin: root.join("erts-17.0.5").join("bin"),
+            lib: root.join("lib"),
+            root,
+            release: 29,
+            erts_vsn: "17.0.5".to_owned(),
+            otp_version: "29.0.5".to_owned(),
+        },
+        target: Target::host(),
+        linkage: Linkage::Dynamic,
+        libc_min: Some("2.38".to_owned()),
+        nif_loading: true,
+        provenance: "host:/opt/otp-29".to_owned(),
+    }
+}
+
 #[test]
 fn a_target_with_no_sub_table_is_probed_as_the_host_runtime() {
-    let probes = doctor::probe_targets(&[Target::host()], &BTreeMap::new());
+    let probes = doctor::probe_targets_with(&[Target::host()], &BTreeMap::new(), |spec, target| {
+        assert_eq!(
+            (spec, target),
+            (&ErtsSourceSpec::Host, &Target::host()),
+            "the row a target with no sub-table produces resolves the host's own runtime"
+        );
+        Ok(resolved_host_runtime())
+    });
 
     assert_eq!(probes.len(), 1, "{probes:?}");
     assert_eq!(probes[0].name, Target::host().name());
@@ -553,6 +592,38 @@ fn a_target_with_no_sub_table_is_probed_as_the_host_runtime() {
         "a target that configures nothing bundles the runtime the machine has"
     );
     assert!(probes[0].resolvable, "{probes:?}");
+    assert_eq!(
+        probes[0].detail.as_deref(),
+        Some("host:/opt/otp-29"),
+        "the detail is the resolution's own provenance: {probes:?}"
+    );
+    assert_eq!(probes[0].linkage.as_deref(), Some("dynamic"), "{probes:?}");
+    assert_eq!(probes[0].libc_min.as_deref(), Some("2.38"), "{probes:?}");
+}
+
+#[test]
+fn a_host_whose_own_installation_cannot_be_read_is_a_row_that_says_not_yet() {
+    // The other half of the same branch, and the one a machine with no Erlang
+    // on it actually takes: a build of the host target would fail here, today,
+    // so the column answers `not yet` and the detail carries the whole error
+    // chain rather than just its head.
+    let probes = doctor::probe_targets_with(&[Target::host()], &BTreeMap::new(), |_, _| {
+        Err(ErtsError::Otp(OtpError::ErlNotFound))
+    });
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].erts, "host");
+    assert!(!probes[0].resolvable, "{probes:?}");
+    let detail = probes[0].detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("cannot use the runtime") && detail.contains("`erl` is not on PATH"),
+        "the row carries the error and its cause: {detail}"
+    );
+    assert_eq!(
+        probes[0].linkage, None,
+        "nothing was read, so nothing says how it is linked: {probes:?}"
+    );
+    assert_eq!(probes[0].libc_min, None, "{probes:?}");
 }
 
 #[test]
@@ -697,5 +768,36 @@ fn doctor_json_carries_a_row_per_target() {
     assert_eq!(targets.len(), 1, "{}", value["targets"]);
     assert_eq!(targets[0]["name"], Target::host().name());
     assert_eq!(targets[0]["erts"], "host");
-    assert_eq!(targets[0]["resolvable"], true);
+    // The shape, not the answer: whether this machine's own runtime resolves
+    // depends on whether it has an Erlang, and `doctor` is the command that
+    // has to keep working on the machine that has not. What the value has to
+    // be is pinned twice over without a toolchain, by the two seam tests
+    // above, and once with one by the gated test below.
+    assert!(
+        targets[0]["resolvable"].is_boolean(),
+        "{}",
+        value["targets"]
+    );
+}
+
+#[test]
+fn the_host_row_the_command_prints_resolves_on_a_machine_with_an_erlang() {
+    let Some(_tools) = require_tools(&["erl"]) else {
+        return;
+    };
+    let project = TempProject::named("notify");
+
+    let assert = ginary_in(project.root())
+        .args(["doctor", "--json"])
+        .env("GINARY_CACHE_DIR", project.outside().join("cache"))
+        .assert()
+        .success();
+    let value: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("the output is JSON");
+
+    assert_eq!(
+        value["targets"][0]["resolvable"], true,
+        "this machine has an `erl`, so the runtime a build of the host would bundle is here: {}",
+        value["targets"]
+    );
 }

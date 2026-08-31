@@ -13,6 +13,10 @@
 //! a real module, and a panic anywhere in that space is a defect: the file it
 //! reads comes out of a build tree ginary does not control, and a packaging
 //! tool that panics on a damaged file has told its user nothing.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 

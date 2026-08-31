@@ -46,12 +46,16 @@
 //! nothing in it is a timestamp, so staging the same inputs twice produces the
 //! same bytes.
 
+#[cfg(feature = "cli")]
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cli")]
 use crate::closure::{self, AppSet};
+#[cfg(feature = "cli")]
 use crate::otp::OtpInfo;
 
 /// The name of the listing [`stage`] writes at the root of the staged tree.
@@ -211,6 +215,7 @@ pub struct StageListing {
 
 /// How [`stage`] should build the tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "cli")]
 pub struct StageOptions {
     /// Programs to stage from the runtime's `bin` beyond the required four.
     ///
@@ -226,6 +231,7 @@ pub struct StageOptions {
     pub force: bool,
 }
 
+#[cfg(feature = "cli")]
 impl Default for StageOptions {
     /// Nothing extra, junk removed, an existing output directory refused.
     fn default() -> Self {
@@ -242,6 +248,7 @@ impl Default for StageOptions {
 /// Every field is derived from the tree that was written, so a report built
 /// from this describes the artifact rather than the intention.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg(feature = "cli")]
 pub struct StagedRoot {
     /// The directory that was written.
     root: PathBuf,
@@ -266,6 +273,7 @@ pub struct StagedRoot {
     boot_refs: Vec<String>,
 }
 
+#[cfg(feature = "cli")]
 impl StagedRoot {
     /// The directory that was written.
     pub fn root(&self) -> &Path {
@@ -524,6 +532,7 @@ impl StagedRoot {
 
 /// Why a staging root could not be built.
 #[derive(Debug, thiserror::Error)]
+#[cfg(feature = "cli")]
 pub enum AssembleError {
     /// The output directory exists and is not empty.
     #[error(
@@ -681,6 +690,7 @@ pub enum AssembleError {
 /// [`AssembleError::BootReferencesMissingApp`] names both halves of the
 /// mismatch, and "holds nothing for that application" is a different and more
 /// useful sentence than "holds []".
+#[cfg(feature = "cli")]
 fn or_nothing(names: &[String]) -> String {
     if names.is_empty() {
         "nothing".to_owned()
@@ -698,6 +708,7 @@ fn or_nothing(names: &[String]) -> String {
 /// The reasons are a policy, not a description, which is why they live in one
 /// place: `ginary stage --explain` prints them, and a reader who disagrees with
 /// one of them is disagreeing with the decision rather than with an accident.
+#[cfg(feature = "cli")]
 pub fn excluded_reason(name: &str) -> &'static str {
     match name {
         "erl" => "the shell wrapper; the launcher execs erlexec directly",
@@ -739,6 +750,7 @@ pub fn excluded_reason(name: &str) -> &'static str {
 /// [`AssembleError::NonUtf8Name`] when a file cannot be named as text; and
 /// [`AssembleError::Copy`] or [`AssembleError::Io`] for anything the
 /// filesystem refuses.
+#[cfg(feature = "cli")]
 pub fn stage(
     set: &AppSet,
     otp: &OtpInfo,
@@ -785,6 +797,7 @@ pub fn stage(
 /// The process id keeps two concurrent stagings of the same output out of each
 /// other's way, and keeps the name predictable enough that a leftover from a
 /// killed run is recognisable rather than mysterious.
+#[cfg(feature = "cli")]
 fn temp_root_for(out: &Path) -> PathBuf {
     let mut name = out
         .file_name()
@@ -802,9 +815,11 @@ fn temp_root_for(out: &Path) -> PathBuf {
 /// Only a path that is a root or ends in `..` has no final component, and
 /// neither is a directory `stage` can write; the fallback exists so that
 /// building the temporary name needs no panic.
+#[cfg(feature = "cli")]
 const TEMP_FALLBACK: &str = "ginary-stage";
 
 /// The boot script staged as the artifact's only one.
+#[cfg(feature = "cli")]
 const BOOT_NAME: &str = "no_dot_erlang.boot";
 
 /// Checks `out`, and clears it when [`StageOptions::force`] says to.
@@ -812,6 +827,7 @@ const BOOT_NAME: &str = "no_dot_erlang.boot";
 /// A path that does not exist and an empty directory are both fine, and both
 /// leave the filesystem alone: the rename at the end of staging is what
 /// creates `out`, so a failure in between must not have destroyed anything.
+#[cfg(feature = "cli")]
 fn prepare_output(out: &Path, force: bool) -> Result<(), AssembleError> {
     let existing = match std::fs::symlink_metadata(out) {
         Ok(metadata) => metadata,
@@ -843,6 +859,7 @@ fn prepare_output(out: &Path, force: bool) -> Result<(), AssembleError> {
 }
 
 /// Whether a directory holds no entries at all.
+#[cfg(feature = "cli")]
 fn is_empty_dir(dir: &Path) -> Result<bool, AssembleError> {
     let mut entries = read_dir(dir)?;
     Ok(entries.next().is_none())
@@ -853,6 +870,7 @@ fn is_empty_dir(dir: &Path) -> Result<bool, AssembleError> {
 /// `out` is either absent or the empty directory [`prepare_output`] accepted;
 /// the empty one is removed here rather than earlier, so that a staging that
 /// fails leaves even that untouched.
+#[cfg(feature = "cli")]
 fn publish(temp: &Path, out: &Path) -> Result<(), AssembleError> {
     if out.exists() {
         std::fs::remove_dir(out).map_err(|source| AssembleError::Io {
@@ -873,6 +891,7 @@ fn publish(temp: &Path, out: &Path) -> Result<(), AssembleError> {
 /// else matters; then the applications; then the boot file's cross-check,
 /// which can only run once the applications are on disk; then junk removal and
 /// the listing, which describe what is there rather than deciding it.
+#[cfg(feature = "cli")]
 fn build(
     set: &AppSet,
     otp: &OtpInfo,
@@ -936,6 +955,7 @@ fn build(
 /// the value is interpolated into a path — and it is checked here as well as
 /// in [`crate::config::ToolsConfig::validate`], because this is the function
 /// that performs the copy.
+#[cfg(feature = "cli")]
 pub fn is_erts_bin_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
@@ -944,6 +964,7 @@ pub fn is_erts_bin_name(name: &str) -> bool {
 ///
 /// Returns the names that were staged, which is what
 /// [`StagedRoot::excluded_erts_bins`] is the complement of.
+#[cfg(feature = "cli")]
 fn stage_erts_bins(
     otp: &OtpInfo,
     opts: &StageOptions,
@@ -983,6 +1004,7 @@ fn stage_erts_bins(
 }
 
 /// Every program in the runtime's `bin` that was not staged, with its reason.
+#[cfg(feature = "cli")]
 fn excluded_bins(
     erts_bin: &Path,
     staged: &BTreeSet<String>,
@@ -1015,6 +1037,7 @@ fn excluded_bins(
 /// The file and byte counts are filled in later by [`count_apps`], because
 /// junk removal happens after the copy and an application's size is what
 /// survived it.
+#[cfg(feature = "cli")]
 fn stage_apps(set: &AppSet, root: &Path) -> Result<Vec<StagedApp>, AssembleError> {
     let lib = root.join("lib");
     create_dir(&lib)?;
@@ -1048,6 +1071,7 @@ fn stage_apps(set: &AppSet, root: &Path) -> Result<Vec<StagedApp>, AssembleError
 
 /// What a recursive copy is allowed to take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "cli")]
 enum Filter {
     /// An `ebin`: everything but `*.appup`, which is a release upgrade
     /// instruction and is never read at run time.
@@ -1056,6 +1080,7 @@ enum Filter {
     Priv,
 }
 
+#[cfg(feature = "cli")]
 impl Filter {
     /// Whether a file of this name is copied.
     fn keeps(self, name: &str) -> bool {
@@ -1076,6 +1101,7 @@ impl Filter {
 /// the artifact whole, and one whose `priv` points at its own `src` would have
 /// the sources [`EXCLUDED_APP_DIRS`] exists to leave behind staged under the
 /// name `priv`.
+#[cfg(feature = "cli")]
 fn copy_subtree(
     app_root: &Path,
     from: &Path,
@@ -1120,6 +1146,7 @@ fn copy_subtree(
 /// is what makes `priv/loop -> .` an [`AssembleError::SymlinkCycle`] naming the
 /// link rather than a recursion that ends when the operating system runs out of
 /// path.
+#[cfg(feature = "cli")]
 struct TreeCopy<'a> {
     /// The canonical application directory: the boundary for a link to a file.
     app_root: &'a Path,
@@ -1131,6 +1158,7 @@ struct TreeCopy<'a> {
     entered: Vec<PathBuf>,
 }
 
+#[cfg(feature = "cli")]
 impl TreeCopy<'_> {
     /// Copies one directory, recursing into the directories under it.
     fn directory(&mut self, from: &Path, to: &Path) -> Result<(), AssembleError> {
@@ -1171,6 +1199,7 @@ impl TreeCopy<'_> {
 /// `src`, to `src/data`, or to anything deeper answers `src`, and a link to a
 /// directory that merely *holds* a `doc` answers nothing: the exclusion applies
 /// at the top level of an application, and a real `priv/doc` stages.
+#[cfg(feature = "cli")]
 fn excluded_component(app_root: &Path, target: &Path) -> Option<String> {
     let relative = target.strip_prefix(app_root).ok()?;
     relative.components().find_map(|component| {
@@ -1180,6 +1209,7 @@ fn excluded_component(app_root: &Path, target: &Path) -> Option<String> {
 }
 
 /// Resolves a symlink, refusing one that dangles or leaves the application.
+#[cfg(feature = "cli")]
 fn resolve_link(app_root: &Path, path: &Path) -> Result<PathBuf, AssembleError> {
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return Err(AssembleError::UnsafeSymlink {
@@ -1200,6 +1230,7 @@ fn resolve_link(app_root: &Path, path: &Path) -> Result<PathBuf, AssembleError> 
 ///
 /// A dangling link cannot be canonicalised, and the error is more useful for
 /// naming what it pointed at than for saying nothing at all.
+#[cfg(feature = "cli")]
 fn link_target(path: &Path) -> PathBuf {
     match std::fs::read_link(path) {
         Ok(target) if target.is_absolute() => target,
@@ -1215,6 +1246,7 @@ fn link_target(path: &Path) -> PathBuf {
 ///
 /// Returns the directories that were checked, in the order the boot file names
 /// them, so that `--explain` can show the cross-check was done.
+#[cfg(feature = "cli")]
 fn check_boot_refs(
     boot: &Path,
     bytes: &[u8],
@@ -1249,6 +1281,7 @@ fn check_boot_refs(
 /// that were linked from them, and the object directory the shared objects
 /// were built in. A removed directory is one entry carrying the total of what
 /// it held.
+#[cfg(feature = "cli")]
 fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, AssembleError> {
     let mut removed: Vec<(PathBuf, u64)> = Vec::new();
     for app in apps {
@@ -1291,12 +1324,14 @@ fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, A
 /// because that is the application that ships it — it is OpenSSL's test engine
 /// — and a file of that name under any other application would be somebody's
 /// own.
+#[cfg(feature = "cli")]
 fn is_junk_file(name: &str, app: &str) -> bool {
     name.ends_with(".a") || (app == "crypto" && name == "otp_test_engine.so")
 }
 
 /// Every file under a directory, as sorted `/`-separated relative paths with
 /// their size and permission bits.
+#[cfg(feature = "cli")]
 fn list_files(
     root: &Path,
     sources: &BTreeMap<String, StagedSource>,
@@ -1317,6 +1352,7 @@ fn list_files(
 }
 
 /// The recursive half of [`list_files`].
+#[cfg(feature = "cli")]
 fn walk(root: &Path, dir: &Path, found: &mut Vec<(String, u64, u32)>) -> Result<(), AssembleError> {
     for entry in read_dir(dir)? {
         let entry = entry.map_err(|source| AssembleError::Io {
@@ -1341,6 +1377,7 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<(String, u64, u32)>) -> Result<
 }
 
 /// What a staged file is, from its path and the application it is under.
+#[cfg(feature = "cli")]
 fn categorise(path: &str, sources: &BTreeMap<String, StagedSource>) -> Category {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
@@ -1368,6 +1405,7 @@ fn categorise(path: &str, sources: &BTreeMap<String, StagedSource>) -> Category 
 }
 
 /// Fills in each application's file count and byte total from the listing.
+#[cfg(feature = "cli")]
 fn count_apps(apps: &mut [StagedApp], files: &[StagedFile]) {
     for app in apps.iter_mut() {
         let prefix = format!("{}/", app.dir);
@@ -1381,6 +1419,7 @@ fn count_apps(apps: &mut [StagedApp], files: &[StagedFile]) {
 }
 
 /// Writes `ginary.stage.json`, pretty-printed and newline-terminated.
+#[cfg(feature = "cli")]
 fn write_listing(path: &Path, listing: &StageListing) -> Result<(), AssembleError> {
     let mut json = match serde_json::to_string_pretty(listing) {
         Ok(json) => json,
@@ -1399,6 +1438,7 @@ fn write_listing(path: &Path, listing: &StageListing) -> Result<(), AssembleErro
 }
 
 /// The total size of every file under a directory.
+#[cfg(feature = "cli")]
 fn tree_bytes(dir: &Path) -> Result<u64, AssembleError> {
     let mut total = 0;
     for entry in read_dir(dir)? {
@@ -1417,6 +1457,7 @@ fn tree_bytes(dir: &Path) -> Result<u64, AssembleError> {
 }
 
 /// The size of one file.
+#[cfg(feature = "cli")]
 fn size_of(path: &Path) -> Result<u64, AssembleError> {
     std::fs::metadata(path)
         .map(|metadata| metadata.len())
@@ -1427,6 +1468,7 @@ fn size_of(path: &Path) -> Result<u64, AssembleError> {
 }
 
 /// The permission bits of a file, or zero on a platform without them.
+#[cfg(feature = "cli")]
 fn mode_of(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -1442,6 +1484,7 @@ fn mode_of(metadata: &std::fs::Metadata) -> u32 {
 
 /// A path relative to the staged root, or the path itself if it is not under
 /// it. Only paths built from the root are passed, so the fallback never fires.
+#[cfg(feature = "cli")]
 fn relative(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
@@ -1453,6 +1496,7 @@ fn relative(root: &Path, path: &Path) -> PathBuf {
 /// cannot be spelled is a path that cannot be recorded. Dropping the component
 /// would name a different file; the caller raises
 /// [`AssembleError::NonUtf8Name`] instead.
+#[cfg(feature = "cli")]
 fn slash_path(path: &Path) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for component in path.components() {
@@ -1468,6 +1512,7 @@ fn slash_path(path: &Path) -> Option<String> {
 /// [`AssembleError::NonUtf8Name`] when the name is not valid UTF-8, and when
 /// there is no final component at all — neither can be staged, and neither is
 /// a thing to pass over in silence.
+#[cfg(feature = "cli")]
 fn file_name_of(path: &Path) -> Result<String, AssembleError> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -1478,6 +1523,7 @@ fn file_name_of(path: &Path) -> Result<String, AssembleError> {
 }
 
 /// The metadata of a path, without following a symlink at the end of it.
+#[cfg(feature = "cli")]
 fn symlink_metadata(path: &Path) -> Result<std::fs::Metadata, AssembleError> {
     std::fs::symlink_metadata(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),
@@ -1486,11 +1532,13 @@ fn symlink_metadata(path: &Path) -> Result<std::fs::Metadata, AssembleError> {
 }
 
 /// The last component of a `lib/<dir>` path.
+#[cfg(feature = "cli")]
 fn dir_name(dir: &str) -> &str {
     dir.rsplit_once('/').map_or(dir, |(_, name)| name)
 }
 
 /// Copies one file, keeping its permission bits.
+#[cfg(feature = "cli")]
 fn copy_file(from: &Path, to: &Path) -> Result<(), AssembleError> {
     std::fs::copy(from, to)
         .map(|_| ())
@@ -1502,6 +1550,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), AssembleError> {
 }
 
 /// Reads a file whole.
+#[cfg(feature = "cli")]
 fn read(path: &Path) -> Result<Vec<u8>, AssembleError> {
     std::fs::read(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),
@@ -1510,6 +1559,7 @@ fn read(path: &Path) -> Result<Vec<u8>, AssembleError> {
 }
 
 /// Creates a directory and every directory above it.
+#[cfg(feature = "cli")]
 fn create_dir(path: &Path) -> Result<(), AssembleError> {
     std::fs::create_dir_all(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),
@@ -1518,6 +1568,7 @@ fn create_dir(path: &Path) -> Result<(), AssembleError> {
 }
 
 /// Removes a directory and everything under it.
+#[cfg(feature = "cli")]
 fn remove_dir(path: &Path) -> Result<(), AssembleError> {
     std::fs::remove_dir_all(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),
@@ -1531,6 +1582,7 @@ fn remove_dir(path: &Path) -> Result<(), AssembleError> {
 /// machine: `read_dir` answers in whatever order the filesystem holds, and a
 /// tree that was built in a different order is a tree that is harder to
 /// compare with the one built beside it.
+#[cfg(feature = "cli")]
 fn entries_of(dir: &Path) -> Result<Vec<PathBuf>, AssembleError> {
     let mut entries: Vec<PathBuf> = Vec::new();
     for entry in read_dir(dir)? {
@@ -1545,6 +1597,7 @@ fn entries_of(dir: &Path) -> Result<Vec<PathBuf>, AssembleError> {
 }
 
 /// Reads a directory.
+#[cfg(feature = "cli")]
 fn read_dir(path: &Path) -> Result<std::fs::ReadDir, AssembleError> {
     std::fs::read_dir(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),
@@ -1553,6 +1606,7 @@ fn read_dir(path: &Path) -> Result<std::fs::ReadDir, AssembleError> {
 }
 
 /// The canonical form of a path, for comparing a symlink's target against it.
+#[cfg(feature = "cli")]
 fn canonical(path: &Path) -> Result<PathBuf, AssembleError> {
     std::fs::canonicalize(path).map_err(|source| AssembleError::Io {
         path: path.to_path_buf(),

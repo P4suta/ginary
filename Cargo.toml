@@ -13,6 +13,12 @@ keywords = ["gleam", "erlang", "beam", "packaging", "single-binary"]
 categories = ["command-line-utilities", "development-tools"]
 
 [features]
+# The command line half. On by default, so a plain `cargo build` is the build
+# tool; `--no-default-features` is the launcher-only *stub* a cross-target
+# artifact is made from, which carries no clap, no TOML reader and none of the
+# build-side commands. See `docs/dev/log/C2.md`.
+default = ["cli"]
+cli = ["dep:clap", "dep:toml"]
 # Fault injection for the launcher tests. Off by default, so a release build
 # holds none of the points and never reads `GINARY_FAULT`; `mise run test` and
 # CI turn it on. See `src/fault.rs` and `docs/dev/testing.md`.
@@ -20,13 +26,22 @@ fault-injection = []
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"], optional = true }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 # Hex is the spelling every SHA-256 in the format has: the cache key, the
 # `sha256` field of `ginary.index.json` and both digests of a checksum
 # mismatch. Writing it by hand is four lines that nothing would test.
 hex = "0.4.3"
-object = { version = "0.40.0", default-features = false, features = ["read", "elf", "std"] }
+# `elf` and `pe` are named rather than left to the `read` umbrella that would
+# pull them in anyway: `stub::verify` reads a COFF machine field for a Windows
+# stub and an ELF header for every other target, so both are load-bearing and a
+# future trim of this line has to say so on purpose.
+object = { version = "0.40.0", default-features = false, features = [
+  "read",
+  "elf",
+  "pe",
+  "std",
+] }
 # Two system calls the launcher cannot do without and the standard library does
 # not expose: `getuid` for the `${TMPDIR}/ginary-<uid>` fallback, and `syncfs`
 # for the one-call durability barrier before a cache entry is renamed into
@@ -53,7 +68,7 @@ thiserror = "2.0.18"
 # `deny_unknown_fields`: a key ginary does not know is a setting the user
 # believes is in force, and the error has to name it. `default-features` keeps
 # the writer out — nothing in ginary writes TOML.
-toml = { version = "0.9.12", default-features = false, features = ["parse", "serde"] }
+toml = { version = "0.9.12", default-features = false, features = ["parse", "serde"], optional = true }
 # The payload's compression. `default-features = false` keeps the multi-threaded
 # encoder and the `zstdmt` C sources out: packing is single-threaded on purpose,
 # because a thread count that varies with the machine varies the output bytes.

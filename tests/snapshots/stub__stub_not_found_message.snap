@@ -1,0 +1,9 @@
+---
+source: tests/stub.rs
+expression: rendered
+---
+no stub found for windows-x86_64 (ginary <ver>)
+  searched: <env>/ginary-stub-<ver>-windows-x86_64.exe
+            <env>/ginary-<ver>-windows-x86_64.exe
+            <cache>/stubs/<ver>/windows-x86_64.exe
+  hint: build one with `mise run stubs:build` and set GINARY_STUB_DIR, or point `--stub` at it

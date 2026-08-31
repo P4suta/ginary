@@ -16,6 +16,10 @@
 //!
 //! Gated on `gleam`, `erl` and `strip`: a machine without them reports a skip,
 //! and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 
@@ -893,23 +897,41 @@ fn the_same_target_named_twice_produces_one_artifact() {
 }
 
 #[test]
-fn a_build_for_another_target_is_refused_and_says_when_it_will_work() {
+fn a_build_for_another_target_says_which_stub_it_could_not_find() {
     let Some(_tools) = require_tools(&TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
+    let empty = tempfile::tempdir().expect("a temporary directory");
+    let stubs = empty.path().join("stubs");
+    let cache = empty.path().join("cache");
+    std::fs::create_dir_all(&stubs).expect("an empty stub directory");
+    std::fs::create_dir_all(&cache).expect("an empty cache");
 
-    let output = project.build_with(&["--target", "linux-aarch64-musl"], &[]);
+    // The environment is what makes the assertion the same on every machine:
+    // a developer with a stub already built would otherwise get a different
+    // error from the same command.
+    let output = project.build_with(
+        &["--target", "linux-aarch64-musl"],
+        &[
+            ("GINARY_STUB_DIR", &stubs.display().to_string()),
+            ("GINARY_CACHE_DIR", &cache.display().to_string()),
+        ],
+    );
 
     assert!(
         !output.status.success(),
-        "a cross build cannot succeed yet:\n{}",
+        "a cross build with no stub cannot succeed:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("cross builds arrive with the stub/catalog milestones"),
-        "the refusal says when it will work: {stderr}"
+        stderr.contains("no stub found for linux-aarch64-musl"),
+        "the refusal names the target it has no stub for: {stderr}"
+    );
+    assert!(
+        stderr.contains("stubs:build"),
+        "and says how to make one: {stderr}"
     );
     assert!(
         names_in(&project.root().join("build/ginary"))

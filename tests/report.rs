@@ -12,6 +12,10 @@
 //! The `needs:` line is the one output in the crate that a user acts on without
 //! reading anything else: it is the artifact's portability floor. It is
 //! asserted here in full, prefix included, rather than by substring.
+// The command line half of the suite: every claim in this file is about a
+// module the `cli` feature carries, so a `--no-default-features` build has
+// nothing here to run. See `docs/dev/log/C2.md`.
+#![cfg(feature = "cli")]
 
 mod common;
 
