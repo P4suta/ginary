@@ -11,10 +11,12 @@
 
 pub mod artifact;
 pub mod bounded;
+pub mod built;
 pub mod erl;
 pub mod fake_otp;
 pub mod fixture;
 pub mod payload;
+pub mod project;
 pub mod script;
 pub mod snapshot;
 pub mod tools;

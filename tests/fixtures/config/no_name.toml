@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Every Gleam project declares a name. One that does not is not a project
+# ginary can package, because the name is the artifact's file name.
+
+version = "0.1.0"
+target = "erlang"

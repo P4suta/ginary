@@ -1436,3 +1436,255 @@ fn cache_clean_of_a_cache_that_was_never_created_removes_nothing() {
     assert_eq!(stdout, "total: 0 directories, 0 bytes\n");
     assert!(!root.exists(), "cleaning must not create the root");
 }
+
+// ------------------------------- `ginary build` and `ginary inspect` (A4) --
+
+/// A `ginary` run from a directory the test owns, so no ambient `gleam.toml`
+/// above the crate root can be found by an upward search.
+fn ginary_in(dir: &Path) -> Command {
+    let mut command = Command::cargo_bin("ginary").expect("the `ginary` binary is built for tests");
+    command.current_dir(dir);
+    command
+}
+
+#[test]
+fn the_help_lists_the_build_and_inspect_commands_and_no_longer_calls_build_planned() {
+    let assert = ginary().arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(stdout.contains("build"), "{stdout}");
+    assert!(stdout.contains("inspect"), "{stdout}");
+
+    // The long help carried a pre-alpha notice saying `build` was not
+    // implemented. A command that works and a help text that says it does not
+    // is a worse defect than either alone.
+    let long = ginary().arg("help").assert().success();
+    let long = String::from_utf8(long.get_output().stdout.clone()).expect("utf-8");
+    assert!(
+        !long.contains("pre-alpha"),
+        "the pre-alpha notice must go when `build` lands:\n{long}"
+    );
+}
+
+#[test]
+fn build_outside_a_gleam_project_exits_one_and_says_where_to_run_it() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+
+    let assert = ginary_in(dir.path()).arg("build").assert().code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stderr.contains("gleam.toml") && stderr.contains("Gleam project"),
+        "the message must say what was missing and what to do: {stderr}"
+    );
+}
+
+#[test]
+fn build_with_a_compression_level_outside_the_range_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+
+    for level in ["0", "23", "-1"] {
+        ginary_in(dir.path())
+            .args(["build", "--compression-level", level])
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn build_with_both_strip_only_flags_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+
+    ginary_in(dir.path())
+        .args(["build", "--strip-elf-only", "--strip-beams-only"])
+        .assert()
+        .code(2);
+    ginary_in(dir.path())
+        .args(["build", "--no-strip", "--strip-elf-only"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn inspect_without_a_path_is_a_usage_error() {
+    ginary().arg("inspect").assert().code(2);
+}
+
+#[test]
+fn inspect_of_the_command_line_tool_itself_exits_one_with_no_ginary_trailer() {
+    let assert = ginary()
+        .args(["inspect", env!("CARGO_BIN_EXE_ginary")])
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stderr.contains("no ginary trailer"),
+        "a plain ginary is not an artifact and must say so: {stderr}"
+    );
+}
+
+#[test]
+fn inspect_prints_the_application_its_versions_and_its_geometry() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+
+    let assert = ginary()
+        .args(["inspect".as_ref(), artifact.path().as_os_str()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    for expected in [
+        common::artifact::APP,
+        common::artifact::OTP_VERSION,
+        common::artifact::ERTS_VSN,
+        &artifact.file_len().to_string(),
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "the report must name `{expected}`:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn inspect_json_carries_the_documented_keys() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+
+    let assert = ginary()
+        .args([
+            "inspect".as_ref(),
+            "--json".as_ref(),
+            artifact.path().as_os_str(),
+        ])
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
+
+    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(
+        value["path"],
+        Value::from(artifact.path().display().to_string())
+    );
+    assert_eq!(value["payload_offset"], Value::from(artifact.stub_len()));
+    assert_eq!(value["payload_len"], Value::from(artifact.packed().len));
+    assert_eq!(value["total_len"], Value::from(artifact.file_len()));
+    assert_eq!(
+        value["payload_sha256"],
+        Value::from(hex::encode(artifact.packed().sha256))
+    );
+    assert_eq!(value["manifest"]["app"], Value::from(common::artifact::APP));
+    assert!(
+        value["index"]["files"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty()),
+        "the index must list what was staged: {value}"
+    );
+    assert!(
+        value.get("verify").is_none(),
+        "a flag that was not given must be absent rather than null: {value}"
+    );
+    assert!(
+        value.get("launch_plan").is_none(),
+        "a flag that was not given must be absent rather than null: {value}"
+    );
+}
+
+#[test]
+fn inspect_verify_passes_on_an_intact_artifact() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+
+    let assert = ginary()
+        .args([
+            "inspect".as_ref(),
+            "--verify".as_ref(),
+            artifact.path().as_os_str(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("verify: ok"),
+        "an intact artifact must say so in as many words:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_verify_exits_one_when_a_payload_byte_changed() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+    artifact.break_payload_tail();
+
+    let assert = ginary()
+        .args([
+            "inspect".as_ref(),
+            "--verify".as_ref(),
+            artifact.path().as_os_str(),
+        ])
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("MISMATCH"),
+        "the report must say which of the two digests disagreed:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("digest"),
+        "the failure must be reported on standard error too: {stderr}"
+    );
+}
+
+#[test]
+fn inspect_without_verify_still_prints_the_manifest_of_a_damaged_artifact() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+    artifact.break_payload_tail();
+
+    let assert = ginary()
+        .args(["inspect".as_ref(), artifact.path().as_os_str()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains(common::artifact::APP),
+        "a user has to be able to find out what the damaged file was supposed to be:\n{stdout}"
+    );
+}
+
+#[test]
+fn inspect_launch_plan_prints_the_argv_against_a_placeholder_root() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+
+    let assert = ginary()
+        .args([
+            "inspect".as_ref(),
+            "--launch-plan".as_ref(),
+            artifact.path().as_os_str(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains(ginary::inspect::PLACEHOLDER_ROOT),
+        "the plan must be printed against the placeholder root, not this machine's cache:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&dir.path().display().to_string()),
+        "no path from the machine that ran the inspection may reach the plan:\n{stdout}"
+    );
+    for expected in ["-boot", "-noshell", "-start_epmd", "-eval", "-extra"] {
+        assert!(
+            stdout.contains(expected),
+            "the plan must show `{expected}`:\n{stdout}"
+        );
+    }
+}

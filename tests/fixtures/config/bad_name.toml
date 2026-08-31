@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The name reaches a path, the manifest's `app` and the `-eval` expression the
+# launcher hands the emulator, so it is checked before any of the three.
+
+name = "Hello-World"
+version = "0.1.0"

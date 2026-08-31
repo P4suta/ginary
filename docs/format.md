@@ -133,6 +133,13 @@ in front of.
 Entries 0 and 1 are refused above 8 MiB (`payload::MAX_FRONT_ENTRY_BYTES`): they are the two a
 launcher holds whole, and a few kilobytes of zstd can claim a terabyte of tar entry.
 
+The compressor is flushed immediately after entry 1 and nowhere else, so those two entries are
+in a zstd block of their own. zstd decodes a block at a time, so without the flush a payload
+small enough to fit in one block would lose its manifest to a byte flipped anywhere in it, and
+`ginary inspect` on a damaged artifact could not answer the one question its user has: what was
+this file supposed to be. The flush is at a fixed point, so it costs the compression ratio of
+one boundary and nothing in determinism.
+
 Nothing already in the destination is overwritten — every entry is unpacked with
 `set_overwrite(false)` and `ginary.json` is created with `create_new` — so a second extraction
 into a populated directory fails instead of half-replacing what is there.
@@ -260,6 +267,8 @@ What that rests on:
 - `mtime` 0 and `uid`/`gid` 0 in every header, and a mode reduced to the execute bit;
 - a single-threaded zstd encoder — the `zstd` crate is built with `default-features = false`, so
   the multi-threaded one is not compiled in and a thread count cannot vary the output;
+- the one flush after entry 1, which is at a fixed position rather than at a buffer boundary, so
+  two packs of one tree place the block boundary in the same place;
 - `created_at` taken from `SOURCE_DATE_EPOCH` when it is set, and never read from a clock inside
   the format code;
 - `ginary.stage.json` excluded, because a file inside the tree that describes the tree cannot

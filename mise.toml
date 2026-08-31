@@ -97,25 +97,28 @@ run = "cargo doc --no-deps"
 description = "Build the release binary"
 run = "cargo build --release"
 
-# The plan lists `smoke` and `package` among the A0 tasks. They cannot do
-# anything until there is an artifact to smoke test, so they are declared here
-# and fail loudly rather than being silently absent.
 [tasks.smoke]
-description = "Clean-room artifact smoke test in Docker (not implemented until A5)"
-run = '''
-echo "smoke: not implemented until A5. It will run scripts/smoke.sh: build the" >&2
-echo "  hello fixture, then \`docker run --rm --network none ubuntu:24.04\` the" >&2
-echo "  artifact with no Erlang installed and assert the exit code propagates." >&2
-exit 1
-'''
+description = "Clean-room artifact smoke test in Docker"
+# Needs a docker daemon and pulls `ubuntu:24.04`. Without a reachable daemon it
+# reports a skip and exits zero, the same rule `require_tools` follows in the
+# test suite; `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure, and
+# the CI job sets it. `GINARY_BIN` points the script at a release binary, which
+# is what the artifact size in `docs/dev/log/A4.md` was measured with.
+run = "scripts/smoke.sh"
 
 [tasks.package]
-description = "Package the fixture application into one executable (not implemented until A4)"
-run = '''
-echo "package: not implemented until A4. It will run \`ginary build\` over" >&2
-echo "  tests/fixtures/hello_ginary and report the artifact size breakdown." >&2
-exit 1
-'''
+description = "Package the hello_ffi fixture and print the size report"
+# The developer's window onto a real build: a copy of the fixture, so nothing
+# is written into the repository, and the report `ginary build` prints for it.
+run = """
+set -e
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
+rm -rf "$work/hello_ffi/build"
+cd "$work/hello_ffi"
+cargo run --quiet --manifest-path "$MISE_PROJECT_ROOT/Cargo.toml" -- build
+"""
 
 [tasks.check]
 description = "The pull-request gate: lint, test, doc and deny"

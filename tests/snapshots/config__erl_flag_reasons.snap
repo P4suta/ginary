@@ -1,0 +1,9 @@
+---
+source: tests/config.rs
+expression: lines
+---
+-boot: ginary boots the runtime from the bundled bin/no_dot_erlang
+-extra: everything after -extra is the packaged application's own arguments
+-noshell: ginary always starts the runtime with -noshell
+-pa: the code path is built from the applications ginary bundles
+-pz: the code path is built from the applications ginary bundles

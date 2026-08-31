@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `outpu` is a typo for `output`. Accepting it would leave the user believing a
+# setting is in force that nothing reads, so the build must refuse and name it.
+
+name = "typo_app"
+version = "0.1.0"
+
+[tools.ginary]
+outpu = "dist"

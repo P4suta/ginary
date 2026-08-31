@@ -55,3 +55,11 @@ mod a3b_cache_clean_app_escaped_the_root;
 mod a3b_the_manifest_app_was_not_a_name;
 #[path = "regressions/a3b_the_move_aside_branch_deleted_a_complete_entry.rs"]
 mod a3b_the_move_aside_branch_deleted_a_complete_entry;
+#[path = "regressions/a4_a_non_utf8_output_path_failed_the_json_report.rs"]
+mod a4_a_non_utf8_output_path_failed_the_json_report;
+#[path = "regressions/a4_a_work_directory_that_could_not_be_removed_was_unreported.rs"]
+mod a4_a_work_directory_that_could_not_be_removed_was_unreported;
+#[path = "regressions/a4_an_unreadable_trailer_was_a_damaged_artifact.rs"]
+mod a4_an_unreadable_trailer_was_a_damaged_artifact;
+#[path = "regressions/a4_extra_bin_names_were_used_as_paths.rs"]
+mod a4_extra_bin_names_were_used_as_paths;

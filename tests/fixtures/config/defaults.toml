@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# A project that has never heard of ginary. Every setting is a default, and
+# reading this file must not require the table to exist.
+
+name = "plain_app"
+version = "0.3.1"
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 0.34.0 and < 2.0.0"

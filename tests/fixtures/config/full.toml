@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Every key `[tools.ginary]` has, each set to something that is not its
+# default, so a test can tell a value that was read from one that was assumed.
+
+name = "full_app"
+version = "2.5.0"
+target = "erlang"
+
+[dependencies]
+
+[tools.ginary]
+output = "dist"
+strip = false
+strip_elf = true
+strip_beams = false
+compression_level = 7
+otp_applications = ["sasl", "runtime_tools"]
+erts_extra_bins = ["heart", "epmd"]
+erl_flags = ["+fnu", "+SDio", "4"]

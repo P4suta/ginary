@@ -71,20 +71,51 @@ jobs:
           toolchain: 1.88.0
       - run: cargo doc --no-deps --locked
 
+  smoke:
+    name: Clean-room smoke test
+    # Pinned rather than `ubuntu-latest`: the smoke test runs the artifact this
+    # runner built inside `ubuntu:24.04`, and the glibc floor it demonstrates is
+    # a property of the pair.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # An unreachable docker daemon must fail the job rather than report a
+      # skip; docker is preinstalled on the GitHub-hosted ubuntu runners.
+      GINARY_REQUIRE_TOOLCHAIN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - run: cargo build --release --locked
+      - run: scripts/smoke.sh
+        env:
+          GINARY_BIN: ${{ github.workspace }}/target/release/ginary
+
   required:
     name: Required CI
     if: ${{ always() && !cancelled() }}
-    needs: [lint, test, doc]
+    needs: [lint, test, doc, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require lints, tests and documentation to pass
+      - name: Require lints, tests, documentation and the smoke test to pass
         env:
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
           DOC_RESULT: ${{ needs.doc.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
           test "$LINT_RESULT" = success
           test "$TEST_RESULT" = success
           test "$DOC_RESULT" = success
+          test "$SMOKE_RESULT" = success

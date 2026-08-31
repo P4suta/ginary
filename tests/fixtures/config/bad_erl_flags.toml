@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `-pa` is built by the launcher out of the applications ginary bundled. A
+# second one here either contradicts it or silently changes the code path.
+
+name = "flagged_app"
+version = "0.1.0"
+
+[tools.ginary]
+erl_flags = ["+fnu", "-pa", "/opt/extra/ebin"]

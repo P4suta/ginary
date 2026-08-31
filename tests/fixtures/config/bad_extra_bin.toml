@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `erts_extra_bins` names programs to copy out of the runtime's `bin`
+# directory. The name is joined onto that directory to read the program and
+# onto the staged one to write it, so a name that is a path reads and writes
+# outside both trees.
+
+name = "escaping_app"
+version = "0.1.0"
+
+[tools.ginary]
+erts_extra_bins = ["heart", "../../../etc/passwd"]

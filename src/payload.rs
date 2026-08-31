@@ -270,6 +270,17 @@ pub fn pack(
         let mut builder = tar::Builder::new(encoder);
         append_bytes(&mut builder, MANIFEST_NAME, &manifest_bytes)?;
         append_bytes(&mut builder, INDEX_NAME, &index_bytes)?;
+        // The compressor is flushed here, and only here. `read_manifest` and
+        // `read_index` stop after these two entries, so the two of them have
+        // to be decodable without the rest of the stream: zstd decodes a block
+        // at a time, and a single-block payload would make a byte flipped
+        // anywhere in it destroy the manifest as surely as the file it damaged.
+        // The flush is what lets `ginary inspect` still say what a damaged
+        // artifact was supposed to be. It is deterministic — the boundary is
+        // always after entry 1 — so identical input still produces identical
+        // bytes, and it costs the ratio of one flush near the front of a
+        // payload measured in megabytes.
+        builder.get_mut().flush()?;
         for file in &index.files {
             append_staged(&mut builder, staging, &file.path)?;
         }

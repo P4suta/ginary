@@ -491,6 +491,21 @@ pub enum AssembleError {
         /// The binary that was asked for and is not there.
         name: String,
     },
+    /// A name in [`StageOptions::extra_bins`] is not a program name.
+    ///
+    /// The name is joined onto the runtime's `bin` directory and onto the
+    /// staged one, so a name holding a separator or `..` would read and write
+    /// outside both trees. Checked here as well as in
+    /// [`crate::config::ToolsConfig::validate`], because staging is what
+    /// performs the copy and a rule enforced only by its caller is a rule one
+    /// caller can forget.
+    #[error(
+        "`{name}` is not the name of a program in the runtime's `bin` directory: a name is a file name, not a path"
+    )]
+    UnusableExtraBinary {
+        /// The name that was refused.
+        name: String,
+    },
     /// The boot file names a library directory the staged tree does not hold.
     ///
     /// A boot script hardcodes the `kernel` and `stdlib` versions it was
@@ -855,6 +870,18 @@ fn build(
     })
 }
 
+/// Whether `name` may be staged out of the runtime's `bin` directory.
+///
+/// A program name is one file name: not empty, not `.` or `..`, and holding
+/// neither a path separator nor a NUL. The rule is the one
+/// [`crate::closure`] applies to an application name and for the same reason —
+/// the value is interpolated into a path — and it is checked here as well as
+/// in [`crate::config::ToolsConfig::validate`], because this is the function
+/// that performs the copy.
+pub fn is_erts_bin_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+}
+
 /// Copies the required binaries and the extra ones into `bin`.
 ///
 /// Returns the names that were staged, which is what
@@ -880,6 +907,12 @@ fn stage_erts_bins(
     }
 
     for name in &opts.extra_bins {
+        // Before either join: the name is interpolated into the path a file is
+        // read from *and* into the path it is written to, so a name holding a
+        // separator or `..` would read and write outside both trees.
+        if !is_erts_bin_name(name) {
+            return Err(AssembleError::UnusableExtraBinary { name: name.clone() });
+        }
         let from = otp.erts_bin.join(name);
         if !from.is_file() {
             return Err(AssembleError::MissingExtraBinary { name: name.clone() });

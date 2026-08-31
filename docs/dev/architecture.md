@@ -21,13 +21,13 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)* or *(A3b)* exist; the rest
-are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)* or *(A4)* exist; the
+rest are the plan.
 
 ```
 build side
-  config.rs        [tools.ginary] in gleam.toml, merged with CLI flags
-  gleam.rs         runs `gleam export erlang-shipment`, enumerates the output
+  config.rs        (A4) [tools.ginary] in gleam.toml, merged with CLI flags
+  gleam.rs         (A4) runs `gleam export erlang-shipment`
   otp.rs           (A1a) discovers the host OTP root, release, ERTS version
   erts_source.rs   host | directory | tarball | catalogue | docker
   catalog.rs       the signed prebuilt-OTP catalogue
@@ -46,7 +46,8 @@ build side
   stub.rs          finds and validates the target's ginary binary
   sign_macos.rs    Mach-O section injection and ad-hoc signing
   verify.rs        re-hash, list dynamic dependencies, report issues
-  bundle.rs        orchestrates the above
+  bundle.rs        (A4) orchestrates the above
+  inspect.rs       (A4) reads a packaged application from the outside
 
 launcher side
   selfexe.rs       (A3b) opens the running executable by inode
@@ -101,6 +102,10 @@ gleam.toml [tools.ginary]        CLI flags
                     v
         build/ginary/<app>-<target>[.exe]
 ```
+
+That is the finished shape. A4 implements the host half of it — `erts_source::resolve` is
+`otp::discover` and `stub::resolve` is the running executable, so the artifact is
+`build/ginary/<app>` with no target suffix; see "One build, end to end" below.
 
 `process.rs` exists because two callers need the same bounded child process and
 neither may hang: `doctor` probes four tools, `otp` asks `erl` for its code root.
@@ -364,6 +369,60 @@ Nothing in the report is fatal. A file the listing names and the tree does not h
 starts like an ELF and will not parse, is a line in `warnings` and the rest of the report is
 still produced: a report that refuses to print because one file is odd is worse than one that
 prints and says which file was odd.
+
+## One build, end to end
+
+`bundle::build(&BuildOptions, &Diag)` is the whole of `ginary build`, and every step of it is a
+module above answering the one question it owns.
+
+```
+BuildOptions                        flags merged over [tools.ginary]
+     |
+  check_stub(/proc/self/exe)        a packaged application may not be a stub -> BundledStub
+     |                              first, because the remedy is "install plain ginary" and a
+     |                              build that exported and staged before saying so wasted both
+     v
+  gleam::export_shipment            or existing_shipment() under --skip-export
+     |                              gleam's own stderr travels verbatim
+     v
+  otp::discover(--otp-root)
+     v
+  closure::app_dependency_closure   roots = [app], extra = otp_applications
+     v
+  assemble::stage -> <project>/build/ginary/.work-<pid>/root
+     v                              force: a work directory is this build's own
+  strip::strip
+     |
+     +-- report::measure(before = the pre-strip listing, root = the tree now)
+     |
+  StagedRoot::refresh               the listing now holds the sizes the tree has
+     v
+  manifest_for                      OtpInfo for the versions, the AppSet for the applications,
+     |                              -pa with the packaged application first
+     v
+  NamedTempFile in the output directory
+     stub bytes -> payload::pack(level) -> trailer::to_bytes
+     chmod 0755 -> persist(<output>/<app>)
+     v
+  BuildReport                       the A2 size table, the needs: line, the artifact line
+```
+
+Two rules are this module's own, and both are about what is left behind.
+
+**The work directory belongs to the project, never to the destination.** It is
+`<project>/build/ginary/.work-<pid>/root` whatever `--out` says, so `ginary build --out
+/usr/local/bin` does not stage a whole OTP installation into `/usr/local/bin`. The process id is
+what keeps two concurrent builds of one project apart, and it is removed on every path out of the
+build — success, failure, and the injected `GINARY_FAULT=pack:fail` that exists to test exactly
+that. `--keep-staging` keeps it and prints where it is. A removal that cannot happen is never
+fatal and never silent: `bundle::remove_work_dir` returns a warning line naming the directory and
+what the operating system said, which a successful build carries in `BuildReport::warnings` and
+prints above its `artifact:` line, and a failed one records through `Diag`.
+
+**The artifact is published by a rename.** The whole file is written into a `NamedTempFile` *in
+the output directory*, so the rename cannot cross a filesystem, and the destination is either
+absent or a complete, executable artifact. A build that fails between the stub and the trailer
+leaves nothing at all.
 
 ## Launch data flow
 

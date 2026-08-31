@@ -350,6 +350,22 @@ impl SyntheticArtifact {
         self.poke(self.stub_len + self.packed.len / 2, 0xff);
     }
 
+    /// Flips a byte near the *end* of the compressed payload.
+    ///
+    /// The digest stops matching either way, which is all the launcher's
+    /// exit-123 tests need. `ginary inspect` needs more: it reads entries 0
+    /// and 1 — the manifest and the index — and stops, and it has to keep
+    /// answering "what was this file supposed to be" about a file that would
+    /// fail `--verify`. This artifact's staging tree is small enough that the
+    /// *middle* of its compressed payload decompresses into the index, so
+    /// [`SyntheticArtifact::break_payload`] would destroy the very entries the
+    /// question is about. Sixteen bytes before the end is past both front
+    /// entries in any tree, which is the same place
+    /// `tests/e2e_hello.rs` damages a real artifact by hand.
+    pub fn break_payload_tail(&self) {
+        self.poke(self.stub_len + self.packed.len - 16, 0xff);
+    }
+
     /// Shortens the artifact by `bytes` bytes, keeping the trailer at the end.
     ///
     /// The bytes come out of the *payload*, not off the end of the file,

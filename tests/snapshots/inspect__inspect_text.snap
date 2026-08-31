@@ -1,0 +1,19 @@
+---
+source: tests/inspect.rs
+expression: hand_built().render_text()
+---
+app:           hello 1.2.3
+target:        linux-x86_64-gnu
+otp:           29.0.5 (release 29, erts 17.0.5)
+gleam:         1.18.1
+created:       2026-08-31T00:00:00Z
+ginary:        0.1.0
+size:          1564 bytes = 1000 stub + 500 payload + 64 trailer
+applications:  2 otp, 1 gleam
+files:         4
+
+size  path
+900   erts-17.0.5/bin/beam.smp
+700   lib/hello/ebin/hello.beam
+300   bin/no_dot_erlang.boot
+300   lib/hello/ebin/hello.app

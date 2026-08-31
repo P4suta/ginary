@@ -165,16 +165,39 @@ pub fn run_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<ProcessOutput, ProcessError> {
-    let child = Command::new(program)
+    run_in_dir_with_timeout(program, args, None, timeout)
+}
+
+/// [`run_with_timeout`], started in a working directory of the caller's choice.
+///
+/// `dir` is [`None`] for "wherever this process is", which is what every
+/// probe wants, and `Some` for a program whose *input* is the directory it
+/// runs in. `gleam export erlang-shipment` is the only such caller today: it
+/// compiles the project the working directory belongs to, so the build cannot
+/// simply run it wherever `ginary build` was typed.
+///
+/// # Errors
+///
+/// As [`run_with_timeout`].
+pub fn run_in_dir_with_timeout(
+    program: &Path,
+    args: &[&str],
+    dir: Option<&Path>,
+    timeout: Duration,
+) -> Result<ProcessOutput, ProcessError> {
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ProcessError::Spawn {
-            program: program.display().to_string(),
-            source,
-        })?;
+        .stderr(Stdio::piped());
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let child = command.spawn().map_err(|source| ProcessError::Spawn {
+        program: program.display().to_string(),
+        source,
+    })?;
     // From here on every exit runs the guard's destructor.
     let mut child = ChildGuard(child);
 

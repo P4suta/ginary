@@ -1,0 +1,32 @@
+---
+source: tests/inspect.rs
+expression: "inspect::render_launch_plan(&plan)"
+---
+program: <cache>/<app>/<key>/erts-17.0.5/bin/erlexec
+argv:
+  -boot
+  <cache>/<app>/<key>/bin/no_dot_erlang
+  -noshell
+  +B
+  -start_epmd
+  false
+  -pa
+  <cache>/<app>/<key>/lib/hello/ebin
+  +B
+  -eval
+  'hello@@main':run('hello')
+  -extra
+set:
+  ROOTDIR=<cache>/<app>/<key>
+  BINDIR=<cache>/<app>/<key>/erts-17.0.5/bin
+  EMU=beam
+  PROGNAME=hello
+  HOME=<cache>/<app>/<key>
+  ERL_CRASH_DUMP=<cache>/<app>/erl_crash.dump
+remove:
+  ERL_LIBS
+  ERL_FLAGS
+  ERL_AFLAGS
+  ERL_ZFLAGS
+  ERL_ROOTDIR
+  ERL_EPMD_PORT

@@ -2,9 +2,9 @@
 //! The `ginary` command line interface.
 //!
 //! Only the commands that are actually implemented appear here. The interface
-//! is meant to grow (`build`, `stage`, `inspect`, `verify`, `cache`, `otp` are
-//! all planned), so the derive layout keeps one variant per command with its
-//! own flags rather than a shared flag bag.
+//! is meant to grow (`verify`, `otp` and the cross-target flags are all
+//! planned), so the derive layout keeps one variant per command with its own
+//! flags rather than a shared flag bag.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,10 +16,17 @@ use serde::Serialize;
 use crate::appfile::{self, AppResource};
 use crate::assemble::{self, StageOptions, StagedRoot};
 use crate::beam;
+use crate::bundle::{self, BuildReport};
 use crate::cache;
 use crate::closure::{self, AppSet};
+use crate::config::{
+    BuildFlags, BuildOptions, MAX_COMPRESSION_LEVEL, MIN_COMPRESSION_LEVEL, ProjectConfig,
+};
+use crate::diag::{self, Diag};
 use crate::doctor;
 use crate::elf::{self, ElfInfo};
+use crate::gleam;
+use crate::inspect::{self, InspectReport, LaunchPlanReport};
 use crate::otp;
 use crate::report::{self, SizeReport};
 use crate::strip::{self, StripOptions, StripReport};
@@ -52,6 +59,9 @@ pub const CACHE_FORMAT_VERSION: u32 = 1;
 /// Version of the `stage --report json` schema.
 pub const SIZE_REPORT_FORMAT_VERSION: u32 = 1;
 
+/// Version of the `build --report json` schema.
+pub const BUILD_FORMAT_VERSION: u32 = 1;
+
 /// Width of the label column in the `elf deps` table.
 ///
 /// `glibc_max` is the longest label, so every value starts in the same column.
@@ -74,9 +84,12 @@ ginary packages the output of `gleam export erlang-shipment` together with a tri
 BEAM runtime into a single executable, so that the people who run a Gleam program do
 not need Erlang installed.
 
-Status: pre-alpha. The `build` command that produces those executables is not
-implemented yet; this version ships `version`, `doctor`, `cache`, `appfile`,
-`closure`, `stage`, `beam` and `elf` only.",
+Run `ginary build` in a Gleam project to produce one, `ginary inspect` to read what a
+packaged application holds, and `ginary doctor` to see what this machine can do. The
+remaining commands — `appfile`, `closure`, `stage`, `beam`, `elf` and `cache` — are
+windows onto the individual phases of a build.
+
+Only Linux x86_64 host packaging is implemented; cross-target builds are not.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -97,6 +110,78 @@ pub enum Command {
     /// Report the toolchain, host target and cache directory ginary found.
     Doctor {
         /// Print a JSON object instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Package the Gleam project in this directory into one executable.
+    ///
+    /// Everything from `gleam export erlang-shipment` to the artifact: the
+    /// application closure, a trimmed BEAM runtime, the payload and the
+    /// launcher, in one file that runs on a machine with no Erlang.
+    Build {
+        /// Where to write the artifact.
+        ///
+        /// A directory — an existing one, or a value ending in a separator —
+        /// has the application name appended to it; anything else is the
+        /// artifact's own path. Defaults to `[tools.ginary] output`, which
+        /// itself defaults to `build/ginary`.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+        /// Keep the debug information the default removes.
+        #[arg(long)]
+        no_strip: bool,
+        /// Strip only the native binaries, leaving the `.beam` files alone.
+        #[arg(long, conflicts_with = "strip_beams_only", conflicts_with = "no_strip")]
+        strip_elf_only: bool,
+        /// Strip only the `.beam` files, leaving the native binaries alone.
+        #[arg(long, conflicts_with = "no_strip")]
+        strip_beams_only: bool,
+        /// The OTP installation to bundle. Defaults to the one `erl` reports.
+        #[arg(long, value_name = "PATH")]
+        otp_root: Option<PathBuf>,
+        /// Reuse the existing `build/erlang-shipment` instead of exporting.
+        #[arg(long)]
+        skip_export: bool,
+        /// Keep the staging work directory and print where it is.
+        #[arg(long)]
+        keep_staging: bool,
+        /// The zstd level the payload is packed at.
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = clap::value_parser!(i32).range(
+                MIN_COMPRESSION_LEVEL as i64..=MAX_COMPRESSION_LEVEL as i64,
+            ),
+        )]
+        compression_level: Option<i32>,
+        /// An extra application to bundle without starting it. Repeatable.
+        #[arg(long = "extra-otp-app", value_name = "NAME")]
+        extra_otp_apps: Vec<String>,
+        /// A program to stage from the runtime's `bin`. Repeatable.
+        #[arg(long = "extra-bin", value_name = "NAME")]
+        extra_bins: Vec<String>,
+        /// The form the build report takes.
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        report: ReportFormat,
+        /// Print the closure and staging accounts before the report.
+        #[arg(long)]
+        explain: bool,
+        /// Say what each phase is doing, on standard error.
+        #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+        verbose: u8,
+    },
+    /// Read a packaged application: its manifest, its size and its integrity.
+    Inspect {
+        /// The artifact to read.
+        #[arg(value_name = "EXE")]
+        path: PathBuf,
+        /// Re-hash the payload and compare it with the trailer.
+        #[arg(long)]
+        verify: bool,
+        /// Print the argument vector and environment the launcher would use.
+        #[arg(long)]
+        launch_plan: bool,
+        /// Print a JSON object instead of a table.
         #[arg(long)]
         json: bool,
     },
@@ -532,6 +617,45 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
     match command {
         Command::Version { json } => write_version(&VersionReport::current(), *json, out),
         Command::Doctor { json } => write_doctor(&doctor::Report::gather(), *json, out),
+        Command::Build {
+            out: dir,
+            no_strip,
+            strip_elf_only,
+            strip_beams_only,
+            otp_root,
+            skip_export,
+            keep_staging,
+            compression_level,
+            extra_otp_apps,
+            extra_bins,
+            report,
+            explain,
+            verbose,
+        } => write_build(
+            &BuildFlags {
+                start: std::env::current_dir().context("cannot read the working directory")?,
+                out: dir.clone(),
+                no_strip: *no_strip,
+                strip_elf_only: *strip_elf_only,
+                strip_beams_only: *strip_beams_only,
+                otp_root: otp_root.clone(),
+                skip_export: *skip_export,
+                keep_staging: *keep_staging,
+                compression_level: *compression_level,
+                extra_otp_apps: extra_otp_apps.clone(),
+                extra_bins: extra_bins.clone(),
+                explain: *explain,
+                verbose: *verbose,
+            },
+            *report,
+            out,
+        ),
+        Command::Inspect {
+            path,
+            verify,
+            launch_plan,
+            json,
+        } => write_inspect(path, *verify, *launch_plan, *json, out),
         Command::Appfile {
             command: AppfileCommand::Parse { paths, json },
         } => write_appfile(paths, *json, out),
@@ -1107,6 +1231,151 @@ fn write_doctor(report: &doctor::Report, json: bool, out: &mut impl Write) -> an
 }
 
 /// Writes a value as pretty JSON followed by a newline.
+/// The payload of `ginary build --report json`.
+#[derive(Debug, Serialize)]
+pub struct BuildJsonReport {
+    /// Version of this schema; see [`BUILD_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// What the build produced.
+    #[serde(flatten)]
+    pub report: BuildReport,
+}
+
+/// Finds the project, merges the flags over its configuration, and builds.
+fn write_build(
+    flags: &BuildFlags,
+    report: ReportFormat,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let project = gleam::find_project(&flags.start)?;
+    let config = ProjectConfig::read(&project.manifest())?;
+    let options = BuildOptions::merge(project.root(), &config, flags)?;
+    // Layered rather than replaced: `-v` is a request for the phases on
+    // standard error, and it may not take away a `GINARY_TRACE` file the user
+    // asked for in the same breath. `-v` is exactly `GINARY_DEBUG=1` for the
+    // length of this command.
+    let mut env = diag::EnvSnapshot::from_env();
+    if flags.verbose > 0 {
+        env.ginary_debug = Some(std::ffi::OsString::from("1"));
+    }
+    let diag = Diag::from_env(&env);
+
+    let built = bundle::build(&options, &diag)?;
+
+    if report == ReportFormat::Json {
+        return write_json(
+            out,
+            &BuildJsonReport {
+                format_version: BUILD_FORMAT_VERSION,
+                report: built,
+            },
+        );
+    }
+
+    let mut text = String::new();
+    if let Some(explain) = &built.explain {
+        text.push_str(&explain.closure);
+        text.push('\n');
+        text.push_str(&explain.staged);
+        text.push('\n');
+    }
+    text.push_str(&built.render_text());
+    if let Some(staging) = &built.staging {
+        text.push_str(&format!("staging: {}\n", staging.display()));
+    }
+    out.write_all(text.as_bytes())
+        .context("cannot write the build report to standard output")
+}
+
+/// Reads one artifact and prints what it says about itself.
+fn write_inspect(
+    path: &Path,
+    verify: bool,
+    launch_plan: bool,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let info = inspect::open(path)?;
+
+    let verification = if verify {
+        Some(inspect::verify(&info)?)
+    } else {
+        None
+    };
+    let plan = if launch_plan {
+        Some(inspect::launch_plan(
+            &info,
+            Path::new(inspect::PLACEHOLDER_ROOT),
+            Path::new(inspect::PLACEHOLDER_APP_DIR),
+        )?)
+    } else {
+        None
+    };
+
+    if json {
+        write_json(
+            out,
+            &InspectReport {
+                format_version: crate::inspect::INSPECT_FORMAT_VERSION,
+                path: path.display().to_string(),
+                payload_offset: info.trailer.payload_offset,
+                payload_len: info.payload_len,
+                total_len: info.total_len,
+                payload_sha256: hex::encode(info.trailer.payload_sha256),
+                manifest: info.manifest.clone(),
+                index: info.index.clone(),
+                verify: verification.clone(),
+                launch_plan: plan.as_ref().map(|plan| LaunchPlanReport {
+                    program: plan.program.display().to_string(),
+                    argv: plan
+                        .args
+                        .iter()
+                        .map(|argument| argument.to_string_lossy().into_owned())
+                        .collect(),
+                    set: plan
+                        .set
+                        .iter()
+                        .map(|(key, value)| {
+                            format!("{}={}", key.to_string_lossy(), value.to_string_lossy())
+                        })
+                        .collect(),
+                    remove: plan
+                        .remove
+                        .iter()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .collect(),
+                }),
+            },
+        )?;
+    } else {
+        let mut text = info.render_text();
+        if let Some(plan) = &plan {
+            text.push('\n');
+            text.push_str(&inspect::render_launch_plan(plan));
+        }
+        if let Some(verification) = &verification {
+            text.push_str(&format!(
+                "\nverify: {}\n  expected {}\n  actual   {}\n",
+                if verification.ok() { "ok" } else { "MISMATCH" },
+                verification.expected,
+                verification.actual
+            ));
+        }
+        out.write_all(text.as_bytes())
+            .context("cannot write the inspection to standard output")?;
+    }
+
+    if let Some(verification) = &verification
+        && !verification.ok()
+    {
+        anyhow::bail!(
+            "{}: the payload does not match the trailer's digest",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn write_json(out: &mut impl Write, value: &impl Serialize) -> anyhow::Result<()> {
     let mut json = serde_json::to_vec_pretty(value).context("cannot serialise the report")?;
     json.push(b'\n');
@@ -1124,9 +1393,13 @@ mod tests {
     }
 
     #[test]
-    fn the_long_help_mentions_the_planned_build_command() {
+    fn the_long_help_names_the_command_a_reader_came_for() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("build"), "long help:\n{help}");
+        assert!(
+            !help.contains("pre-alpha"),
+            "the pre-alpha notice went when `build` landed:\n{help}"
+        );
     }
 
     #[test]
@@ -1137,7 +1410,10 @@ mod tests {
 
     #[test]
     fn an_unknown_subcommand_is_an_error() {
-        assert!(Cli::try_parse_from(["ginary", "build"]).is_err());
+        // A name no milestone plans, so that this test keeps asserting what it
+        // is about when the interface grows. It used to be `build`, which A4
+        // implemented.
+        assert!(Cli::try_parse_from(["ginary", "frobnicate"]).is_err());
     }
 
     /// A `stage` command line, parsed.

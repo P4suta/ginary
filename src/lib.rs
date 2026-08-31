@@ -65,6 +65,16 @@
 //! - [`fault`] — the named fault points the launcher tests arm, compiled in
 //!   only under the `fault-injection` feature.
 //!
+//! Milestone A4 adds the four modules that turn all of the above into one
+//! command, and the two commands that drive them:
+//!
+//! - [`config`] — `[tools.ginary]` in `gleam.toml`, and the CLI flags merged
+//!   over it;
+//! - [`gleam`] — finding the project and running
+//!   `gleam export erlang-shipment`;
+//! - [`bundle`] — the whole build, from a project to one executable;
+//! - [`inspect`] — reading a packaged application from the outside.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -74,15 +84,19 @@
 pub mod appfile;
 pub mod assemble;
 pub mod beam;
+pub mod bundle;
 pub mod cache;
 pub mod cache_dir;
 pub mod cli;
 pub mod closure;
+pub mod config;
 pub mod diag;
 pub mod doctor;
 pub mod elf;
 pub mod error;
 pub mod fault;
+pub mod gleam;
+pub mod inspect;
 pub mod launch;
 pub mod launcher;
 pub mod manifest;

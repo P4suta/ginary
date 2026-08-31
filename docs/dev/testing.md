@@ -29,12 +29,17 @@
 | `src/error.rs` unit tests | the five exit codes, the message of each variant, the `hint:` second line, and the panic-hook line |
 | `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic |
 | `src/cache.rs` unit tests | the `Env` snapshot, the four resolution rules, the `TMPDIR` fallback and the entry path |
-| `src/fault.rs` unit tests | the `<point>[:<action>]` grammar, and that nothing is armed without the feature |
+| `src/fault.rs` unit tests | the `<point>[:<action>]` grammar, the closed set of actions resolved through `armed_by`, and that nothing is armed without the feature |
 | `src/launcher.rs` unit tests | the three `GINARY_CMD` values, and that nothing near them is recognised |
 | `tests/launch.rs` | the pure plan: the argument vector in order, `GINARY_ERL_FLAGS`, non-UTF-8 arguments, the six set variables, the removal list and its `ERL_OTP*_FLAGS` family, the two refusals, and every preflight shape |
 | `tests/cache.rs` | resolution and creation, the fallback warning, the ten extraction steps against a real payload, the sweep's three pid cases, and `clean` |
 | `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts and the three fault points |
 | `tests/artifact_real.rs` | toolchain-gated: one real artifact, assembled by hand out of the fixture and run with a cleared environment |
+| `tests/config.rs` | `[tools.ginary]`: the defaults, every key, the five rules serde cannot state, the merge of the CLI flags over the table, and the four shapes a `--out` can take |
+| `tests/gleam.rs` | the upward search for `gleam.toml`, what `--skip-export` reuses and what it says when there is nothing to reuse, the version line, and two gated runs of a real `gleam` |
+| `tests/bundle.rs` | the parts of the build a machine with no toolchain can still hold: the refusal of a stub that already carries a trailer — through `check_stub` and through `build_with_stub`, which pins that the refusal comes *before* the export — the work directory's name, and the report's two rendered forms |
+| `tests/inspect.rs` | the text report and the launch plan over a hand-built `ArtifactInfo`, and a `SyntheticArtifact` opened, verified, and damaged in the two ways that matter |
+| `tests/e2e_hello.rs` | toolchain-gated: `ginary build` in a copy of the `hello_ffi` fixture, and everything that follows — running the artifact with no Erlang on the machine, the warm cache, byte-identical rebuilds under `SOURCE_DATE_EPOCH`, `--report json` against the artifact's own size on disk, `--explain`, `-v` beside `GINARY_TRACE`, `inspect --verify`, `GINARY_CMD`, and the work directory |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -59,6 +64,28 @@ what makes the beam step reachable without an Erlang — and gates the one that 
 on `require_tools(&["strip"])`. `tests/elf.rs` gates the two tests that read the host `beam.smp`
 and leaves the rest ungated, because the fixture the others use is the test binary itself.
 
+## The clean room
+
+`cargo test` cannot answer the question the whole project is about, because it runs on a machine
+that has Erlang installed and can only scrub the environment to pretend otherwise.
+`scripts/smoke.sh` does not have to pretend: it packages the `hello_ffi` fixture and runs the
+artifact inside `ubuntu:24.04`, which genuinely has no Erlang, with `--network none`, which
+genuinely has no way to fetch one. Three checks, each a claim no in-repository test can make:
+
+- `! command -v erl >/dev/null && /app 0 x y` — the machine has no Erlang and the application
+  runs anyway, printing its arguments and reading its `priv`;
+- `/app 7; test $? = 7` — the application's own exit code crosses the container boundary;
+- `--read-only --tmpfs /tmp:rw,exec` with `HOME` on the read-only rootfs — the cache cannot be
+  created where it would like to be and falls back to `${TMPDIR:-/tmp}/ginary-<uid>` with one
+  warning, which is the path `src/cache.rs` has unit tests for and had never actually taken.
+
+`mise run smoke` runs it. An unreachable docker daemon is a reported skip, the same rule
+`require_tools` follows, and `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure; the CI
+`smoke` job sets it and is one of the jobs `required` waits on. `GINARY_BIN` points the script at
+a release binary rather than `cargo run`, which is how the artifact size in
+`docs/dev/log/A4.md` was measured — the debug stub is fifteen times the release one and the
+number would say nothing.
+
 The library and binary targets spawn only fake shell scripts in temporary directories, never a
 program from the machine's `PATH`. Four integration targets do reach it, each for a stated
 reason:
@@ -69,6 +96,7 @@ reason:
 | `tests/cli.rs` | the same, plus the `otp` field, which runs the ambient `erl` | the two `otp` assertions are gated on `require_tools(&["erl"])` |
 | `tests/otp.rs`, `tests/appfile.rs`, `tests/closure.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
 | `tests/stage_run.rs` | `gleam export erlang-shipment`, `otp::discover(None)`, and the `erlexec` of the staged tree | every test is gated on `require_tools(&["gleam", "erl"])`; the launched runtime gets `env_clear()`, an empty `PATH` directory and a `HOME` inside the test's temporary tree, and both children run under a deadline — `fixture::EXPORT_BUDGET` (180 s) and `erl::RUN_BUDGET` (60 s) — with stdin on the null device |
+| `tests/gleam.rs`, `tests/e2e_hello.rs` | the real `gleam`, and through `ginary build` the real `erl` and `strip` | every one of those tests is gated on `require_tools`; the build runs under `built::BUILD_BUDGET` (900 s) and each run of the artifact under `built::RUN_BUDGET` (120 s), and the artifact itself is run with `env_clear()` and an empty-directory `PATH`, so nothing ambient reaches the packaged application |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 
@@ -150,14 +178,18 @@ nothing else in the system produces. The stub also answers `--exit N`, `--signal
 itself, so a supervised run has a signal to turn into `128 + signo`) and `--dump` (it writes
 `$ERL_CRASH_DUMP` with a `Slogan:` line in it, which is all `launch::supervise` reads). Everything the launcher decides is therefore readable on
 standard output, and the launcher's whole contract is testable on a machine with no Erlang at
-all. `SyntheticArtifact` also carries the four ways an artifact can be broken — `break_magic`,
-`break_geometry`, `break_payload`, `truncate` — because each one is a different numbered exit
-code and a test that broke the file by hand would be a test that broke it slightly differently
-each time. `truncate` takes its bytes out of the *payload* and leaves the trailer at the end,
-which is deliberate and was corrected during A3b: shortening the file from its end takes the
-trailer with it, and `docs/format.md` rule 2 makes what is left the ginary command line tool
-rather than a damaged artifact. The fault worth a test is the one that still carries a trailer
-and no longer matches it.
+all. `SyntheticArtifact` also carries the ways an artifact can be broken — `break_magic`,
+`break_geometry`, `break_payload`, `break_payload_tail`, `truncate` — because each one is a
+different numbered exit code and a test that broke the file by hand would be a test that broke it
+slightly differently each time. The two payload ones differ in *where*, and A4 added the second:
+the launcher only needs a digest that no longer matches, but `ginary inspect` has to keep
+answering "what was this file supposed to be" about a file that fails `--verify`, so its tests
+damage the payload sixteen bytes before the end, past both front entries, which is the same place
+`tests/e2e_hello.rs` damages a real artifact by hand. `truncate` takes its bytes out of the
+*payload* and leaves the trailer at the end, which is deliberate and was corrected during A3b:
+shortening the file from its end takes the trailer with it, and `docs/format.md` rule 2 makes
+what is left the ginary command line tool rather than a damaged artifact. The fault worth a test
+is the one that still carries a trailer and no longer matches it.
 
 `Runner::spawn` and `Runner::output` retry while the kernel answers `ETXTBSY`. That is a
 property of the harness and not of the launcher: cargo runs these tests as threads of one
@@ -171,6 +203,17 @@ The *wait* is bounded too. `Runner::output` and the eight-way concurrency test g
 budget of `artifact::RUN_BUDGET`. A launcher that deadlocks on the cache is precisely what these
 tests exist to catch, and an unbounded `wait_with_output` would report it as a stalled job with
 no diagnosis rather than as a failed test.
+
+`tests/common/project.rs` and `tests/common/built.rs` are the two A4 added, and they sit at the
+two ends of the build. The first writes a `gleam.toml` in a temporary directory with a tree around
+it, which is all the upward search, `--skip-export` and "not in a Gleam project" need; it never
+writes Gleam source, because a project that has to *compile* is `tests/fixtures/hello_ffi`. The
+second drives the real command: `BuiltProject` copies a fixture, runs this test run's own `ginary
+build` in it under a deadline and lists the `.work-<pid>` directories the build did or did not
+leave, and `ArtifactRun` runs what it produced under `env_clear()`, a `PATH` that is an empty
+directory, and a `HOME` and `XDG_CACHE_HOME` inside the test's own tree — the same scrubbing
+`tests/common/artifact.rs` applies, for the same reason: an artifact that only ran because the
+developer had Erlang installed has proved nothing.
 
 `tests/common/payload.rs` is what A3a added, and it builds no tree at all in the `FakeOtp` sense:
 it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
@@ -353,6 +396,14 @@ that `the_small_fixtures_chunk_table_is_exactly_this` names all fourteen chunk o
 lengths; `gleam@list.beam` is large enough that truncating it at every one of its 49 680 byte
 offsets is a real workout for the never-panic property. Their licence is `Apache-2.0` and, since
 a binary carries no SPDX header, `REUSE.toml` declares the path.
+
+### `tests/fixtures/config/`
+
+Nine whole `gleam.toml` files, one per rule, read by `tests/config.rs` through
+`ProjectConfig::from_toml`, which takes the text and a path — so none of them has to be a real
+project on disk. Two are valid and seven are invalid on purpose, and
+`tests/fixtures/config/README.md` records which is which. The invalid seven each have a test
+asserting the exact error variant, so editing one means editing its assertion with it.
 
 ### `tests/fixtures/app/`
 

@@ -1,0 +1,12 @@
+---
+source: tests/bundle.rs
+expression: report.render_text()
+---
+category     files  before    after     saved
+erts_binary  4      41675352  11742936  29932416
+gleam_beam   3      1382144   511072    871072
+total        7      43057496  12254008  30803488
+
+needs: libc.so.6 (GLIBC_2.38), libm.so.6
+
+artifact: build/ginary/hello_ffi (5242880 stub + 9437184 payload + 64 trailer)

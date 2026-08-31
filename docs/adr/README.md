@@ -19,3 +19,5 @@ only partly built, the record says so under `Consequences`.
   information, on by default
 - [0008](0008-launcher-exit-codes-and-env-protocol.md) — Launcher exit codes 121 to 125, and
   maintenance through the environment
+- [0009](0009-front-entries-in-their-own-zstd-block.md) — The manifest and the index get a zstd
+  block of their own

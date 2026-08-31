@@ -18,6 +18,13 @@
 //! | `rename` | `eexist` | the rename onto the cache entry reports `EEXIST`, as a lost race does |
 //! | `unpack` | `corrupt` | a byte of the manifest is flipped in memory, so the digest cannot match |
 //! | `launcher` | `panic` | the launcher panics, so the panic hook `main` installs is the thing under test |
+//! | `pack` | `fail` | `bundle::build` stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact |
+//!
+//! `pack` is the one point on the *build* side rather than the launcher's, and
+//! it is here for the same reason as the other three: "a build that fails
+//! half-way cleans up after itself" cannot be reached by handing the builder a
+//! different project, because every input that would fail a build fails it
+//! before anything has been written.
 //!
 //! The whole module compiles to a no-op unless the `fault-injection` feature
 //! is on, and that feature is off by default: a release artifact holds none of
@@ -82,10 +89,10 @@ pub const PANIC_MESSAGE: &str = "GINARY_FAULT=launcher:panic";
 /// not here, and silently giving it `on` would make that test pass for the
 /// wrong reason.
 #[cfg_attr(
-    not(feature = "fault-injection"),
+    not(any(test, feature = "fault-injection")),
     expect(dead_code, reason = "only the fault-injection build reads the table")
 )]
-const ACTIONS: [&str; 5] = ["on", "pause", "eexist", "corrupt", "panic"];
+const ACTIONS: [&str; 6] = ["on", "pause", "eexist", "corrupt", "panic", "fail"];
 
 /// The action armed for `name`, reading [`VAR`] once per process.
 #[cfg(feature = "fault-injection")]
@@ -95,6 +102,20 @@ fn armed(name: &str) -> Option<&'static str> {
         .get_or_init(|| std::env::var(VAR).ok())
         .as_deref()
         .unwrap_or_default();
+    armed_by(spec, name)
+}
+
+/// The action `spec` arms for `name`, or [`None`] when it arms none for it.
+///
+/// The whole of [`armed`] except the one read of [`VAR`], which a process may
+/// do only once and a test may therefore not vary. Splitting it here is what
+/// lets the closed-set filter be asserted over many specs rather than over the
+/// single spec the test process happens to have been started with.
+#[cfg_attr(
+    not(any(test, feature = "fault-injection")),
+    expect(dead_code, reason = "only the fault-injection build resolves a spec")
+)]
+fn armed_by(spec: &str, name: &str) -> Option<&'static str> {
     let (point, action) = parse(spec)?;
     if point != name {
         return None;
@@ -172,19 +193,42 @@ mod tests {
         assert_eq!(point("after-extract"), None);
     }
 
-    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn an_action_this_build_implements_arms_that_action() {
+        assert_eq!(
+            armed_by("after-extract:pause", "after-extract"),
+            Some("pause")
+        );
+        assert_eq!(armed_by("rename:eexist", "rename"), Some("eexist"));
+        assert_eq!(armed_by("unpack:corrupt", "unpack"), Some("corrupt"));
+        assert_eq!(armed_by("launcher:panic", "launcher"), Some("panic"));
+        assert_eq!(armed_by("rename", "rename"), Some("on"));
+    }
+
     #[test]
     fn an_action_this_build_does_not_implement_arms_nothing() {
-        // `armed` reads the environment once per process, so what is asserted
-        // is the closed set it filters through: a spec that names an action
-        // this build has no branch for must arm nothing rather than fall back
-        // to `on`.
+        // The closed set asserted through the resolver rather than against the
+        // table: a spec naming an action this build has no branch for must arm
+        // nothing rather than fall back to `on`, and reading that off `ACTIONS`
+        // would only restate the table to itself.
         for spec in ["rename:enospc", "after-extract:kill", "unpack:truncate"] {
-            let (_, action) = parse(spec).expect("a well-formed spec still parses");
-            assert!(
-                !ACTIONS.contains(&action),
-                "`{spec}` names an action this build implements, so it would arm"
-            );
+            let (point, _) = parse(spec).expect("a well-formed spec still parses");
+            assert_eq!(armed_by(spec, point), None, "`{spec}` armed something");
         }
+    }
+
+    #[test]
+    fn a_spec_arms_only_the_point_it_names() {
+        assert_eq!(armed_by("rename:eexist", "after-extract"), None);
+        assert_eq!(armed_by("", "rename"), None);
+    }
+
+    #[test]
+    fn a_point_no_spec_can_name_is_never_armed() {
+        // Through the public entry point, so that the environment-reading path
+        // is exercised too. The name is one no build has a point for, so the
+        // assertion holds whatever `GINARY_FAULT` this process was started
+        // with, feature on or off.
+        assert_eq!(point("a-point-this-build-does-not-have"), None);
     }
 }
