@@ -97,7 +97,10 @@ Each header is written with `HeaderMode::Deterministic` and then `mtime` set to 
 The mode is normalised rather than copied, which is what keeps a build machine's umask, ACLs and
 any set-user-ID bit out of the artifact. `ginary.index.json` records the staged file's own
 permission bits, so the two agree for a `0644`/`0755` tree and the index is the record of what
-was staged rather than of what was packed.
+was staged rather than of what was packed. The two columns are therefore related rather than
+equal, and it is the *relation* that `ginary verify` checks: a header mode that is not the
+normalisation of the row's mode is `IndexModeMismatch`, and a header size that is not the row's
+size is `IndexSizeMismatch`.
 
 The tar crate's own `Deterministic` mode writes a fixed *non-zero* `mtime`, as a workaround for
 tools that mishandle a zero one. This format fixes it at 0, so ginary sets that one field itself.
@@ -164,6 +167,12 @@ treats as incomplete and removes.
   "otp_release": 29,
   "otp_version": "29.0.5",
   "erts_version": "17.0.5",
+  "otp": {
+    "linkage": "dynamic",
+    "libc": { "kind": "gnu", "min": "2.38" },
+    "nif_loading": true,
+    "source": "host:/usr/lib/erlang"
+  },
   "target": "linux-x86_64-gnu",
   "otp_applications": [{ "name": "kernel", "vsn": "11.0.3" }],
   "gleam_applications": ["my_gleam_app", "gleam_stdlib"],
@@ -217,6 +226,7 @@ treats as incomplete and removes.
 | `otp_release` | number | `erlang:system_info(otp_release)` |
 | `otp_version` | string | `erlang:system_info(version)` |
 | `erts_version` | string | also the `erts-<vsn>` directory name |
+| `otp` | object | below; additive, and absent in an artifact built before C1 |
 | `target` | string | the canonical `<os>-<arch>[-<libc>]` name |
 | `otp_applications` | array of `{name, vsn}` | the applications from the OTP library |
 | `gleam_applications` | array of string | the applications from the shipment |
@@ -224,6 +234,22 @@ treats as incomplete and removes.
 | `native` | array of `{path, kind}` | `kind` is `elf`, `macho` or `pe` |
 | `created_at` | string | RFC 3339 in UTC, `SOURCE_DATE_EPOCH` honoured |
 | `ginary_version` | string | the ginary that built the artifact |
+
+`otp`:
+
+| key | type | notes |
+|-----|------|-------|
+| `linkage` | string | `dynamic`, `static`, or `unknown` for an artifact that recorded none |
+| `libc` | object or null | `{kind, min}`; `kind` is `gnu` or `musl`, `min` is a bare `2.38` |
+| `nif_loading` | bool | whether the bundled emulator can `dlopen` a NIF |
+| `source` | string | the `erts` spelling with the root it resolved to, `host:/usr/lib/erlang` |
+
+Every field of `otp` is derived from the bundled `beam.smp` itself rather than from the source
+that produced it, which is the rule `src/erts_source.rs` exists to enforce: a tarball whose name
+says `aarch64` and whose emulator is an x86-64 binary is caught at build time. `linkage` is
+`static` when the emulator has no `PT_INTERP`, and `nif_loading` is `false` exactly then, because
+a statically linked emulator has no dynamic loader to call. `libc` is null on a platform with one
+system C runtime, and `min` is null for musl, which carries no symbol versions to derive one from.
 
 `launch`:
 
@@ -439,3 +465,33 @@ is a change to a *released* format: v1 has not shipped.
   it with an unattributed `AlreadyExists`. Reserving the first component instead closes both
   ends; `DuplicateEntry` now names the path the entry would have landed on rather than the bare
   reserved name.
+
+### v1, milestone C1 — the index's other two columns are checked
+
+- **`ginary verify` compared one of the three columns.** A row carries a `size`, a `mode` and a
+  `sha256`, and the reader matched the row by path and then checked the digest alone. An index
+  that promised an executable over an entry the launcher extracts `0644`, or that claimed a
+  length the entry does not have, verified clean — a digest can be right while the metadata
+  beside it is wrong, because nothing in a packer recomputes one from the other. The format is
+  unchanged: this is the reader catching up with the rules the document already fixed. `size` is
+  compared for equality, and `mode` against the *normalisation* the header field is written with
+  (`0755` for a staged mode with the user execute bit, `0644` otherwise), because the two
+  columns are documented to differ for a tree whose modes are neither. The findings name the
+  column: `IndexSizeMismatch` and `IndexModeMismatch`, beside the digest's `IndexMismatch`.
+
+### v1, milestone C1 — the `otp` provenance block
+
+- **`ginary.json` gains an `otp` object** holding `linkage`, `libc`, `nif_loading` and `source`.
+  It is additive and `format_version` stays at `1`: the key carries a serde default, so an
+  artifact built before C1 reads back as `linkage: "unknown"`, `libc: null`,
+  `nif_loading: true` and `source: "unknown"` rather than failing to parse, and a launcher that
+  predates the block ignores it — nothing on the launcher path reads it. `nif_loading` defaults
+  to `true` because every artifact that predates the block bundled the host's own dynamically
+  linked runtime; the two strings say `unknown` because nothing read them.
+- **A suffixed build writes the same object twice.** `build/ginary/<app>-<target>.json` is the
+  same document as the artifact's own `ginary.json` — the same fields in the same order,
+  pretty-printed rather than packed — written beside it so that CI can read what a build produced
+  for another architecture without opening an executable it cannot run. `ginary verify` takes an
+  artifact and does not read the copy; nothing but a reader of the directory does.
+  A bare host build, which writes `build/ginary/<app>`, writes no copy: one artifact in a
+  directory is its own manifest.

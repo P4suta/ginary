@@ -15,14 +15,20 @@
 //! The table is read with `deny_unknown_fields`, which is the whole point of
 //! reading it with serde at all: a key ginary does not know is a setting the
 //! user believes is in force, and accepting it silently would be worse than
-//! refusing the build.
+//! refusing the build. The per-target sub-tables refuse the same key for the
+//! same reason and one step later, in [`ToolsConfig::validate_targets`], so
+//! that the message can name which of the seven sub-tables holds it; see
+//! [`TargetConfig::unknown`].
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::erts_source::{ErtsSourceSpec, SpecError};
 use crate::strip::StripOptions;
+use crate::target::Target;
 
 /// Where an artifact is written when `[tools.ginary] output` says nothing.
 ///
@@ -100,13 +106,73 @@ pub const REJECTED_ENV_NAMES: [&str; 5] = ["BINDIR", "EMU", "HOME", "PROGNAME", 
 pub const EXTRA_BIN_REASON: &str =
     "a program name is a file name in the runtime's bin directory, not a path";
 
+/// The target selection a project that names none builds for.
+pub const DEFAULT_TARGETS: [&str; 1] = ["host"];
+
+/// The two values `[tools.ginary.target.<name>] otp_variant` accepts.
+pub const OTP_VARIANTS: [&str; 2] = ["static", "dynamic"];
+
+/// Why `host` and `all` may not name a per-target sub-table.
+pub const TARGET_TABLE_PSEUDO: &str =
+    "a sub-table configures one target, and `host` and `all` name a set of them";
+
+/// The four keys `[tools.ginary.target.<name>]` has, in declaration order.
+pub const TARGET_KEYS: [&str; 4] = ["erts", "otp_variant", "native", "codesign"];
+
+/// The settings of one target, `[tools.ginary.target.<name>]`.
+///
+/// Every field is optional, and three of the four are recorded rather than
+/// acted on in this milestone: `otp_variant` and `native` are read by the
+/// catalogue and the native-code milestones, and `codesign` by the macOS one.
+/// They parse now so that a configuration can be written ahead of the build
+/// that reads it, and a key that is *not* one of the four is refused — by
+/// [`ToolsConfig::validate_targets`] rather than by serde, for the reason
+/// [`TargetConfig::unknown`] gives — because a setting nobody reads is a
+/// setting its author believes is in force.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TargetConfig {
+    /// Where this target's runtime comes from; see
+    /// [`crate::erts_source::ErtsSourceSpec`].
+    pub erts: Option<String>,
+    /// `static` or `dynamic`; recorded, and read by the catalogue milestone.
+    pub otp_variant: Option<String>,
+    /// Native objects this target overrides, by shipment-relative path.
+    pub native: BTreeMap<String, String>,
+    /// The macOS signing settings, parsed loosely and recorded.
+    pub codesign: Option<toml::Value>,
+    /// Every key that is not one of [`TARGET_KEYS`].
+    ///
+    /// Collected rather than refused by `deny_unknown_fields`, and then
+    /// refused by [`ToolsConfig::validate_targets`], for one reason: serde
+    /// names the key and not the table it is in, and a `gleam.toml` can hold
+    /// seven of these tables. The refusal is the same; the sentence says which
+    /// sub-table to go and look at.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
+}
+
+impl TargetConfig {
+    /// The ERTS source this target names, or [`ErtsSourceSpec::Host`].
+    ///
+    /// # Errors
+    ///
+    /// [`SpecError`] when the value is not one of the five spellings.
+    pub fn erts_spec(&self) -> Result<ErtsSourceSpec, SpecError> {
+        match &self.erts {
+            Some(value) => value.parse(),
+            None => Ok(ErtsSourceSpec::Host),
+        }
+    }
+}
+
 /// The `[tools.ginary]` table of a `gleam.toml`.
 ///
 /// Every field is optional and a missing table is [`ToolsConfig::default`],
 /// so a project that has never heard of ginary builds with the defaults. The
 /// accessors below are what a caller should read: they apply the defaults and
 /// the `strip` / `strip_elf` / `strip_beams` precedence in one place.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     /// The directory the artifact is written into, relative to the project.
@@ -138,6 +204,46 @@ pub struct ToolsConfig {
     pub env: BTreeMap<String, String>,
     /// Whether the artifact ships `heart` and starts the runtime under it.
     pub heart: bool,
+    /// The targets this project builds for: `host`, `all` or canonical names.
+    pub targets: Vec<String>,
+    /// The per-target sub-tables, keyed by canonical target name.
+    ///
+    /// A separate key from [`ToolsConfig::targets`] because TOML will not let
+    /// one name be both an array of strings and a table: `targets` is the list
+    /// of what to build, `[tools.ginary.target.<name>]` is how to build one.
+    pub target: BTreeMap<String, TargetConfig>,
+}
+
+impl Default for ToolsConfig {
+    /// Every setting at its default, which is what a project with no
+    /// `[tools.ginary]` table builds with.
+    ///
+    /// Hand-written rather than derived for one field: `targets` defaults to
+    /// [`DEFAULT_TARGETS`] rather than to the empty list, and the container's
+    /// `#[serde(default)]` fills a missing key from here.
+    fn default() -> Self {
+        Self {
+            output: None,
+            strip: None,
+            strip_elf: None,
+            strip_beams: None,
+            compression_level: None,
+            otp_applications: Vec::new(),
+            erts_extra_bins: Vec::new(),
+            erl_flags: Vec::new(),
+            vm_args: None,
+            sys_config: None,
+            distribution: false,
+            filename_encoding: None,
+            env: BTreeMap::new(),
+            heart: false,
+            targets: DEFAULT_TARGETS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            target: BTreeMap::new(),
+        }
+    }
 }
 
 impl ToolsConfig {
@@ -262,12 +368,92 @@ impl ToolsConfig {
                 });
             }
         }
+        self.validate_targets(path)
+    }
+
+    /// Checks the `targets` list and the per-target sub-tables.
+    ///
+    /// Four rules, and none of them is expressible in serde: every entry of
+    /// `targets` is `host`, `all` or a canonical target name, and a sub-table
+    /// is named after one canonical target rather than after `host` or `all`,
+    /// has an `erts` that is one of the five source spellings, and has an
+    /// `otp_variant` that is one of [`OTP_VARIANTS`].
+    ///
+    /// The list is checked here, where the manifest is read, rather than only
+    /// where a build resolves it: a reader that accepted it would hand
+    /// `ginary doctor` a list nothing can build, and `doctor` would report the
+    /// host as though the project had asked for it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Target`] for a selection that is not one,
+    /// [`ConfigError::TargetTable`] for a name that is not a target,
+    /// [`ConfigError::ErtsSource`] for an `erts` that is not a source and
+    /// [`ConfigError::OtpVariant`] for a variant that is neither.
+    pub fn validate_targets(&self, path: &Path) -> Result<(), ConfigError> {
+        // The list first: it is what a build resolves and what `doctor`
+        // prints a row for, and an unusable entry in it makes every sub-table
+        // below beside the point.
+        crate::target::resolve_targets(&[], &self.targets)?;
+        for (name, target) in &self.target {
+            // The name first: a sub-table nobody can attribute to a target is
+            // one whose other keys there is no point checking.
+            if crate::target::PSEUDO_TARGETS.contains(&name.as_str()) {
+                return Err(ConfigError::TargetTable {
+                    path: path.to_path_buf(),
+                    name: name.clone(),
+                    reason: TARGET_TABLE_PSEUDO.to_owned(),
+                });
+            }
+            if let Err(error) = name.parse::<Target>() {
+                return Err(ConfigError::TargetTable {
+                    path: path.to_path_buf(),
+                    name: name.clone(),
+                    reason: error.to_string(),
+                });
+            }
+            if let Some(key) = target.unknown.keys().next() {
+                return Err(ConfigError::TargetKey {
+                    path: path.to_path_buf(),
+                    target: name.clone(),
+                    message: format!("unknown field `{key}`, expected one of {}", key_list()),
+                });
+            }
+            if let Some(value) = &target.erts
+                && let Err(error) = value.parse::<ErtsSourceSpec>()
+            {
+                return Err(ConfigError::ErtsSource {
+                    path: path.to_path_buf(),
+                    target: name.clone(),
+                    value: value.clone(),
+                    reason: error.to_string(),
+                });
+            }
+            if let Some(variant) = &target.otp_variant
+                && !OTP_VARIANTS.contains(&variant.as_str())
+            {
+                return Err(ConfigError::OtpVariant {
+                    path: path.to_path_buf(),
+                    target: name.clone(),
+                    value: variant.clone(),
+                });
+            }
+        }
         Ok(())
     }
 }
 
+/// [`TARGET_KEYS`] as the comma-separated list an error lists them in.
+fn key_list() -> String {
+    TARGET_KEYS
+        .iter()
+        .map(|key| format!("`{key}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// What a project's `gleam.toml` says, as far as ginary reads it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectConfig {
     /// The project name, which is also the application name and the artifact's
     /// file name.
@@ -653,6 +839,8 @@ pub struct BuildFlags {
     pub vm_args: Option<PathBuf>,
     /// `--sys-config`, a path as the user typed it.
     pub sys_config: Option<PathBuf>,
+    /// `--target`, repeatable: `host`, `all` or a canonical target name.
+    pub targets: Vec<String>,
     /// `--explain`.
     pub explain: bool,
     /// `-v`, counted, so that `-vv` stays open.
@@ -665,7 +853,7 @@ pub struct BuildFlags {
 /// [`crate::bundle::build`]. Every field is resolved: there is no `Option`
 /// left for a later stage to default, because a default applied twice is a
 /// default that can disagree with itself.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BuildOptions {
     /// The project root, the directory holding `gleam.toml`.
     pub root: PathBuf,
@@ -703,6 +891,13 @@ pub struct BuildOptions {
     pub env: BTreeMap<String, String>,
     /// Whether to ship `heart` and start the runtime under it.
     pub heart: bool,
+    /// The targets this build produces, in the order they were named.
+    pub targets: Vec<Target>,
+    /// Whether any selection named a target rather than asking for the host,
+    /// which decides the artifact's file name; see [`BuildOptions::suffixed`].
+    pub named_targets: bool,
+    /// The per-target sub-tables, keyed by canonical target name.
+    pub target_config: BTreeMap<String, TargetConfig>,
     /// Whether to print the closure and staging accounts before the report.
     pub explain: bool,
     /// How much the build says about itself on standard error.
@@ -710,6 +905,109 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
+    /// Whether the artifacts carry a `-<target>` suffix.
+    ///
+    /// One rule, and the spelling of the selection decides it rather than
+    /// where it was spelled: a build that named a target — `all`, or a
+    /// canonical name, on the command line or in `[tools.ginary] targets` —
+    /// writes `build/ginary/<app>-<target>`, because a file whose name does
+    /// not say what it is for is the one an operator copies onto the wrong
+    /// machine. A build that only selected `host`, or named nothing at all,
+    /// writes `build/ginary/<app>`: that is the name every earlier milestone
+    /// wrote and the one a script already quotes, and `host` asks for exactly
+    /// the build a bare `ginary build` performs.
+    ///
+    /// [`crate::target::names_a_target`] is the whole of the answer: a
+    /// selection list that produces more than one target has named at least
+    /// one of them, so there is no second way to reach a suffix.
+    pub fn suffixed(&self) -> bool {
+        self.named_targets
+    }
+
+    /// The name a suffixed build's two files are both built on:
+    /// [`BuildOptions::out`]'s file name with `-<target>` after it.
+    ///
+    /// An [`OsString`] and not a [`String`], and grown from the file name's
+    /// own bytes: on Linux a path that is not UTF-8 is an ordinary file name,
+    /// and rendering it lossily to append a suffix would write the artifact to
+    /// a path the user never named. The executable suffix and the manifest
+    /// copy's `.json` are appended to *this*, which is why neither has to take
+    /// the other one off again.
+    fn suffixed_stem(&self, target: Target) -> OsString {
+        let mut stem = self
+            .out
+            .file_name()
+            .map_or_else(|| OsString::from(self.app.clone()), OsString::from);
+        stem.push(format!("-{}", target.name()));
+        stem
+    }
+
+    /// The artifact one target is written to.
+    ///
+    /// [`BuildOptions::out`] as it stands for an unsuffixed build, and its
+    /// file name with `-<target>` and the target's executable suffix appended
+    /// otherwise.
+    pub fn artifact_path(&self, target: Target) -> PathBuf {
+        if !self.suffixed() {
+            return self.out.clone();
+        }
+        let mut name = self.suffixed_stem(target);
+        name.push(target.exe_suffix());
+        self.out.with_file_name(name)
+    }
+
+    /// The manifest copy written beside a suffixed artifact.
+    ///
+    /// [`None`] for an unsuffixed build: one artifact in a directory is its
+    /// own manifest, and `ginary inspect` reads it out of the file. A build
+    /// that wrote several needs a per-target copy that CI can read without
+    /// opening an executable for another architecture.
+    pub fn manifest_copy_path(&self, target: Target) -> Option<PathBuf> {
+        if !self.suffixed() {
+            return None;
+        }
+        let mut name = self.suffixed_stem(target);
+        name.push(".json");
+        Some(self.out.with_file_name(name))
+    }
+
+    /// Where one target's runtime comes from.
+    ///
+    /// The target's own sub-table when it has one, and
+    /// [`ErtsSourceSpec::Host`] when it does not: a build that named no source
+    /// bundles the runtime the machine already has.
+    ///
+    /// A relative `dir:` or `tarball:` path is resolved against the project
+    /// root, for the reason `vm_args` and `sys_config` are: a value in
+    /// `gleam.toml` describes the project rather than the directory
+    /// `ginary build` was typed in, and a build run from a subdirectory has a
+    /// working directory that is not the root.
+    ///
+    /// # Errors
+    ///
+    /// [`SpecError`] when the configured value is not an ERTS source, which
+    /// [`ToolsConfig::validate_targets`] refuses before a build reaches this.
+    pub fn erts_spec(&self, target: Target) -> Result<ErtsSourceSpec, SpecError> {
+        let spec = match self.target_config.get(&target.name()) {
+            Some(config) => config.erts_spec()?,
+            None => ErtsSourceSpec::Host,
+        };
+        Ok(self.against_root(spec))
+    }
+
+    /// One source with its path made absolute against the project root.
+    ///
+    /// A path that is already absolute names one tree on this machine and is
+    /// left alone; the three sources that carry no path are returned
+    /// unchanged.
+    fn against_root(&self, spec: ErtsSourceSpec) -> ErtsSourceSpec {
+        match spec {
+            ErtsSourceSpec::Dir(path) => ErtsSourceSpec::Dir(self.root.join(path)),
+            ErtsSourceSpec::Tarball(path) => ErtsSourceSpec::Tarball(self.root.join(path)),
+            other => other,
+        }
+    }
+
     /// Merges `flags` over `config`, resolving every default.
     ///
     /// The precedence is flags, then `[tools.ginary]`, then the constants in
@@ -772,6 +1070,9 @@ impl BuildOptions {
             filename_encoding: config.tools.filename_encoding().to_owned(),
             env: config.tools.env.clone(),
             heart: config.tools.heart,
+            targets: crate::target::resolve_targets(&flags.targets, &config.tools.targets)?,
+            named_targets: crate::target::names_a_target(&flags.targets, &config.tools.targets),
+            target_config: config.tools.target.clone(),
             explain: flags.explain,
             verbose: flags.verbose,
         })
@@ -1022,6 +1323,59 @@ pub enum ConfigError {
         /// Why; see [`env_name_reason`].
         reason: &'static str,
     },
+    /// A `[tools.ginary.target.<name>]` sub-table is not named after a target.
+    #[error("{path}: [tools.ginary.target.{name}] is not a target: {reason}")]
+    TargetTable {
+        /// The file the sub-table is in.
+        path: PathBuf,
+        /// The name that was refused.
+        name: String,
+        /// Why; [`TARGET_TABLE_PSEUDO`] or what [`crate::target::TargetError`]
+        /// said.
+        reason: String,
+    },
+    /// A key `[tools.ginary.target.<name>]` does not have.
+    ///
+    /// Separate from [`ConfigError::Parse`] because serde names the key and
+    /// not the table it is in, and a `gleam.toml` can hold seven of these
+    /// tables.
+    #[error("{path}: [tools.ginary.target.{target}]: {message}")]
+    TargetKey {
+        /// The file the sub-table is in.
+        path: PathBuf,
+        /// The target whose sub-table holds it.
+        target: String,
+        /// What serde said, without its trailing newline.
+        message: String,
+    },
+    /// `erts` is not one of the five ERTS source spellings.
+    #[error("{path}: [tools.ginary.target.{target}] erts = `{value}`: {reason}")]
+    ErtsSource {
+        /// The file the value is in.
+        path: PathBuf,
+        /// The target whose sub-table holds it.
+        target: String,
+        /// The value that was refused.
+        value: String,
+        /// What [`SpecError`] said.
+        reason: String,
+    },
+    /// `otp_variant` is neither `static` nor `dynamic`.
+    #[error(
+        "{path}: [tools.ginary.target.{target}] otp_variant must be `static` or `dynamic`, not \
+         `{value}`"
+    )]
+    OtpVariant {
+        /// The file the value is in.
+        path: PathBuf,
+        /// The target whose sub-table holds it.
+        target: String,
+        /// The value that was refused.
+        value: String,
+    },
+    /// A `--target` or a `targets` entry is not a target.
+    #[error("cannot resolve the targets to build")]
+    Target(#[from] crate::target::TargetError),
     /// `erl_flags` holds a flag the launcher passes itself.
     #[error("{path}: [tools.ginary] erl_flags may not hold `{flag}`: {reason}")]
     ErlFlag {

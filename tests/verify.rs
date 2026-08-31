@@ -141,13 +141,30 @@ fn a_file_whose_bytes_are_not_the_indexed_ones_is_named() {
         .expect("the file is indexed")
         .sha256
         .clone();
+    let indexed_size = artifact
+        .index()
+        .files
+        .iter()
+        .find(|file| file.path == "lib/hello/priv/greeting.txt")
+        .expect("the file is indexed")
+        .size;
+    // Two findings rather than one: the replacement bytes are two longer than
+    // the ones the row was written from, so the row's length is wrong as well
+    // as its digest, and each column is named on its own.
     assert_eq!(
         report.issues,
-        vec![Issue::IndexMismatch {
-            path: "lib/hello/priv/greeting.txt".to_owned(),
-            expected,
-            actual: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"goodbye, world\n")),
-        }]
+        vec![
+            Issue::IndexMismatch {
+                path: "lib/hello/priv/greeting.txt".to_owned(),
+                expected,
+                actual: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"goodbye, world\n")),
+            },
+            Issue::IndexSizeMismatch {
+                path: "lib/hello/priv/greeting.txt".to_owned(),
+                expected: indexed_size,
+                actual: b"goodbye, world\n".len() as u64,
+            },
+        ]
     );
     assert!(!report.ok());
 }

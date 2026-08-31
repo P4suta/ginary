@@ -20,14 +20,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ginary::assemble::Category;
-use ginary::bundle::{self, BuildReport, BundleError, WORK_DIR_PREFIX, WORK_STAGE_NAME};
+use ginary::bundle::{
+    self, BuildReport, BundleError, TargetBuild, WORK_DIR_PREFIX, WORK_STAGE_NAME,
+};
 use ginary::config::{BuildFlags, BuildOptions, ProjectConfig};
 use ginary::diag::Diag;
+use ginary::manifest::{LibcRequirement, OtpProvenance};
 use ginary::report::{CategorySize, NeedsSummary, SizeReport};
 use ginary::strip::StripReport;
+use ginary::target::Target;
 
 use crate::common::artifact::SyntheticArtifact;
-use crate::common::payload::sample_manifest;
+use crate::common::payload::{sample_manifest, sample_provenance};
 use crate::common::project::TempProject;
 
 /// This test run's own `ginary` binary: a stub with no trailer.
@@ -212,6 +216,16 @@ fn synthetic_report() -> BuildReport {
             warnings: Vec::new(),
         },
         manifest: sample_manifest(),
+        targets: vec![TargetBuild {
+            target: Target::host(),
+            out: PathBuf::from("build/ginary/hello_ffi"),
+            manifest_copy: None,
+            stub_len: 5_242_880,
+            payload_len: 9_437_184,
+            total_len: 5_242_880 + 9_437_184 + 64,
+            sha256: "a".repeat(64),
+            otp: sample_provenance(),
+        }],
         staging: None,
         warnings: Vec::new(),
         explain: None,
@@ -267,4 +281,153 @@ fn a_work_directory_that_could_not_be_removed_is_printed_with_the_report() {
         text.ends_with(&format!("{}\n", report.artifact_line())),
         "the artifact line stays last, so a caller can still quote it:\n{text}"
     );
+}
+
+// -------------------------------------------------------- the targets --
+
+/// The options of `project`, built for `targets` and nothing else.
+fn build_options_for(project: &TempProject, targets: &[Target]) -> BuildOptions {
+    BuildOptions {
+        targets: targets.to_vec(),
+        named_targets: true,
+        ..build_options(project)
+    }
+}
+
+/// A target that is not the host, whichever machine this is.
+fn foreign_target() -> Target {
+    *ginary::target::ALL
+        .iter()
+        .find(|target| **target != Target::host())
+        .expect("seven targets are more than one")
+}
+
+#[test]
+fn a_build_for_a_target_this_ginary_cannot_make_is_refused() {
+    let project = TempProject::named("hello");
+    let foreign = foreign_target();
+    let options = build_options_for(&project, &[foreign]);
+
+    let error = bundle::build_with_stub(&options, &ginary_bin(), &Diag::disabled())
+        .expect_err("a cross build is not possible yet");
+
+    assert!(
+        matches!(
+            &error,
+            BundleError::CrossTargetNotAvailable { target, host }
+                if *target == foreign && *host == Target::host()
+        ),
+        "expected BundleError::CrossTargetNotAvailable, got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("cross builds arrive with the stub/catalog milestones"),
+        "the message says when it will work: {message}"
+    );
+}
+
+#[test]
+fn a_cross_target_is_refused_before_the_project_is_exported() {
+    // The same rule `BundleError::BundledStub` follows: the remedy is a
+    // different command line, and a build that exported and staged a whole
+    // runtime before saying so would have spent minutes to say it. The
+    // project has no shipment, so `--skip-export` is the error a build that
+    // got that far would report instead.
+    let project = TempProject::named("hello");
+    let options = build_options_for(&project, &[foreign_target()]);
+
+    let error = bundle::build_with_stub(&options, &ginary_bin(), &Diag::disabled())
+        .expect_err("a cross build is not possible yet");
+
+    assert!(
+        !matches!(&error, BundleError::Gleam(_)),
+        "the target was checked after the export: {error:?}"
+    );
+}
+
+/// A two-target report, for the table one row per target.
+///
+/// The numbers differ between the rows on purpose: a table that printed one
+/// row twice would satisfy a snapshot built from identical rows.
+fn two_target_report() -> BuildReport {
+    let gnu = TargetBuild {
+        target: "linux-x86_64-gnu".parse().expect("a target"),
+        out: PathBuf::from("build/ginary/hello_ffi-linux-x86_64-gnu"),
+        manifest_copy: Some(PathBuf::from(
+            "build/ginary/hello_ffi-linux-x86_64-gnu.json",
+        )),
+        stub_len: 5_242_880,
+        payload_len: 9_437_184,
+        total_len: 5_242_880 + 9_437_184 + 64,
+        sha256: "a".repeat(64),
+        otp: sample_provenance(),
+    };
+    let musl = TargetBuild {
+        target: "linux-aarch64-musl".parse().expect("a target"),
+        out: PathBuf::from("build/ginary/hello_ffi-linux-aarch64-musl"),
+        manifest_copy: Some(PathBuf::from(
+            "build/ginary/hello_ffi-linux-aarch64-musl.json",
+        )),
+        stub_len: 4_194_304,
+        payload_len: 8_388_608,
+        total_len: 4_194_304 + 8_388_608 + 64,
+        sha256: "b".repeat(64),
+        otp: OtpProvenance {
+            linkage: "static".to_owned(),
+            libc: Some(LibcRequirement {
+                kind: "musl".to_owned(),
+                min: None,
+            }),
+            nif_loading: false,
+            source: "dir:/opt/otp-29-aarch64-musl".to_owned(),
+        },
+    };
+
+    BuildReport {
+        targets: vec![gnu, musl],
+        ..synthetic_report()
+    }
+}
+
+#[test]
+fn the_libc_column_says_the_version_when_there_is_one_and_the_name_when_there_is_not() {
+    let report = two_target_report();
+
+    assert_eq!(report.targets[0].libc_summary(), "gnu 2.38");
+    assert_eq!(
+        report.targets[1].libc_summary(),
+        "musl",
+        "musl carries no symbol versions, so there is no minimum to print"
+    );
+}
+
+#[test]
+fn a_multi_target_report_prints_one_row_per_target_instead_of_one_artifact_line() {
+    let report = two_target_report();
+
+    insta::assert_snapshot!("build_report_targets_table", report.render_text());
+}
+
+#[test]
+fn the_target_table_names_every_artifact_and_where_its_runtime_came_from() {
+    let report = two_target_report();
+    let table = bundle::render_target_table(&report.targets);
+
+    for expected in [
+        "linux-x86_64-gnu",
+        "build/ginary/hello_ffi-linux-x86_64-gnu",
+        "dynamic",
+        "gnu 2.38",
+        "host:/usr/lib/erlang",
+        "linux-aarch64-musl",
+        "build/ginary/hello_ffi-linux-aarch64-musl",
+        "static",
+        "musl",
+        "dir:/opt/otp-29-aarch64-musl",
+    ] {
+        assert!(
+            table.contains(expected),
+            "the table has to hold `{expected}`:\n{table}"
+        );
+    }
 }

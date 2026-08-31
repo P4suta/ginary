@@ -122,9 +122,14 @@ sys_config = "config/sys.config"  # a sys.config, copied into the artifact
 distribution = false           # bundle epmd and start the runtime distributed
 filename_encoding = "utf8"     # utf8 | latin1 | auto -> +fnu | +fnl | +fna
 heart = false                  # bundle heart and start the runtime under it
+targets = ["host"]             # host | all | a canonical target name, repeatable
 
 [tools.ginary.env]             # variables set only when the caller has not
 LOG_LEVEL = "info"
+
+[tools.ginary.target.linux-aarch64-musl]   # one sub-table per target
+erts = "catalog"               # host | catalog | dir:PATH | tarball:PATH | docker:IMAGE
+otp_variant = "static"         # static | dynamic, for the musl runtimes
 ```
 
 A key ginary does not know is an error naming the key and the file: a setting the user believes
@@ -140,6 +145,45 @@ settings merge rather than replace: `--extra-otp-app` is appended to `otp_applic
 `--sys-config` override the three runtime settings of the same name; a flag naming a file is
 relative to the working directory, while a value in the table is relative to the project. Run
 `ginary build --help` for the full list.
+
+### Targets
+
+`targets` says what one build produces and `[tools.ginary.target.<name>]` says how to produce
+one; they are two keys because TOML will not let one name be both an array of strings and a
+table. `--target` is repeatable and replaces the list rather than adding to it. Each entry is
+`host`, `all` — every target ginary models — or a canonical `<os>-<arch>[-<libc>]` name, and a
+target named twice is built once.
+
+**Cross builds arrive later.** Only the host target builds today: naming any other one is
+refused, in as many words, before the project is exported. The plumbing is here so that a
+`gleam.toml` can be written ahead of the milestones that fill it in — an `erts` of `catalog`,
+`tarball:` or `docker:` parses now and is refused at build time, naming the milestone it arrives
+with. `host` and `dir:PATH` are the two sources that resolve, and a relative `dir:` or `tarball:`
+path is relative to the project, as `vm_args` and `sys_config` are. An entry of `targets` that
+names no target is refused where the manifest is read, so `ginary doctor` reports the list rather
+than printing a row for a build nobody can run.
+
+Whatever a source claims, the bundled `beam.smp` itself is read: the target, the linkage and the
+minimum glibc come out of that file, and a runtime for another target fails the build naming
+both. What was found is recorded in the artifact's manifest as the `otp` block —
+`{linkage, libc: {kind, min}, nif_loading, source}` — which `ginary inspect` prints and
+`docs/format.md` specifies. `nif_loading` is `false` for a statically linked runtime, which has
+no dynamic loader to load a NIF with.
+
+Naming a target puts it in the file name, and the spelling decides that rather than the place it
+was spelled. `host` selects the machine ginary is running on, which is the build a bare
+`ginary build` already performs, so `--target host`, `targets = ["host"]` and naming nothing all
+write `build/ginary/<app>` — the name every earlier version wrote. Naming a target — `all`, or a
+canonical name, the host's own included, on the command line or in the table — writes
+`build/ginary/<app>-<target>` and a `build/ginary/<app>-<target>.json` copy of the manifest
+beside it, so CI can read what was built for a machine it cannot run.
+
+`ginary doctor` prints a row per target: the source, whether this ginary can resolve it today,
+and for a runtime it actually read, the linkage and the minimum libc. `resolves` answers for
+today and for this machine: a source that arrives with a later milestone reads `not yet`, and so
+does a runtime that is on this machine and cannot be read — the row says which root was refused
+and why. A target that is not this machine and names `erts = "host"` reads `not yet` too: the
+host's own emulator is for the host, and a build would refuse it.
 
 ### The runtime settings
 
@@ -267,9 +311,10 @@ forwarding, and the application receives its arguments exactly as typed.
 ## Limitations
 
 - **Linux x86_64 only, against the host's OTP.** The runtime that goes into an artifact is the
-  one `erl` reports on the build machine. Cross-target builds, prebuilt runtime downloads and
-  musl variants are Phase C of [the roadmap](docs/dev/log/); `--otp-root` is the only override
-  today.
+  one `erl` reports on the build machine, or the one `--otp-root` or a `dir:` source names.
+  `--target` exists and accepts the host; any other target is refused, naming the milestone that
+  brings it. Prebuilt runtime downloads and the musl variants are Phase C of
+  [the roadmap](docs/dev/log/).
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,

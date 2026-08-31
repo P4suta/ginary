@@ -41,6 +41,7 @@ use sha2::Digest as _;
 
 use crate::elf::{self, ElfKind};
 use crate::inspect::{self, ArtifactInfo, InspectError, Verification};
+use crate::manifest::IndexFile;
 
 use crate::payload::PayloadError;
 
@@ -203,6 +204,49 @@ pub enum Issue {
         /// The digest the payload's bytes produce.
         actual: String,
     },
+    /// A file's length is not the one the index describes.
+    ///
+    /// The index's `size` is the file's own length and so is the tar header's,
+    /// so the two are equal in an artifact that describes itself. A row whose
+    /// digest is right and whose length is wrong is not a damaged file; it is
+    /// an index that cannot be used to plan an extraction, and a reader who
+    /// sizes a cache entry from it would be sizing it from a number nothing
+    /// checked.
+    #[error("{path}: {actual} bytes in the payload, and the index says {expected}")]
+    IndexSizeMismatch {
+        /// The file's path inside the artifact.
+        path: String,
+        /// The length the index carries.
+        expected: u64,
+        /// The length the payload entry has.
+        actual: u64,
+    },
+    /// A file's permission bits are not the ones the index describes.
+    ///
+    /// `docs/format.md` fixes the relation: the index records the staged
+    /// file's own `st_mode & 0o7777`, and the header carries the
+    /// normalisation of it — `0755` when the staged mode has the user execute
+    /// bit and `0644` otherwise. That relation, rather than equality, is what
+    /// is checked, because the two columns are documented to differ for a tree
+    /// whose modes are neither. A row promising an executable over an entry
+    /// the launcher will extract `0644` describes a file the artifact does not
+    /// carry.
+    ///
+    /// `actual` is `unreadable` for a header whose mode field is not an octal
+    /// number, which is a header that agrees with no row at all.
+    #[error(
+        "{path}: entry mode {actual}, and the index row's mode {indexed} normalises to {expected}"
+    )]
+    IndexModeMismatch {
+        /// The file's path inside the artifact.
+        path: String,
+        /// The staged mode the index carries, in octal.
+        indexed: String,
+        /// The header mode that row implies, in octal.
+        expected: String,
+        /// The mode the payload entry's header carries, in octal.
+        actual: String,
+    },
     /// A file is in the payload and not in the index.
     #[error("{path}: in the payload and not in the index")]
     IndexOrphan {
@@ -267,6 +311,8 @@ impl Issue {
             Self::MachineMismatch { path, .. }
             | Self::UnexpectedNeeded { path, .. }
             | Self::IndexMismatch { path, .. }
+            | Self::IndexSizeMismatch { path, .. }
+            | Self::IndexModeMismatch { path, .. }
             | Self::IndexOrphan { path }
             | Self::IndexMissing { path }
             | Self::UnsafePath { path }
@@ -290,11 +336,13 @@ impl Issue {
             Self::UnexpectedNeeded { .. } => 1,
             Self::UnreadableObject { .. } => 2,
             Self::IndexMismatch { .. } => 3,
-            Self::IndexOrphan { .. } => 4,
-            Self::IndexMissing { .. } => 5,
-            Self::UnsafePath { .. } => 6,
-            Self::ReservedEntry { .. } => 7,
-            Self::UnsupportedEntry { .. } => 8,
+            Self::IndexSizeMismatch { .. } => 4,
+            Self::IndexModeMismatch { .. } => 5,
+            Self::IndexOrphan { .. } => 6,
+            Self::IndexMissing { .. } => 7,
+            Self::UnsafePath { .. } => 8,
+            Self::ReservedEntry { .. } => 9,
+            Self::UnsupportedEntry { .. } => 10,
         }
     }
 }
@@ -434,11 +482,11 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
 
     // Everything the index says, removed as the payload accounts for it: what
     // is left at the end is what the artifact promised and did not carry.
-    let mut expected: BTreeMap<&str, &str> = info
+    let mut expected: BTreeMap<&str, &IndexFile> = info
         .index
         .files
         .iter()
-        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .map(|file| (file.path.as_str(), file))
         .collect();
 
     let mut issues = Vec::new();
@@ -453,6 +501,9 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         let raw = entry_name(&entry);
         let size = entry.size();
         let kind = entry.header().entry_type();
+        // Read before the entry is streamed, because the header is what the
+        // index row is checked against and the reader moves past it.
+        let mode = entry.header().mode().ok().map(|mode| mode & 0o7777);
 
         if position < FRONT_ENTRIES {
             // Entries 0 and 1 are the artifact's own description of itself and
@@ -498,12 +549,10 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         files_checked = files_checked.saturating_add(1);
 
         match expected.remove(name.as_str()) {
-            Some(digest) if digest == scan.sha256 => {}
-            Some(digest) => issues.push(Issue::IndexMismatch {
-                path: name.clone(),
-                expected: digest.to_owned(),
-                actual: scan.sha256.clone(),
-            }),
+            // Every column the row carries, not only the digest: a row can
+            // hold the right hash and the wrong metadata, because nothing in a
+            // packer recomputes one of them from the other.
+            Some(row) => issues.extend(row_issues(&name, row, scan.len, mode, &scan.sha256)),
             None => issues.push(Issue::IndexOrphan { path: name.clone() }),
         }
 
@@ -549,6 +598,63 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         objects,
         issues,
     })
+}
+
+/// Every way one payload entry disagrees with the index row that names it.
+///
+/// The three columns the row carries beside the path, in the order
+/// [`Issue::rank`] gives them: the bytes, the length, then the permission
+/// bits. They are independent — a row can hold the right digest and the wrong
+/// length, because nothing recomputes one from the other — so all three are
+/// checked and each one that fails is its own finding.
+fn row_issues(
+    name: &str,
+    row: &IndexFile,
+    len: u64,
+    mode: Option<u32>,
+    sha256: &str,
+) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    if row.sha256 != sha256 {
+        issues.push(Issue::IndexMismatch {
+            path: name.to_owned(),
+            expected: row.sha256.clone(),
+            actual: sha256.to_owned(),
+        });
+    }
+    if row.size != len {
+        issues.push(Issue::IndexSizeMismatch {
+            path: name.to_owned(),
+            expected: row.size,
+            actual: len,
+        });
+    }
+    let normalised = header_mode(row.mode);
+    if mode != Some(normalised) {
+        issues.push(Issue::IndexModeMismatch {
+            path: name.to_owned(),
+            indexed: octal(row.mode),
+            expected: octal(normalised),
+            actual: mode.map_or_else(|| "unreadable".to_owned(), octal),
+        });
+    }
+    issues
+}
+
+/// The header mode a staged mode implies, as `docs/format.md` fixes it.
+///
+/// `HeaderMode::Deterministic` propagates the user execute bit and nothing
+/// else, so `0755` for a staged mode that has it and `0644` for one that does
+/// not. Comparing the columns for equality instead would report every
+/// artifact staged from a tree whose modes are neither, which the format
+/// permits.
+fn header_mode(staged: u32) -> u32 {
+    if staged & 0o100 == 0 { 0o644 } else { 0o755 }
+}
+
+/// Permission bits as the four octal digits a reader recognises.
+fn octal(mode: u32) -> String {
+    format!("{mode:04o}")
 }
 
 /// How many entries the format fixes at the front of the payload.
@@ -635,6 +741,10 @@ fn describe(
 struct Scan {
     /// The digest of every byte the entry held.
     sha256: String,
+    /// How many bytes the entry held, which is what the index's `size`
+    /// describes. It is counted rather than taken from the header, so the
+    /// number a finding reports is the one the payload really carries.
+    len: u64,
     /// The bytes, when the entry began with the ELF magic; `Err` when it did
     /// and this verifier would not hold it.
     object: Option<Result<Vec<u8>, String>>,
@@ -647,6 +757,7 @@ struct Scan {
 /// of it is kept rather than after.
 fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io::Result<Scan> {
     let mut hasher = sha2::Sha256::new();
+    let mut len = 0u64;
 
     let mut head = Vec::with_capacity(elf::ELF_MAGIC.len());
     let mut byte = [0u8; 1];
@@ -657,6 +768,7 @@ fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io:
         head.push(byte[0]);
     }
     hasher.update(&head);
+    len = len.saturating_add(head.len() as u64);
 
     let mut object = if elf::is_elf(&head) {
         if size > bound {
@@ -677,6 +789,7 @@ fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io:
             break;
         }
         hasher.update(&buffer[..read]);
+        len = len.saturating_add(read as u64);
         if let Some(Ok(bytes)) = &mut object {
             // The tar reader stops at the header's own length, and the header
             // was checked above; this is the second bound, in case it lied.
@@ -692,6 +805,7 @@ fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io:
 
     Ok(Scan {
         sha256: hex::encode(hasher.finalize()),
+        len,
         object,
     })
 }
@@ -815,6 +929,17 @@ mod tests {
                 expected: "a".repeat(64),
                 actual: "b".repeat(64),
             },
+            Issue::IndexSizeMismatch {
+                path: path.to_owned(),
+                expected: 1,
+                actual: 2,
+            },
+            Issue::IndexModeMismatch {
+                path: path.to_owned(),
+                indexed: "0700".to_owned(),
+                expected: "0755".to_owned(),
+                actual: "0644".to_owned(),
+            },
             Issue::IndexOrphan {
                 path: path.to_owned(),
             },
@@ -839,6 +964,8 @@ mod tests {
                 | Issue::UnexpectedNeeded { .. }
                 | Issue::UnreadableObject { .. }
                 | Issue::IndexMismatch { .. }
+                | Issue::IndexSizeMismatch { .. }
+                | Issue::IndexModeMismatch { .. }
                 | Issue::IndexOrphan { .. }
                 | Issue::IndexMissing { .. }
                 | Issue::UnsafePath { .. }
@@ -847,7 +974,7 @@ mod tests {
             }
         }
         let ranks: Vec<u8> = issues.iter().map(Issue::rank).collect();
-        let places: Vec<u8> = (0..u8::try_from(issues.len()).expect("nine variants")).collect();
+        let places: Vec<u8> = (0..u8::try_from(issues.len()).expect("eleven variants")).collect();
         assert_eq!(
             ranks, places,
             "`rank` is the declaration order, one place each"

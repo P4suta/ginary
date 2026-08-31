@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `host` is a selection and not a target: it names whichever machine the build
+# runs on, so a sub-table under it would configure a different target on every
+# machine. The build must refuse it and say which name to write instead.
+
+name = "pseudo_app"
+version = "0.1.0"
+
+[tools.ginary.target.host]
+erts = "host"

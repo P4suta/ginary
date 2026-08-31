@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The multi-target keys C1 adds: the list of targets to build, and one
+# sub-table per target. `full.toml` and `runtime.toml` cover the keys that came
+# before them; this one is the whole of `targets` and `[tools.ginary.target]`.
+#
+# The list and the sub-tables are two keys rather than one because TOML will
+# not let `targets` be both an array of strings and a table.
+
+name = "cross_app"
+version = "1.1.0"
+target = "erlang"
+
+[dependencies]
+
+[tools.ginary]
+targets = ["host", "linux-aarch64-musl"]
+
+[tools.ginary.target.linux-aarch64-musl]
+erts = "catalog"
+otp_variant = "static"
+
+[tools.ginary.target.linux-x86_64-gnu]
+erts = "dir:/opt/otp-29-gnu"
+
+[tools.ginary.target.macos-aarch64]
+erts = "tarball:/srv/otp-29.0.5-macos-aarch64.tar.zst"
+otp_variant = "dynamic"
+native = { "esqlite/priv/esqlite3_nif.so" = "vendor/esqlite3_nif-macos-aarch64.so" }
+codesign = { identity = "Developer ID Application: Example", entitlements = "config/app.entitlements", timestamp = true }

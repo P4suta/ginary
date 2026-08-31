@@ -91,3 +91,9 @@ mod b2_a_section_on_the_second_line_was_dropped;
 mod b2_an_escaping_entry_verified_clean;
 #[path = "regressions/b2_build_sbom_out_hid_the_artifact_it_had_written.rs"]
 mod b2_build_sbom_out_hid_the_artifact_it_had_written;
+#[path = "regressions/b2_verify_compared_only_the_digest.rs"]
+mod b2_verify_compared_only_the_digest;
+#[path = "regressions/c1_a_non_utf8_output_path_lost_its_suffix.rs"]
+mod c1_a_non_utf8_output_path_lost_its_suffix;
+#[path = "regressions/c1_a_runtime_that_could_not_be_read_still_resolved.rs"]
+mod c1_a_runtime_that_could_not_be_read_still_resolved;

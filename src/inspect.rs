@@ -131,6 +131,8 @@ impl ArtifactInfo {
                 or_dash(&manifest.erts_version)
             ),
         );
+        field("runtime", &runtime_summary(&manifest.otp));
+        field("runtime from", or_dash(&manifest.otp.source));
         field(
             "gleam",
             or_dash(manifest.gleam_version.as_deref().unwrap_or("")),
@@ -166,6 +168,35 @@ impl ArtifactInfo {
         text.push_str(&crate::closure::render_table(["size", "path"], &rows));
         text
     }
+}
+
+/// The one line that says what the bundled runtime is.
+///
+/// `dynamic, gnu >= 2.38, NIFs load` for a host build. An artifact that
+/// recorded no provenance — everything built before the block existed — is
+/// [`crate::manifest::UNKNOWN_PROVENANCE`] and nothing else: the two facts
+/// beside the linkage were not read either, and printing a default beside a
+/// word that says nothing was read would be the report inventing one.
+fn runtime_summary(otp: &crate::manifest::OtpProvenance) -> String {
+    if otp.linkage == crate::manifest::UNKNOWN_PROVENANCE {
+        return crate::manifest::UNKNOWN_PROVENANCE.to_owned();
+    }
+    let mut parts = vec![otp.linkage.clone()];
+    if let Some(libc) = &otp.libc {
+        parts.push(match &libc.min {
+            Some(min) => format!("{} >= {min}", libc.kind),
+            None => libc.kind.clone(),
+        });
+    }
+    parts.push(
+        if otp.nif_loading {
+            "NIFs load"
+        } else {
+            "NIFs do not load"
+        }
+        .to_owned(),
+    );
+    parts.join(", ")
 }
 
 /// What `--verify` found.

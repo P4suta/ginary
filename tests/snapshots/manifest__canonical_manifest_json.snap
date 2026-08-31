@@ -10,6 +10,15 @@ expression: json
   "otp_release": 29,
   "otp_version": "29.0.5",
   "erts_version": "17.0.5",
+  "otp": {
+    "linkage": "dynamic",
+    "libc": {
+      "kind": "gnu",
+      "min": "2.38"
+    },
+    "nif_loading": true,
+    "source": "host:/usr/lib/erlang"
+  },
   "target": "linux-x86_64-gnu",
   "otp_applications": [
     {

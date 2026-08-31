@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use ginary::assemble::{Category, StageListing, StagedApp, StagedFile, StagedSource};
-use ginary::manifest::{AppRef, LaunchSpec, Manifest};
+use ginary::manifest::{AppRef, LaunchSpec, LibcRequirement, Manifest, OtpProvenance};
 use ginary::payload::Packed;
 use ginary::target::Target;
 use ginary::trailer::Trailer;
@@ -818,6 +818,15 @@ pub fn canonical_manifest() -> Manifest {
         otp_release: OTP_RELEASE,
         otp_version: OTP_VERSION.to_owned(),
         erts_version: ERTS_VSN.to_owned(),
+        otp: OtpProvenance {
+            linkage: "dynamic".to_owned(),
+            libc: Some(LibcRequirement {
+                kind: "gnu".to_owned(),
+                min: Some("2.38".to_owned()),
+            }),
+            nif_loading: true,
+            source: "host:/usr/lib/erlang".to_owned(),
+        },
         target: "linux-x86_64-gnu"
             .parse::<Target>()
             .unwrap_or_else(|error| panic!("the host target must parse: {error}")),

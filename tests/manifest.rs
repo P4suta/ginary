@@ -17,7 +17,7 @@ use common::payload::{sample_launch, sample_manifest, sha256_hex, staging_tree};
 use ginary::assemble::Category;
 use ginary::manifest::{
     EnvSnapshot, FORMAT_VERSION, INDEX_NAME, Index, IndexError, MANIFEST_NAME, Manifest,
-    ManifestError, created_at,
+    ManifestError, OtpProvenance, created_at,
 };
 
 #[test]
@@ -35,6 +35,33 @@ fn the_manifest_serialises_its_fields_in_the_order_the_format_document_prints() 
     let json = serde_json::to_string_pretty(&sample_manifest()).expect("serialise");
 
     insta::assert_snapshot!("canonical_manifest_json", json);
+}
+
+#[test]
+fn a_manifest_written_before_the_otp_block_still_parses() {
+    // The compatibility promise `docs/format.md` makes for the C1 addition:
+    // `otp` is additive and `format_version` stayed at 1, so an artifact built
+    // before the block reads back as the default rather than failing to parse.
+    // The document states the four values, so they are asserted rather than
+    // compared to `OtpProvenance::default()` alone.
+    let json = serde_json::to_value(sample_manifest()).expect("serialise");
+    let mut object = json.as_object().expect("a JSON object").clone();
+    assert!(
+        object.remove("otp").is_some(),
+        "the key this test removes has to be there to begin with"
+    );
+
+    let parsed: Manifest = serde_json::from_value(serde_json::Value::Object(object))
+        .expect("an artifact built before C1 is one this ginary can still read");
+
+    assert_eq!(parsed.otp, OtpProvenance::default());
+    assert_eq!(parsed.otp.linkage, "unknown");
+    assert_eq!(parsed.otp.libc, None);
+    assert!(
+        parsed.otp.nif_loading,
+        "every artifact that predates the block bundled a dynamically linked host runtime"
+    );
+    assert_eq!(parsed.otp.source, "unknown");
 }
 
 #[test]
@@ -383,6 +410,7 @@ fn a_manifest_carrying_no_unknown_keys_writes_none() {
             "gleam_version",
             "launch",
             "native",
+            "otp",
             "otp_applications",
             "otp_release",
             "otp_version",

@@ -139,6 +139,15 @@ pub enum Command {
         /// Strip only the `.beam` files, leaving the native binaries alone.
         #[arg(long, conflicts_with = "no_strip")]
         strip_beams_only: bool,
+        /// A target to build for. Repeatable.
+        ///
+        /// `host`, `all` or a canonical name such as `linux-x86_64-gnu`.
+        /// Defaults to `[tools.ginary] targets`, which itself defaults to
+        /// `host`. A canonical name puts `-<target>` in the artifact's file
+        /// name, whichever target it is; `host` selects this machine and
+        /// keeps the plain name a bare build writes.
+        #[arg(long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
         /// The OTP installation to bundle. Defaults to the one `erl` reports.
         #[arg(long, value_name = "PATH")]
         otp_root: Option<PathBuf>,
@@ -704,6 +713,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             no_strip,
             strip_elf_only,
             strip_beams_only,
+            targets,
             otp_root,
             skip_export,
             keep_staging,
@@ -734,6 +744,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 distribution: *distribution,
                 vm_args: vm_args.clone(),
                 sys_config: sys_config.clone(),
+                targets: targets.clone(),
                 explain: *explain,
                 verbose: *verbose,
             },
@@ -1799,6 +1810,7 @@ mod tests {
             otp: None,
             otp_error: Some("`erl` is not on PATH".to_owned()),
             project: None,
+            targets: Vec::new(),
             tools: ["gleam", "erl", "strip", "docker"]
                 .into_iter()
                 .map(|name| doctor::ToolReport {

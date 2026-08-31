@@ -15,14 +15,18 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use assert_cmd::Command;
+use ginary::config::TargetConfig;
 use ginary::doctor::{
     self, CACHE_DIR_HINT, CacheProbe, ConfigStatus, CryptoReport, NativeObject, ProjectReport,
+    TargetProbe,
 };
 use ginary::elf::ElfKind;
+use ginary::target::Target;
 use serde_json::Value;
 
 use crate::common::fake_otp::FakeOtp;
@@ -221,6 +225,27 @@ fn a_tools_ginary_table_that_does_not_parse_is_shown_verbatim() {
         ConfigStatus::Error { message } => assert!(
             message.contains("not_a_key"),
             "serde names the key and a paraphrase would lose it: {message}"
+        ),
+        other => panic!("expected an error status, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_targets_list_nothing_can_build_is_reported_rather_than_replaced() {
+    // The row `doctor` would otherwise print — the host, resolvable — is one
+    // no build of this project will ever produce, because `ginary build` in
+    // this directory refuses the list. Diagnosing exactly that is what the
+    // command is for.
+    let project = TempProject::new(
+        "name = \"notify\"\nversion = \"0.1.0\"\n\n[tools.ginary]\ntargets = [\"bogus\"]\n",
+    );
+
+    let report = doctor::project_context(project.root(), SystemTime::now()).expect("a project");
+
+    match &report.config {
+        ConfigStatus::Error { message } => assert!(
+            message.contains("bogus"),
+            "the row that cannot be built is named: {message}"
         ),
         other => panic!("expected an error status, got {other:?}"),
     }
@@ -488,4 +513,189 @@ fn doctor_json_carries_the_new_members() {
         "{}",
         value["project"]
     );
+}
+
+// ------------------------------------------------------- the targets --
+
+/// The two probes the table is pinned against.
+///
+/// One resolvable and one not, because a table whose rows all say the same
+/// thing cannot show that the column is read from anywhere.
+fn sample_probes() -> Vec<TargetProbe> {
+    vec![
+        TargetProbe {
+            name: "linux-x86_64-gnu".to_owned(),
+            erts: "host".to_owned(),
+            resolvable: true,
+            detail: Some("host:/usr/lib/erlang".to_owned()),
+            linkage: Some("dynamic".to_owned()),
+            libc_min: Some("2.38".to_owned()),
+        },
+        TargetProbe {
+            name: "linux-aarch64-musl".to_owned(),
+            erts: "catalog".to_owned(),
+            resolvable: false,
+            detail: Some("arrives with the catalog milestone".to_owned()),
+            linkage: None,
+            libc_min: None,
+        },
+    ]
+}
+
+#[test]
+fn a_target_with_no_sub_table_is_probed_as_the_host_runtime() {
+    let probes = doctor::probe_targets(&[Target::host()], &BTreeMap::new());
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].name, Target::host().name());
+    assert_eq!(
+        probes[0].erts, "host",
+        "a target that configures nothing bundles the runtime the machine has"
+    );
+    assert!(probes[0].resolvable, "{probes:?}");
+}
+
+#[test]
+fn a_target_whose_source_is_not_here_yet_is_a_row_that_says_so() {
+    let mut config = BTreeMap::new();
+    config.insert(
+        "linux-aarch64-musl".to_owned(),
+        TargetConfig {
+            erts: Some("catalog".to_owned()),
+            ..TargetConfig::default()
+        },
+    );
+
+    let probes = doctor::probe_targets(&["linux-aarch64-musl".parse().expect("a target")], &config);
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].erts, "catalog");
+    assert!(
+        !probes[0].resolvable,
+        "the catalogue is not here yet: {probes:?}"
+    );
+    assert!(
+        probes[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("catalog milestone")),
+        "the row says when it will resolve: {probes:?}"
+    );
+}
+
+#[test]
+fn a_directory_source_is_reported_as_resolvable_without_being_read() {
+    // `doctor` describes the machine; it does not perform half of a build, so
+    // a `dir:` that is on the machine is a row and not an inspection.
+    let mut config = BTreeMap::new();
+    config.insert(
+        "linux-x86_64-musl".to_owned(),
+        TargetConfig {
+            erts: Some("dir:/opt/otp-29-musl".to_owned()),
+            ..TargetConfig::default()
+        },
+    );
+
+    let probes = doctor::probe_targets(&["linux-x86_64-musl".parse().expect("a target")], &config);
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].erts, "dir:/opt/otp-29-musl");
+    assert!(probes[0].resolvable, "{probes:?}");
+    assert_eq!(
+        probes[0].linkage, None,
+        "nothing read the emulator, so nothing says how it is linked"
+    );
+}
+
+#[test]
+fn a_target_that_is_not_the_host_and_names_the_host_runtime_cannot_resolve() {
+    // `erts = "host"` on a target this machine is not is the one combination
+    // that can never work: the host's own emulator is for the host, and
+    // `erts_source::resolve` refuses it with a target mismatch. A row saying
+    // `yes` would send a user to run the build to find that out.
+    let other = ginary::target::ALL
+        .iter()
+        .copied()
+        .find(|target| *target != Target::host())
+        .expect("a target that is not this machine");
+
+    let probes = doctor::probe_targets(&[other], &BTreeMap::new());
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].erts, "host");
+    assert!(
+        !probes[0].resolvable,
+        "the host's runtime is not a runtime for {}: {probes:?}",
+        other.name()
+    );
+    let detail = probes[0].detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains(&Target::host().name()) && detail.contains("dir:"),
+        "the row says whose runtime this machine has and what would name one for {}: {detail}",
+        other.name()
+    );
+}
+
+#[test]
+fn the_host_row_carries_the_two_facts_read_off_its_own_emulator() {
+    let Some(_tools) = require_tools(&["erl"]) else {
+        return;
+    };
+
+    let probes = doctor::probe_targets(&[Target::host()], &BTreeMap::new());
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(
+        probes[0].linkage.as_deref(),
+        Some("dynamic"),
+        "a distribution's emulator is dynamically linked: {probes:?}"
+    );
+    let min = probes[0]
+        .libc_min
+        .as_deref()
+        .expect("a gnu host reports a minimum glibc");
+    assert!(
+        min.split('.').all(|part| part.parse::<u32>().is_ok()),
+        "the minimum is a version and not a sentence: {min}"
+    );
+}
+
+#[test]
+fn the_targets_table_is_this() {
+    insta::assert_snapshot!(
+        "doctor_targets_table",
+        doctor::render_targets(&sample_probes())
+    );
+}
+
+#[test]
+fn the_targets_table_is_part_of_the_rendered_report() {
+    let mut report = doctor::Report::gather();
+    report.targets = sample_probes();
+
+    let text = report.render_text();
+
+    assert!(
+        text.contains("linux-aarch64-musl"),
+        "the report holds the table it was given:\n{text}"
+    );
+}
+
+#[test]
+fn doctor_json_carries_a_row_per_target() {
+    let project = TempProject::named("notify");
+
+    let assert = ginary_in(project.root())
+        .args(["doctor", "--json"])
+        .env("GINARY_CACHE_DIR", project.outside().join("cache"))
+        .assert()
+        .success();
+    let value: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("the output is JSON");
+
+    let targets = value["targets"].as_array().expect("an array of targets");
+    assert_eq!(targets.len(), 1, "{}", value["targets"]);
+    assert_eq!(targets[0]["name"], Target::host().name());
+    assert_eq!(targets[0]["erts"], "host");
+    assert_eq!(targets[0]["resolvable"], true);
 }

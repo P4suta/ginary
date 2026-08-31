@@ -63,6 +63,19 @@ pub struct RepackOptions {
     pub drop_from_index: Vec<String>,
     /// Index rows to invent, naming a file the payload does not carry.
     pub ghost_index_rows: Vec<String>,
+    /// Index rows whose `mode` is rewritten after the tree has been read.
+    ///
+    /// The tar header keeps the staged file's own mode, so the row and the
+    /// entry the launcher will extract disagree about a column
+    /// `ginary verify` has to check: an index that promises an executable
+    /// over a payload that carries a `0644` entry describes a file the
+    /// artifact does not hold.
+    pub index_mode_lies: Vec<(String, u32)>,
+    /// Index rows whose `size` is rewritten after the tree has been read.
+    ///
+    /// The digest still describes the bytes, so the length is the only column
+    /// that disagrees and nothing else can account for the finding.
+    pub index_size_lies: Vec<(String, u64)>,
     /// Entries appended after every staged file, which no index row describes.
     ///
     /// This is how an archive that `payload::pack` would refuse to write is
@@ -221,6 +234,22 @@ pub fn build(dir: &Path, options: &RepackOptions) -> Repacked {
     index
         .files
         .retain(|file| !options.drop_from_index.contains(&file.path));
+    for (path, mode) in &options.index_mode_lies {
+        let row = index
+            .files
+            .iter_mut()
+            .find(|file| &file.path == path)
+            .unwrap_or_else(|| panic!("{path} has no index row to rewrite"));
+        row.mode = *mode;
+    }
+    for (path, size) in &options.index_size_lies {
+        let row = index
+            .files
+            .iter_mut()
+            .find(|file| &file.path == path)
+            .unwrap_or_else(|| panic!("{path} has no index row to rewrite"));
+        row.size = *size;
+    }
     for path in &options.ghost_index_rows {
         index.files.push(IndexFile {
             path: path.clone(),

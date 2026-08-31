@@ -21,6 +21,9 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
 
+use ginary::target::Target;
+use serde_json::Value;
+
 use crate::common::built::{BuiltProject, PINNED_EPOCH, names_in, sha256_of};
 use crate::common::tools::require_tools;
 
@@ -749,5 +752,189 @@ fn a_sys_config_that_does_not_parse_fails_the_build_with_a_position() {
     assert!(
         stderr.contains("sys.config:1:11"),
         "the message must name file, line and column, and it said:\n{stderr}"
+    );
+}
+
+// ------------------------------------------------ (h) the named target --
+
+/// Builds the fixture with extra flags, failing loudly with what it wrote.
+fn build_fixture_with(args: &[&str]) -> BuiltProject {
+    let project = BuiltProject::copy(APP);
+    let output = project.build_with(args, &[]);
+    assert!(
+        output.status.success(),
+        "`ginary build {}` failed with {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        args.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    project
+}
+
+/// `build/ginary/<app>-<host target>`, the name an explicit `--target` writes.
+fn suffixed_artifact(project: &BuiltProject) -> std::path::PathBuf {
+    project
+        .root()
+        .join("build/ginary")
+        .join(format!("{APP}-{}", Target::host().name()))
+}
+
+#[test]
+fn an_explicit_host_target_writes_a_suffixed_artifact_that_runs() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let host = Target::host().name();
+    let project = build_fixture_with(&["--target", &host]);
+    let artifact = suffixed_artifact(&project);
+
+    assert!(
+        artifact.is_file(),
+        "a named target writes `<app>-<target>`; {} holds {:?}",
+        artifact.display(),
+        names_in(&project.root().join("build/ginary"))
+    );
+    assert!(
+        !project.artifact().exists(),
+        "and nothing at the plain name, which would be the same artifact twice"
+    );
+
+    let run = project
+        .run_program("named-target", &artifact)
+        .arg("0")
+        .output();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert!(
+        run.stdout().contains("args=0"),
+        "the suffixed artifact is a working application: {}",
+        run.stdout()
+    );
+}
+
+#[test]
+fn a_suffixed_build_writes_the_manifest_beside_the_artifact() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let host = Target::host().name();
+    let project = build_fixture_with(&["--target", &host]);
+    let copy = project
+        .root()
+        .join("build/ginary")
+        .join(format!("{APP}-{host}.json"));
+
+    let text = std::fs::read_to_string(&copy).unwrap_or_else(|error| {
+        panic!(
+            "a suffixed build writes {} for a reader of the directory to read: {error}",
+            copy.display()
+        )
+    });
+    let manifest: Value = serde_json::from_str(&text).expect("the copy is the manifest as JSON");
+
+    assert_eq!(manifest["app"], APP);
+    assert_eq!(manifest["target"], host);
+}
+
+#[test]
+fn the_manifest_records_what_the_bundled_runtime_is_and_where_it_came_from() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = build_fixture();
+    let artifact = project.artifact();
+
+    let output = project.ginary(&["inspect".as_ref(), "--json".as_ref(), artifact.as_os_str()]);
+    assert!(
+        output.status.success(),
+        "inspect failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("the report is JSON");
+    let otp = &value["manifest"]["otp"];
+
+    assert_eq!(
+        otp["linkage"], "dynamic",
+        "the host's own emulator is dynamically linked: {otp}"
+    );
+    assert_eq!(otp["libc"]["kind"], "gnu", "{otp}");
+    let min = otp["libc"]["min"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a gnu runtime records a minimum glibc: {otp}"));
+    assert!(
+        min.split('.').all(|part| part.parse::<u32>().is_ok()),
+        "the minimum is a version and not a sentence: {min}"
+    );
+    assert_eq!(otp["nif_loading"], true, "{otp}");
+    assert!(
+        otp["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("host:")),
+        "the source names the spelling and the root it resolved to: {otp}"
+    );
+}
+
+#[test]
+fn the_same_target_named_twice_produces_one_artifact() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let host = Target::host().name();
+    let project = build_fixture_with(&["--target", "host", "--target", &host]);
+
+    let written = names_in(&project.root().join("build/ginary"));
+
+    assert_eq!(
+        written,
+        vec![format!("{APP}-{host}"), format!("{APP}-{host}.json")],
+        "`host` and the host's own name are one target, so one artifact and one manifest"
+    );
+}
+
+#[test]
+fn a_build_for_another_target_is_refused_and_says_when_it_will_work() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = BuiltProject::copy(APP);
+
+    let output = project.build_with(&["--target", "linux-aarch64-musl"], &[]);
+
+    assert!(
+        !output.status.success(),
+        "a cross build cannot succeed yet:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cross builds arrive with the stub/catalog milestones"),
+        "the refusal says when it will work: {stderr}"
+    );
+    assert!(
+        names_in(&project.root().join("build/ginary"))
+            .iter()
+            .all(|name| name.starts_with(ginary::bundle::WORK_DIR_PREFIX)),
+        "and nothing that looks like an artifact is left behind"
+    );
+}
+
+#[test]
+fn a_target_that_is_not_a_target_is_refused_and_lists_the_spellings() {
+    // No toolchain: the list is resolved from the flags and the manifest
+    // before anything is exported, so this is a usage failure and not a build.
+    let project = BuiltProject::copy(APP);
+
+    let output = project.build_with(&["--target", "linux-riscv64-gnu"], &[]);
+
+    assert!(!output.status.success(), "riscv64 is not a target");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`linux-riscv64-gnu` is not a target"),
+        "the refusal names what was asked for: {stderr}"
+    );
+    assert!(
+        stderr.contains("`linux-aarch64-musl`") && stderr.contains("`host`"),
+        "and lists every spelling that would have worked: {stderr}"
     );
 }

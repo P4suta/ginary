@@ -363,10 +363,14 @@ $ echo $?
 
 It streams the payload a second time and, per file:
 
-- hashes it against `ginary.index.json` — *every* file, not only the native ones, so an artifact
-  whose index does not describe what it carries is a finding rather than a surprise at run time
-  (`IndexMismatch`), as is a file the index does not name (`IndexOrphan`) or an index row naming
-  nothing (`IndexMissing`);
+- checks it against its `ginary.index.json` row — *every* file, not only the native ones, so an
+  artifact whose index does not describe what it carries is a finding rather than a surprise at
+  run time. All three of the row's columns, because a row can hold the right digest and the wrong
+  metadata: the bytes are `IndexMismatch`, the length is `IndexSizeMismatch`, and the permission
+  bits are `IndexModeMismatch` — the header mode is checked against the *normalisation* of the
+  staged mode the row records, `0755` when it has the user execute bit and `0644` otherwise,
+  which is the relation `docs/format.md` fixes and not plain equality. A file the index does not
+  name is `IndexOrphan`, and an index row naming nothing is `IndexMissing`;
 - reads it into memory only when its first bytes are the ELF magic, and only up to 100 MB, and
   then asks `src/elf.rs` what it is: a machine that is not the one the manifest targets is
   `MachineMismatch`, and a `DT_NEEDED` outside the allowlist in `src/verify.rs` is

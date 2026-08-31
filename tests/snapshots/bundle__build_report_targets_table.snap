@@ -1,0 +1,14 @@
+---
+source: tests/bundle.rs
+expression: report.render_text()
+---
+category     files  before    after     saved
+erts_binary  4      41675352  11742936  29932416
+gleam_beam   3      1382144   511072    871072
+total        7      43057496  12254008  30803488
+
+needs: libc.so.6 (GLIBC_2.38), libm.so.6
+
+target              artifact                                   linkage  libc      nif  erts
+linux-x86_64-gnu    build/ginary/hello_ffi-linux-x86_64-gnu    dynamic  gnu 2.38  yes  host:/usr/lib/erlang
+linux-aarch64-musl  build/ginary/hello_ffi-linux-aarch64-musl  static   musl      no   dir:/opt/otp-29-aarch64-musl

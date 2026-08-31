@@ -43,10 +43,12 @@
 | `tests/inspect.rs` | the text report and the launch plan over a hand-built `ArtifactInfo`, and a `SyntheticArtifact` opened, verified, and damaged in the two ways that matter |
 | `tests/e2e_hello.rs` | toolchain-gated: `ginary build` in a copy of the `hello_ffi` fixture, and everything that follows — running the artifact with no Erlang on the machine, the warm cache, byte-identical rebuilds under `SOURCE_DATE_EPOCH`, `--report json` against the artifact's own size on disk, `--explain`, `-v` beside `GINARY_TRACE`, `inspect --verify`, `GINARY_CMD`, and the work directory |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
-| `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the four index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, and a gated run over a real `ginary build` |
+| `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, and a gated run over a real `ginary build` |
 | `tests/sbom.rs` | the SPDX 2.3 document: the namespace derived from the payload digest, the whole document as a snapshot, the fields SPDX requires, the two relationship kinds, hex against `NOASSERTION`, a Gleam `manifest.toml` read, one refused and one absent, determinism over two runs, the command's `--out`, and two gated builds pinning `ginary build --sbom` and `--sbom-out` down to the report's last line |
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
 | `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host |
+| `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
+| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -205,6 +207,14 @@ damage the payload sixteen bytes before the end, past both front entries, which 
 shortening the file from its end takes the trailer with it, and `docs/format.md` rule 2 makes
 what is left the ginary command line tool rather than a damaged artifact. The fault worth a test
 is the one that still carries a trailer and no longer matches it.
+
+C1 adds no builder and one seam. `erts_source::resolve_with` takes the function that reads the
+emulator, so a `FakeOtp` root plus a hand-written `ElfFacts` is a whole musl or static runtime as
+far as the plumbing above the ELF reader is concerned — the provenance strings, the target
+mismatch and the `nif_loading` rule are all reachable on a machine with no cross-built `beam.smp`
+on it. The fake's own `beam.smp` is a `/bin/sh` stub, which is why the *unseamed*
+`erts_source::resolve` over one is the test for `NotAnElfRuntime`: the mistake that error exists
+for is a runtime tree assembled by hand, and the builder writes exactly that.
 
 `tests/common/repack.rs` is what B2 added, and it is the one helper that writes a tar archive
 itself rather than calling `payload::pack`. It has to: `pack` computes `ginary.index.json` from
@@ -725,6 +735,8 @@ committed and reviewed like any other assertion. Twelve exist:
 | `strip__report_table_when_nothing_ran.snap` | the same table when one half found nothing and the other was skipped |
 | `report__size_report_text.snap` | the size table, the `needs:` line and the warnings block, over a synthetic report |
 | `manifest__canonical_manifest_json.snap` | the wire field order of `ginary.json`, which is the struct's declaration order and not the alphabetical order `serde_json::Value` imposes |
+| `bundle__build_report_targets_table.snap` | the six-column table a build of more than one target prints instead of one `artifact:` line |
+| `doctor__doctor_targets_table.snap` | the targets table `doctor` prints, with one resolvable row and one that says which milestone it arrives with |
 
 A snapshot is a contract, not a recording. `cargo insta review` is for reviewing a *deliberate*
 change to output; accepting a snapshot to make a red test pass is the same defect as weakening an

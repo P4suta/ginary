@@ -22,7 +22,9 @@ use ginary::config::{
     DEFAULT_FILENAME_ENCODING, DEFAULT_OUTPUT, FILENAME_ENCODINGS, ProjectConfig,
     REJECTED_ARGS_FILE_FLAGS, REJECTED_ENV_NAMES, ToolsConfig,
 };
+use ginary::erts_source::ErtsSourceSpec;
 use ginary::strip::StripOptions;
+use ginary::target::{Target, TargetError};
 
 use crate::common::project::{TempProject, config_fixture};
 
@@ -1167,5 +1169,445 @@ fn the_merge_refuses_an_encoding_the_emulator_has_no_flag_for() {
     assert!(
         matches!(&error, ConfigError::FilenameEncoding { value, .. } if value == "ebcdic"),
         "expected ConfigError::FilenameEncoding, got {error:?}"
+    );
+}
+
+// ------------------------------------------------- the target settings --
+
+/// Merges `targets.toml` and the given flags against a project root.
+fn merge_targets(root: &Path, flags: &BuildFlags) -> BuildOptions {
+    let config = parse("targets.toml");
+    BuildOptions::merge(root, &config, flags).expect("the merge succeeds")
+}
+
+/// `flags` as a `--target` list.
+fn target_flags(root: &Path, targets: &[&str]) -> BuildFlags {
+    BuildFlags {
+        targets: targets.iter().map(|name| (*name).to_owned()).collect(),
+        ..no_flags(root)
+    }
+}
+
+/// The named target.
+fn target(name: &str) -> Target {
+    name.parse()
+        .unwrap_or_else(|error| panic!("`{name}` must be a target: {error}"))
+}
+
+#[test]
+fn a_sub_table_is_read_key_by_key() {
+    let config = parse("targets.toml");
+    let macos = config
+        .tools
+        .target
+        .get("macos-aarch64")
+        .expect("the macOS sub-table is read");
+
+    assert_eq!(
+        macos.erts_spec(),
+        Ok(ErtsSourceSpec::Tarball(PathBuf::from(
+            "/srv/otp-29.0.5-macos-aarch64.tar.zst"
+        )))
+    );
+    assert_eq!(macos.otp_variant.as_deref(), Some("dynamic"));
+    assert_eq!(
+        macos
+            .native
+            .get("esqlite/priv/esqlite3_nif.so")
+            .map(String::as_str),
+        Some("vendor/esqlite3_nif-macos-aarch64.so"),
+        "the native map is recorded now and read by the native milestone"
+    );
+    assert!(
+        macos
+            .codesign
+            .as_ref()
+            .and_then(|value| value.get("identity"))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|identity| identity.starts_with("Developer ID Application")),
+        "codesign is parsed loosely and kept whole: {:?}",
+        macos.codesign
+    );
+}
+
+#[test]
+fn a_target_with_no_sub_table_takes_the_host_runtime() {
+    let config = parse("targets.toml");
+
+    assert_eq!(
+        config.tools.target.get("linux-x86_64-musl"),
+        None,
+        "the fixture names three targets and not this one"
+    );
+    assert_eq!(
+        ginary::config::TargetConfig::default().erts_spec(),
+        Ok(ErtsSourceSpec::Host),
+        "a target that says nothing bundles the runtime the machine already has"
+    );
+}
+
+#[test]
+fn a_sub_table_named_after_a_selection_rather_than_a_target_is_refused() {
+    let error = refuse("bad_target_table.toml");
+
+    assert!(
+        matches!(&error, ConfigError::TargetTable { name, .. } if name == "host"),
+        "expected ConfigError::TargetTable, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("name a set"),
+        "the message says why a selection cannot be configured: {error}"
+    );
+}
+
+#[test]
+fn a_sub_table_for_a_target_ginary_does_not_package_for_is_refused() {
+    let error = refuse("bad_target_name.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::TargetTable { name, .. } if name == "linux-riscv64-gnu"
+        ),
+        "expected ConfigError::TargetTable, got {error:?}"
+    );
+}
+
+#[test]
+fn an_unknown_key_in_a_sub_table_names_the_table_and_the_key() {
+    let error = refuse("bad_target_key.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::TargetKey { target, message, .. }
+                if target == "macos-aarch64" && message.contains("codesing")
+        ),
+        "expected ConfigError::TargetKey naming both, got {error:?}"
+    );
+    let sentence = error.to_string();
+    assert!(
+        sentence.contains("[tools.ginary.target.macos-aarch64]"),
+        "a manifest can hold seven of these tables, so the sentence names one: {sentence}"
+    );
+}
+
+#[test]
+fn an_erts_source_that_is_none_of_the_five_is_refused_by_the_manifest() {
+    let error = refuse("bad_erts.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::ErtsSource { target, value, .. }
+                if target == "linux-x86_64-musl" && value == "system"
+        ),
+        "expected ConfigError::ErtsSource, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("dir:PATH"),
+        "the message lists the spellings that would work: {error}"
+    );
+}
+
+#[test]
+fn an_otp_variant_that_is_neither_static_nor_dynamic_is_refused() {
+    let error = refuse("bad_otp_variant.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::OtpVariant { target, value, .. }
+                if target == "linux-x86_64-musl" && value == "hybrid"
+        ),
+        "expected ConfigError::OtpVariant, got {error:?}"
+    );
+}
+
+#[test]
+fn a_targets_list_that_names_no_target_is_refused_where_it_is_read() {
+    // The list is refused by the manifest reader and not only by the build, so
+    // that `ginary doctor` — which reads the table and never resolves it —
+    // reports the entry nothing can build instead of printing a host row as
+    // though the project had asked for one.
+    let error = refuse("bad_targets_list.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::Target(TargetError::Unknown { name }) if name == "linux-riscv64-gnu"
+        ),
+        "expected ConfigError::Target, got {error:?}"
+    );
+}
+
+#[test]
+fn the_two_selections_that_are_not_targets_are_still_a_targets_list() {
+    let config = parse_text("name = \"a\"\n\n[tools.ginary]\ntargets = [\"host\", \"all\"]\n");
+
+    assert_eq!(config.tools.targets, ["host", "all"]);
+}
+
+#[test]
+fn a_bare_build_targets_the_host_and_keeps_the_plain_artifact_name() {
+    let root = Path::new("/w/plain_app");
+    let config = parse("defaults.toml");
+    let options = BuildOptions::merge(root, &config, &no_flags(root)).expect("the merge succeeds");
+
+    assert_eq!(options.targets, [Target::host()]);
+    assert!(
+        !options.suffixed(),
+        "the name a script already quotes does not move because a milestone landed"
+    );
+    assert_eq!(
+        options.artifact_path(Target::host()),
+        root.join(DEFAULT_OUTPUT).join("plain_app")
+    );
+    assert_eq!(options.manifest_copy_path(Target::host()), None);
+}
+
+#[test]
+fn the_configured_targets_decide_when_no_flag_names_one() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &no_flags(root));
+
+    assert_eq!(
+        options.targets,
+        [Target::host(), target("linux-aarch64-musl")]
+    );
+    assert!(
+        options.named_targets,
+        "the table names `linux-aarch64-musl`, which is a target named"
+    );
+    assert!(
+        options.suffixed(),
+        "a project that builds for two targets cannot write both to one name"
+    );
+}
+
+#[test]
+fn a_target_flag_replaces_the_configured_list() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &target_flags(root, &["macos-x86_64"]));
+
+    assert_eq!(options.targets, [target("macos-x86_64")]);
+    assert!(options.named_targets);
+}
+
+#[test]
+fn an_explicit_host_target_still_gets_the_suffix_and_a_manifest_copy() {
+    // The host's own canonical name is the case the rule has to be stated
+    // for: it resolves to exactly the target a bare build produces, and the
+    // file name still says so, because the user asked in as many words.
+    let root = Path::new("/w/plain_app");
+    let config = parse("defaults.toml");
+    let host = Target::host();
+    let options = BuildOptions::merge(root, &config, &target_flags(root, &[&host.name()]))
+        .expect("the merge succeeds");
+
+    assert_eq!(options.targets, [host]);
+    assert!(options.suffixed());
+    assert_eq!(
+        options.artifact_path(host),
+        root.join(DEFAULT_OUTPUT)
+            .join(format!("plain_app-{}", host.name()))
+    );
+    assert_eq!(
+        options.manifest_copy_path(host),
+        Some(
+            root.join(DEFAULT_OUTPUT)
+                .join(format!("plain_app-{}.json", host.name()))
+        )
+    );
+}
+
+/// A manifest whose `[tools.ginary] targets` is exactly `entries`.
+fn targets_text(entries: &[&str]) -> String {
+    let list = entries
+        .iter()
+        .map(|entry| format!("\"{entry}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("name = \"plain_app\"\n\n[tools.ginary]\ntargets = [{list}]\n")
+}
+
+#[test]
+fn a_configured_target_name_puts_itself_in_the_file_name_the_flag_would() {
+    // The same canonical name through the two spellings that reach a build.
+    // `--target <host>` writes `<app>-<host>`, and a `targets` key holding
+    // that one name is the same request made in the project rather than on
+    // the command line: one target named, one name in the file.
+    let root = Path::new("/w/plain_app");
+    let host = Target::host();
+    let config = parse_text(&targets_text(&[&host.name()]));
+    let options = BuildOptions::merge(root, &config, &no_flags(root)).expect("the merge succeeds");
+
+    assert_eq!(options.targets, [host]);
+    assert!(
+        options.suffixed(),
+        "a target named in the table is named, and the artifact says which"
+    );
+    assert_eq!(
+        options.artifact_path(host),
+        root.join(DEFAULT_OUTPUT)
+            .join(format!("plain_app-{}", host.name()))
+    );
+    assert_eq!(
+        options.manifest_copy_path(host),
+        Some(
+            root.join(DEFAULT_OUTPUT)
+                .join(format!("plain_app-{}.json", host.name()))
+        )
+    );
+}
+
+#[test]
+fn selecting_the_host_names_no_target_and_keeps_the_plain_name() {
+    // `host` is not a target name: it is the selection a build that names
+    // nothing already makes, so spelling it out — in the table, which is what
+    // the README's example does, or on the command line — changes nothing
+    // about the build and must change nothing about the file name.
+    let root = Path::new("/w/plain_app");
+    let host = Target::host();
+    let configured =
+        BuildOptions::merge(root, &parse_text(&targets_text(&["host"])), &no_flags(root))
+            .expect("the merge succeeds");
+    let flagged = BuildOptions::merge(
+        root,
+        &parse("defaults.toml"),
+        &target_flags(root, &["host"]),
+    )
+    .expect("the merge succeeds");
+
+    for (spelling, options) in [("the table", configured), ("the flag", flagged)] {
+        assert_eq!(options.targets, [host], "{spelling}");
+        assert!(
+            !options.suffixed(),
+            "`host` through {spelling} selects the host and keeps `build/ginary/<app>`"
+        );
+        assert_eq!(
+            options.artifact_path(host),
+            root.join(DEFAULT_OUTPUT).join("plain_app"),
+            "{spelling}"
+        );
+        assert_eq!(options.manifest_copy_path(host), None, "{spelling}");
+    }
+}
+
+#[test]
+fn a_windows_artifact_carries_its_suffix_and_its_manifest_copy_does_not() {
+    let root = Path::new("/w/plain_app");
+    let config = parse("defaults.toml");
+    let windows = target("windows-x86_64");
+    let options = BuildOptions::merge(root, &config, &target_flags(root, &["windows-x86_64"]))
+        .expect("the merge succeeds");
+
+    assert_eq!(
+        options.artifact_path(windows),
+        root.join(DEFAULT_OUTPUT)
+            .join("plain_app-windows-x86_64.exe")
+    );
+    assert_eq!(
+        options.manifest_copy_path(windows),
+        Some(
+            root.join(DEFAULT_OUTPUT)
+                .join("plain_app-windows-x86_64.json")
+        ),
+        "the manifest copy is a JSON document whatever the artifact's suffix is"
+    );
+}
+
+#[test]
+fn the_erts_source_of_a_configured_target_is_the_one_it_names() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &target_flags(root, &["linux-x86_64-gnu"]));
+
+    assert_eq!(
+        options.erts_spec(target("linux-x86_64-gnu")),
+        Ok(ErtsSourceSpec::Dir(PathBuf::from("/opt/otp-29-gnu")))
+    );
+}
+
+#[test]
+fn a_relative_erts_directory_is_relative_to_the_project() {
+    // `[tools.ginary.target.<name>] erts = "dir:vendor/otp"` describes the
+    // project, as `output`, `vm_args` and `sys_config` do, so it is joined
+    // onto the root rather than onto whatever directory `ginary build` was
+    // typed in. A build from a subdirectory otherwise looked in a tree that
+    // is not the one the manifest names.
+    let root = Path::new("/w/cross_app");
+    let host = Target::host();
+    let config = parse_text(&format!(
+        "name = \"cross_app\"\nversion = \"1.1.0\"\n\n[tools.ginary.target.{name}]\n\
+         erts = \"dir:vendor/otp\"\n",
+        name = host.name()
+    ));
+    let options = BuildOptions::merge(root, &config, &no_flags(root)).expect("the merge succeeds");
+
+    assert_eq!(
+        options.erts_spec(host),
+        Ok(ErtsSourceSpec::Dir(root.join("vendor/otp")))
+    );
+}
+
+#[test]
+fn an_absolute_erts_path_is_left_exactly_as_it_was_written() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &no_flags(root));
+
+    assert_eq!(
+        options.erts_spec(target("linux-x86_64-gnu")),
+        Ok(ErtsSourceSpec::Dir(PathBuf::from("/opt/otp-29-gnu"))),
+        "a path that is already absolute names one tree on this machine"
+    );
+    assert_eq!(
+        options.erts_spec(target("macos-aarch64")),
+        Ok(ErtsSourceSpec::Tarball(PathBuf::from(
+            "/srv/otp-29.0.5-macos-aarch64.tar.zst"
+        ))),
+        "and the rule is the archive's as much as the directory's"
+    );
+}
+
+#[test]
+fn the_erts_source_of_an_unconfigured_target_is_the_host() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &target_flags(root, &["macos-x86_64"]));
+
+    assert_eq!(
+        options.erts_spec(target("macos-x86_64")),
+        Ok(ErtsSourceSpec::Host)
+    );
+}
+
+#[test]
+fn the_merge_refuses_a_target_flag_that_is_not_a_target() {
+    let root = Path::new("/w/plain_app");
+    let config = parse("defaults.toml");
+
+    let error = BuildOptions::merge(root, &config, &target_flags(root, &["linux-riscv64-gnu"]))
+        .expect_err("the merge resolves the targets and must refuse this one");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::Target(TargetError::Unknown { name }) if name == "linux-riscv64-gnu"
+        ),
+        "expected ConfigError::Target, got {error:?}"
+    );
+}
+
+#[test]
+fn the_merge_carries_every_sub_table_through_to_the_build() {
+    let root = Path::new("/w/cross_app");
+    let options = merge_targets(root, &no_flags(root));
+
+    let mut named: Vec<&str> = options.target_config.keys().map(String::as_str).collect();
+    named.sort_unstable();
+    assert_eq!(
+        named,
+        ["linux-aarch64-musl", "linux-x86_64-gnu", "macos-aarch64"],
+        "a sub-table for a target this build does not produce is still carried, because the \
+         list and the settings are two independent keys"
     );
 }

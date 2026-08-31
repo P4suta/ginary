@@ -180,6 +180,10 @@ fn manifest_for(staged: &StagedRoot) -> Manifest {
         otp_release: staged.otp_release(),
         otp_version: staged.otp_version().to_owned(),
         erts_version: staged.erts_vsn().to_owned(),
+        // The tree is assembled by hand rather than resolved through
+        // `erts_source`, so nothing here read the emulator; the default is the
+        // honest answer and is what an artifact built before C1 carries.
+        otp: ginary::manifest::OtpProvenance::default(),
         target: ginary::target::Target::host(),
         otp_applications,
         gleam_applications,

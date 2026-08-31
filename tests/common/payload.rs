@@ -30,7 +30,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ginary::assemble::{Category, StageListing, StagedApp, StagedFile, StagedSource};
-use ginary::manifest::{AppRef, LaunchSpec, Manifest, NativeKind, NativeRef};
+use ginary::manifest::{
+    AppRef, LaunchSpec, LibcRequirement, Manifest, NativeKind, NativeRef, OtpProvenance,
+};
 use ginary::target::Target;
 
 use sha2::{Digest, Sha256};
@@ -462,6 +464,7 @@ pub fn sample_manifest() -> Manifest {
         otp_release: 29,
         otp_version: "29.0.5".to_owned(),
         erts_version: "17.0.5".to_owned(),
+        otp: sample_provenance(),
         target: "linux-x86_64-gnu".parse::<Target>().expect("a target"),
         otp_applications: vec![
             AppRef {
@@ -482,6 +485,23 @@ pub fn sample_manifest() -> Manifest {
         created_at: "2026-08-31T00:00:00Z".to_owned(),
         ginary_version: "0.1.0".to_owned(),
         extra: BTreeMap::new(),
+    }
+}
+
+/// The runtime provenance of [`sample_manifest`].
+///
+/// The shape a host build on a glibc machine records: a dynamically linked
+/// emulator, a minimum glibc read off its symbol versions, NIFs that load, and
+/// a source naming both the spelling and the root it resolved to.
+pub fn sample_provenance() -> OtpProvenance {
+    OtpProvenance {
+        linkage: "dynamic".to_owned(),
+        libc: Some(LibcRequirement {
+            kind: "gnu".to_owned(),
+            min: Some("2.38".to_owned()),
+        }),
+        nif_loading: true,
+        source: "host:/usr/lib/erlang".to_owned(),
     }
 }
 

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use ginary::inspect::{
     self, ArtifactInfo, InspectError, LARGEST_FILES, PLACEHOLDER_APP_DIR, PLACEHOLDER_ROOT,
 };
-use ginary::manifest::{Index, IndexFile, LaunchSpec};
+use ginary::manifest::{Index, IndexFile, LaunchSpec, OtpProvenance};
 use ginary::trailer::Trailer;
 
 use crate::common::artifact::SyntheticArtifact;
@@ -284,4 +284,24 @@ fn a_corrupted_artifact_still_says_what_it_claims_to_be() {
     let info = inspect::open(artifact.path()).expect("the front of the payload is intact");
 
     assert_eq!(info.manifest, manifest);
+}
+
+#[test]
+fn an_artifact_that_recorded_no_provenance_says_unknown_rather_than_guessing() {
+    // What an artifact built before C1 carries: the block is absent, serde
+    // fills in the default, and the report says nobody read the runtime
+    // rather than printing a linkage it made up.
+    let mut info = hand_built();
+    info.manifest.otp = OtpProvenance::default();
+
+    let text = info.render_text();
+
+    assert!(
+        text.contains("runtime:       unknown"),
+        "an unrecorded linkage is `unknown`:\n{text}"
+    );
+    assert!(
+        text.contains("runtime from:  unknown"),
+        "and so is an unrecorded source:\n{text}"
+    );
 }

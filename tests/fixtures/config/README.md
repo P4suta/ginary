@@ -20,7 +20,14 @@ none of them has to be a real project on disk.
 | `bad_encoding.toml` | `filename_encoding` naming an encoding the emulator has no flag for |
 | `bad_env_key.toml` | `env` naming an `ERL_*` variable, which the launcher scrubs |
 | `bad_env_name.toml` | `env` naming `ROOTDIR`, which the launcher derives |
+| `targets.toml` | the C1 keys: a `targets` list and three `[tools.ginary.target.<name>]` sub-tables |
+| `bad_targets_list.toml` | a `targets` list holding a name that is not a target |
+| `bad_target_table.toml` | a sub-table named `host`, which selects a target rather than being one |
+| `bad_target_name.toml` | a sub-table for a target ginary does not package for |
+| `bad_target_key.toml` | a key a sub-table does not have, which the error must name beside the table |
+| `bad_erts.toml` | an `erts` that is none of the five source spellings |
+| `bad_otp_variant.toml` | an `otp_variant` that is neither `static` nor `dynamic` |
 
-Three of the thirteen are valid — `defaults.toml`, `full.toml` and `runtime.toml` — and the other
-ten are invalid on purpose. `tests/config.rs` asserts the exact error variant of each of the ten,
-so editing one means editing its assertion with it.
+Four of the twenty are valid — `defaults.toml`, `full.toml`, `runtime.toml` and `targets.toml` —
+and the other sixteen are invalid on purpose. `tests/config.rs` asserts the exact error variant of
+each of the sixteen, so editing one means editing its assertion with it.

@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# A `targets` list holding a name that is neither a pseudo-name nor a target.
+# The list is what a build resolves, so a manifest that names a target nothing
+# can build is refused where it is read rather than at the first build that
+# tries: `ginary doctor` reports the table it could not use, and does not
+# print a host row as though the project had asked for one.
+
+name = "typo_list_app"
+version = "0.1.0"
+
+[tools.ginary]
+targets = ["host", "linux-riscv64-gnu"]

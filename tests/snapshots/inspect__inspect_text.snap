@@ -5,6 +5,8 @@ expression: hand_built().render_text()
 app:           hello 1.2.3
 target:        linux-x86_64-gnu
 otp:           29.0.5 (release 29, erts 17.0.5)
+runtime:       dynamic, gnu >= 2.38, NIFs load
+runtime from:  host:/usr/lib/erlang
 gleam:         1.18.1
 created:       2026-08-31T00:00:00Z
 ginary:        0.1.0

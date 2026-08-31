@@ -10,6 +10,7 @@
 //! Probing never fails the command. A missing or broken tool is data, not an
 //! error, so `doctor` always exits 0 and the caller reads the report.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,8 +19,9 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::cache_dir::{self, EnvSnapshot};
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, TargetConfig};
 use crate::elf::{self, ElfKind};
+use crate::erts_source::ErtsSourceSpec;
 use crate::otp;
 use crate::process::{NULL_DEVICE, run_with_timeout};
 use crate::target::Target;
@@ -440,6 +442,20 @@ fn crypto_nif(otp_root: &Path) -> Option<PathBuf> {
     candidates.pop()
 }
 
+/// The targets the project `start` is in builds for, and their sub-tables.
+///
+/// [`None`] when there is no project at or above `start`, when its manifest
+/// cannot be read, or when what it says about targets is not usable — a
+/// `doctor` that refused to print because a `gleam.toml` is wrong would be
+/// withholding the report the user ran it to get. The rest of the report says
+/// what is wrong with the table; this half falls back to the host.
+fn project_targets(start: &Path) -> Option<(Vec<Target>, BTreeMap<String, TargetConfig>)> {
+    let project = crate::gleam::find_project(start).ok()?;
+    let config = ProjectConfig::read(&project.manifest()).ok()?;
+    let targets = crate::target::resolve_targets(&[], &config.tools.targets).ok()?;
+    Some((targets, config.tools.target))
+}
+
 /// What `[tools.ginary]` said, or why it could not be read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -673,8 +689,12 @@ fn config_status(
     match ProjectConfig::from_toml(text, manifest) {
         Ok(_) if declared.is_some() => ConfigStatus::Ok,
         Ok(_) => ConfigStatus::Absent,
+        // The whole chain, for the reason `a1a_doctor_dropped_the_otp_error`
+        // gives: `ConfigError::Target` is a headline — "cannot resolve the
+        // targets to build" — whose cause is the only half that names the
+        // entry nothing can build.
         Err(error) => ConfigStatus::Error {
-            message: error.to_string(),
+            message: error_chain(&error),
         },
     }
 }
@@ -799,6 +819,195 @@ fn walk_shipment(root: &Path, dir: &Path, depth: usize, visit: &mut impl FnMut(&
     }
 }
 
+/// One row of the targets table `doctor` prints.
+///
+/// A build asks two questions about a target before it starts, and this is
+/// where a user asks them first: where would the runtime come from, and can
+/// this machine get it today. The two facts below the answer — the linkage and
+/// the minimum glibc — are the ones that decide whether a NIF will load and
+/// which machines the artifact will start on, and they are read out of the
+/// emulator rather than out of the configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TargetProbe {
+    /// The canonical target name.
+    pub name: String,
+    /// The ERTS source, as `[tools.ginary.target.<name>] erts` spelled it.
+    pub erts: String,
+    /// Whether this ginary can resolve that source, on this machine, today.
+    ///
+    /// One question with one meaning: `false` is a build of this target
+    /// failing here and now, whether the source arrives with a later
+    /// milestone, points at the wrong machine's runtime, or is a runtime that
+    /// is here and could not be read. [`TargetProbe::detail`] says which.
+    pub resolvable: bool,
+    /// What was resolved, or why it could not be.
+    pub detail: Option<String>,
+    /// How the runtime is linked, when it was resolved.
+    pub linkage: Option<String>,
+    /// The lowest glibc the runtime runs against, when there is one.
+    pub libc_min: Option<String>,
+}
+
+impl TargetProbe {
+    /// The row's cells, in the order [`render_targets`] prints them.
+    ///
+    /// The two facts that are only known for a runtime somebody actually read
+    /// — the linkage and the minimum libc — print `-` for a target nothing
+    /// looked at, which is not the same claim as `static` or `none`.
+    pub fn cells(&self) -> [String; 6] {
+        [
+            self.name.clone(),
+            self.erts.clone(),
+            if self.resolvable { "yes" } else { "not yet" }.to_owned(),
+            self.linkage.clone().unwrap_or_else(|| DASH.to_owned()),
+            self.libc_min.clone().unwrap_or_else(|| DASH.to_owned()),
+            self.detail.clone().unwrap_or_else(|| DASH.to_owned()),
+        ]
+    }
+}
+
+/// Probes every target a project or a command line named.
+///
+/// `config` is `[tools.ginary.target]`, so a target with no sub-table is
+/// probed as `host`, which is what a build of it would use. Only the host's
+/// own runtime is inspected: a `dir:` source is reported as resolvable without
+/// being read, because `doctor` describes the machine rather than performing
+/// half of a build.
+///
+/// Two rows answer `not yet` without a milestone behind them: `host` on a
+/// target this machine is not — the runtime that spelling resolves to is for
+/// the host, and a build would refuse it with a target mismatch — and the
+/// host's own row when this machine's installation cannot be read. Both are a
+/// build failing here today, which is what the column asks.
+pub fn probe_targets(
+    targets: &[Target],
+    config: &BTreeMap<String, TargetConfig>,
+) -> Vec<TargetProbe> {
+    targets
+        .iter()
+        .map(|target| probe_target(*target, config.get(&target.name())))
+        .collect()
+}
+
+/// One row: what the target's `erts` says, and what can be done about it.
+fn probe_target(target: Target, config: Option<&TargetConfig>) -> TargetProbe {
+    let name = target.name();
+    let spec = match config.map_or_else(|| Ok(ErtsSourceSpec::Host), TargetConfig::erts_spec) {
+        Ok(spec) => spec,
+        // A value `[tools.ginary.target.<name>] erts` cannot be read as a
+        // source. `ProjectConfig::read` refuses it, so `doctor` only sees one
+        // when it was handed a configuration nothing validated; the row says
+        // what the value was and why it is not a source.
+        Err(error) => {
+            return TargetProbe {
+                name,
+                erts: config
+                    .and_then(|config| config.erts.clone())
+                    .unwrap_or_else(|| ErtsSourceSpec::Host.label()),
+                resolvable: false,
+                detail: Some(error.to_string()),
+                linkage: None,
+                libc_min: None,
+            };
+        }
+    };
+    let erts = spec.label();
+
+    if let Some(milestone) = spec.milestone() {
+        return TargetProbe {
+            name,
+            erts,
+            resolvable: false,
+            detail: Some(format!("arrives with the {milestone} milestone")),
+            linkage: None,
+            libc_min: None,
+        };
+    }
+
+    // The one runtime `doctor` reads is the one it is standing on. A `dir:`
+    // that is on this machine is reported as resolvable without being opened:
+    // `doctor` describes the machine, and inspecting a runtime root is half of
+    // a build.
+    if spec == ErtsSourceSpec::Host && target == Target::host() {
+        return match crate::erts_source::resolve(&spec, &target) {
+            Ok(erts) => TargetProbe {
+                name,
+                erts: spec.label(),
+                resolvable: true,
+                detail: Some(erts.provenance),
+                linkage: Some(erts.linkage.as_str().to_owned()),
+                libc_min: erts.libc_min,
+            },
+            // The source is one this ginary resolves and this machine's own
+            // installation is what could not be read, which is a `no` to the
+            // question the column asks: a build of this target would fail
+            // here, today, for the reason in the detail. Answering `yes` and
+            // printing the reason beside it would contradict the `otp:
+            // unusable` line three rows above.
+            Err(error) => TargetProbe {
+                name,
+                erts: spec.label(),
+                resolvable: false,
+                detail: Some(error_chain(&error)),
+                linkage: None,
+                libc_min: None,
+            },
+        };
+    }
+
+    // `host` on a target this machine is not. The branch above took the host's
+    // own row, so the runtime this spelling resolves to is for another target
+    // and `erts_source::resolve` would refuse it with a mismatch; a row that
+    // said `yes` would send a user to run the build to find that out.
+    if spec == ErtsSourceSpec::Host {
+        let host = Target::host();
+        return TargetProbe {
+            detail: Some(format!(
+                "this machine's runtime is for {host}; name a {name} runtime with \
+                 `[tools.ginary.target.{name}] erts = \"dir:PATH\"`"
+            )),
+            name,
+            erts,
+            resolvable: false,
+            linkage: None,
+            libc_min: None,
+        };
+    }
+
+    TargetProbe {
+        name,
+        erts,
+        resolvable: true,
+        detail: None,
+        linkage: None,
+        libc_min: None,
+    }
+}
+
+/// One error and every cause under it, as one sentence.
+///
+/// `ErtsError::Otp` says "cannot use the runtime" and the cause says which
+/// directory has no `erts-*` in it, so a row that printed only the headline
+/// would name a fault and not a file.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    text
+}
+
+/// The targets table, one row per probe.
+pub fn render_targets(probes: &[TargetProbe]) -> String {
+    let rows: Vec<[String; 6]> = probes.iter().map(TargetProbe::cells).collect();
+    crate::closure::render_table(
+        ["target", "erts", "resolves", "linkage", "libc", "detail"],
+        &rows,
+    )
+}
+
 /// The full `doctor` result.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
@@ -831,6 +1040,8 @@ pub struct Report {
     pub otp_error: Option<String>,
     /// The Gleam project `doctor` was run inside, when it was run in one.
     pub project: Option<ProjectReport>,
+    /// One row per target the project or the host asks for.
+    pub targets: Vec<TargetProbe>,
 }
 
 impl Report {
@@ -852,6 +1063,13 @@ impl Report {
             std::env::current_dir()
                 .ok()
                 .and_then(|cwd| project_context(&cwd, SystemTime::now())),
+            {
+                let (targets, config) = std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| project_targets(&cwd))
+                    .unwrap_or_else(|| (vec![Target::host()], BTreeMap::new()));
+                probe_targets(&targets, &config)
+            },
         )
     }
 
@@ -867,6 +1085,7 @@ impl Report {
         env: &EnvSnapshot,
         otp: Result<OtpReport, String>,
         project: Option<ProjectReport>,
+        targets: Vec<TargetProbe>,
     ) -> Self {
         let (otp, otp_error) = match otp {
             Ok(report) => (Some(report), None),
@@ -895,6 +1114,7 @@ impl Report {
             otp,
             otp_error,
             project,
+            targets,
         }
     }
 
@@ -929,6 +1149,10 @@ impl Report {
         if let Some(project) = &self.project {
             lines.push(String::new());
             lines.extend(block(&project.render()));
+        }
+        if !self.targets.is_empty() {
+            lines.push(String::new());
+            lines.extend(block(&render_targets(&self.targets)));
         }
         lines.push(String::new());
         lines.join("\n")
@@ -1142,6 +1366,7 @@ mod tests {
             otp: None,
             otp_error: None,
             project: None,
+            targets: Vec::new(),
             tools: vec![ToolReport {
                 name: "gleam".to_owned(),
                 found: false,
@@ -1169,6 +1394,7 @@ mod tests {
             &cache_snapshot("/srv/ginary-cache"),
             Err("`/opt/broken` has no `erts-*` directory".to_owned()),
             None,
+            Vec::new(),
         );
         assert_eq!(report.otp, None);
         assert_eq!(
@@ -1198,6 +1424,7 @@ mod tests {
                 crypto: None,
             }),
             None,
+            Vec::new(),
         );
         assert_eq!(report.otp_error, None);
         let text = report.render_text();
@@ -1221,6 +1448,7 @@ mod tests {
             otp: None,
             otp_error: None,
             project: None,
+            targets: Vec::new(),
             tools: Vec::new(),
         };
         assert!(
@@ -1251,6 +1479,7 @@ mod tests {
             &cache_snapshot("/srv/ginary-cache"),
             Err("no OTP was looked for".to_owned()),
             None,
+            Vec::new(),
         );
 
         assert!(!report.rustc_required);
@@ -1269,6 +1498,7 @@ mod tests {
             &cache_snapshot("/srv/ginary-cache"),
             Err("no OTP was looked for".to_owned()),
             None,
+            Vec::new(),
         );
         assert_eq!(report.cache_dir, Some(PathBuf::from("/srv/ginary-cache")));
         assert_eq!(report.cache_dir_source, Some("GINARY_CACHE_DIR"));
@@ -1284,6 +1514,7 @@ mod tests {
             &EnvSnapshot::default(),
             Err("no OTP".to_owned()),
             None,
+            Vec::new(),
         );
         assert_eq!(report.cache_dir, None);
         assert_eq!(report.cache_dir_source, None);

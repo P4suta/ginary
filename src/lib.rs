@@ -77,6 +77,12 @@
 //! - [`bundle`] — the whole build, from a project to one executable;
 //! - [`inspect`] — reading a packaged application from the outside.
 //!
+//! Milestone C1 adds the module that says what a bundled runtime really is,
+//! and the multi-target plumbing around it:
+//!
+//! - [`erts_source`] — `host`, a directory, a tarball, the catalogue or a
+//!   container image, resolved and then checked against the emulator itself.
+//!
 //! Milestone B2 adds the three modules that answer questions *about* a
 //! finished artifact, rather than producing one:
 //!
@@ -106,6 +112,7 @@ pub mod diag;
 pub mod doctor;
 pub mod elf;
 pub mod error;
+pub mod erts_source;
 pub mod fault;
 pub mod gleam;
 pub mod inspect;

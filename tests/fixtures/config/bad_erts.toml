@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `system` is not one of the five ERTS source spellings. A source nothing can
+# resolve is a build that fails after the export rather than before it.
+
+name = "bad_erts_app"
+version = "0.1.0"
+
+[tools.ginary.target.linux-x86_64-musl]
+erts = "system"

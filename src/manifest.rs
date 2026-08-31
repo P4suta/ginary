@@ -88,6 +88,57 @@ pub struct NativeRef {
     pub kind: NativeKind,
 }
 
+/// The C library a runtime needs, and the lowest release it runs against.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibcRequirement {
+    /// `gnu` or `musl`.
+    pub kind: String,
+    /// The lowest release the emulator runs against, `2.31` rather than
+    /// `GLIBC_2.31`. [`None`] for musl, which carries no symbol versions.
+    #[serde(default)]
+    pub min: Option<String>,
+}
+
+/// What the bundled runtime is, and where it came from.
+///
+/// Recorded by the build from [`crate::erts_source::ResolvedErts`], which
+/// derives every field from the emulator itself. It is additive: an artifact
+/// built before C1 carries no `otp` block and deserialises to
+/// [`OtpProvenance::default`], which says `unknown` rather than inventing a
+/// linkage nobody read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtpProvenance {
+    /// `dynamic`, `static`, or [`UNKNOWN_PROVENANCE`] for an older artifact.
+    pub linkage: String,
+    /// The C library, absent on a platform that has only one.
+    #[serde(default)]
+    pub libc: Option<LibcRequirement>,
+    /// Whether a NIF can be loaded into the bundled runtime.
+    pub nif_loading: bool,
+    /// The source, as `[tools.ginary.target.<name>] erts` spelled it, with the
+    /// root appended: `host:/usr/lib/erlang`, `dir:/opt/otp`.
+    pub source: String,
+}
+
+/// What an artifact that recorded no provenance is reported as.
+pub const UNKNOWN_PROVENANCE: &str = "unknown";
+
+impl Default for OtpProvenance {
+    /// What an artifact built before the block existed is read as.
+    ///
+    /// `nif_loading` is `true` because every artifact that predates the block
+    /// bundled the host's own dynamically linked runtime, which loads them;
+    /// the two strings say `unknown` because nothing read them.
+    fn default() -> Self {
+        Self {
+            linkage: UNKNOWN_PROVENANCE.to_owned(),
+            libc: None,
+            nif_loading: true,
+            source: UNKNOWN_PROVENANCE.to_owned(),
+        }
+    }
+}
+
 /// Everything the launcher needs to build its argument vector.
 ///
 /// [`LaunchSpec::program`] is a program *name* and [`LaunchSpec::bindir`] the
@@ -194,6 +245,9 @@ pub struct Manifest {
     pub otp_version: String,
     /// The ERTS version, and with it the `erts-<vsn>` directory name.
     pub erts_version: String,
+    /// What the bundled runtime is and where it came from.
+    #[serde(default)]
+    pub otp: OtpProvenance,
     /// The target the artifact was built for, by its canonical name.
     pub target: Target,
     /// The applications that came from the OTP library.

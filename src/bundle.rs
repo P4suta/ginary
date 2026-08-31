@@ -40,8 +40,8 @@ use crate::config::{BuildOptions, ConfigError};
 use crate::diag::Diag;
 use crate::error::LauncherError;
 use crate::gleam::{self, GleamError, ProjectDir};
-use crate::manifest::{AppRef, LaunchSpec, Manifest, ManifestError};
-use crate::otp::{OtpError, OtpInfo};
+use crate::manifest::{AppRef, LaunchSpec, Manifest, ManifestError, OtpProvenance};
+use crate::otp::OtpError;
 use crate::payload::PayloadError;
 use crate::report::{ReportError, SizeReport};
 use crate::strip::{StripError, StripReport};
@@ -120,6 +120,89 @@ pub struct BuildExplain {
     pub staged: String,
 }
 
+/// One target's half of a build.
+///
+/// A build produces one artifact per target, and every number below is that
+/// artifact's own. The report holds a row per target so that a multi-target
+/// build says what each one cost and what runtime each one carries, rather
+/// than reporting the first and leaving the rest to be inferred.
+#[derive(Clone, Debug, Serialize)]
+pub struct TargetBuild {
+    /// The target this artifact is for.
+    pub target: Target,
+    /// The artifact.
+    #[serde(serialize_with = "serialize_path")]
+    pub out: PathBuf,
+    /// The manifest copy written beside it, for a suffixed build.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_path"
+    )]
+    pub manifest_copy: Option<PathBuf>,
+    /// The stub's length, which is the payload's offset.
+    pub stub_len: u64,
+    /// The payload's length.
+    pub payload_len: u64,
+    /// The artifact's length: stub, payload and the 64-byte trailer.
+    pub total_len: u64,
+    /// The payload's SHA-256, in lower-case hexadecimal.
+    pub sha256: String,
+    /// What the bundled runtime is and where it came from.
+    pub otp: OtpProvenance,
+}
+
+impl TargetBuild {
+    /// The one line that says what was written and what it is made of.
+    pub fn artifact_line(&self) -> String {
+        format!(
+            "artifact: {} ({} stub + {} payload + {TRAILER_LEN} trailer)",
+            self.out.display(),
+            self.stub_len,
+            self.payload_len
+        )
+    }
+
+    /// The C library the runtime needs, as the table prints it.
+    ///
+    /// `gnu 2.38` when a minimum is known, `musl` when the library carries no
+    /// symbol versions to derive one from, and `-` on a platform that has one
+    /// system C runtime and therefore no choice to record.
+    pub fn libc_summary(&self) -> String {
+        match &self.otp.libc {
+            None => "-".to_owned(),
+            Some(libc) => match &libc.min {
+                Some(min) => format!("{} {min}", libc.kind),
+                None => libc.kind.clone(),
+            },
+        }
+    }
+}
+
+/// The table one row per target, as [`BuildReport::render_text`] prints it.
+///
+/// Six columns: the target, the artifact it was written to, how its runtime is
+/// linked, the C library that runtime needs, whether a NIF can be loaded into
+/// it, and where the runtime came from.
+pub fn render_target_table(targets: &[TargetBuild]) -> String {
+    let rows: Vec<[String; 6]> = targets
+        .iter()
+        .map(|target| {
+            [
+                target.target.name(),
+                target.out.display().to_string(),
+                target.otp.linkage.clone(),
+                target.libc_summary(),
+                if target.otp.nif_loading { "yes" } else { "no" }.to_owned(),
+                target.otp.source.clone(),
+            ]
+        })
+        .collect();
+    crate::closure::render_table(
+        ["target", "artifact", "linkage", "libc", "nif", "erts"],
+        &rows,
+    )
+}
+
 /// What one build produced.
 #[derive(Clone, Debug, Serialize)]
 pub struct BuildReport {
@@ -142,6 +225,8 @@ pub struct BuildReport {
     pub size_report: SizeReport,
     /// The manifest that was packed.
     pub manifest: Manifest,
+    /// One row per target this build produced, in the order they were named.
+    pub targets: Vec<TargetBuild>,
     /// The work directory, when `--keep-staging` kept it.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -208,8 +293,15 @@ impl BuildReport {
             text.push_str(&format!("warning: {warning}\n"));
         }
         text.push('\n');
-        text.push_str(&self.artifact_line());
-        text.push('\n');
+        // One artifact is named on its own line, because that is the line a
+        // caller quotes; several are a table, because six facts about each of
+        // seven targets is not something a reader parses out of prose.
+        if self.targets.len() > 1 {
+            text.push_str(&render_target_table(&self.targets));
+        } else {
+            text.push_str(&self.artifact_line());
+            text.push('\n');
+        }
         text
     }
 }
@@ -311,6 +403,10 @@ pub fn build_with_stub(
     // runtime before saying so would have wasted minutes to say it.
     let stub_len = check_stub(stub)?;
 
+    // Second, and for the same reason: the remedy for a target this ginary
+    // cannot make is a different command line.
+    let targets = build_targets(opts)?;
+
     let project = ProjectDir::new(opts.root.clone());
     let shipment = if opts.skip_export {
         gleam::existing_shipment(&project)?
@@ -318,24 +414,8 @@ pub fn build_with_stub(
         gleam::export_shipment(&project, diag)?
     };
 
-    let otp = {
-        let _phase = diag.phase("otp");
-        crate::otp::discover(opts.otp_root.as_deref())?
-    };
-
-    let set = {
-        let _phase = diag.phase("closure");
-        closure::app_dependency_closure(
-            &shipment,
-            &otp.lib,
-            std::slice::from_ref(&opts.app),
-            &opts.otp_applications,
-        )?
-    };
-    diag.kv("closure", &[("apps", &set.len().to_string())]);
-
     let work = work_dir(&opts.root, std::process::id());
-    let outcome = assemble_and_write(opts, stub, stub_len, &set, &otp, &work, diag);
+    let outcome = build_each_target(opts, &targets, stub, stub_len, &shipment, &work, diag);
 
     if opts.keep_staging {
         outcome.map(|mut report| {
@@ -386,20 +466,189 @@ pub fn remove_work_dir(work: &Path) -> Option<String> {
     }
 }
 
-/// Stages, strips, measures, packs and writes the artifact.
+/// The targets one build produces, refusing every one it cannot make.
+///
+/// [`BuildOptions::merge`] resolves at least the host, so a list that is empty
+/// here came from options something else assembled, and building the host
+/// anyway would produce an artifact nobody asked for.
+///
+/// # Errors
+///
+/// [`BundleError::NoTargets`] when the list is empty, and
+/// [`BundleError::CrossTargetNotAvailable`] for the first target that is not
+/// the host.
+fn build_targets(opts: &BuildOptions) -> Result<Vec<Target>, BundleError> {
+    if opts.targets.is_empty() {
+        return Err(BundleError::NoTargets);
+    }
+    let host = Target::host();
+    if let Some(target) = opts.targets.iter().copied().find(|target| *target != host) {
+        return Err(BundleError::CrossTargetNotAvailable { target, host });
+    }
+    Ok(opts.targets.clone())
+}
+
+/// Where one target's runtime comes from.
+///
+/// The target's own `[tools.ginary.target.<name>] erts`, unless `--otp-root`
+/// named a directory: a flag the user typed just now wins over the project's
+/// own configuration, as every other flag in [`BuildOptions::merge`] does, and
+/// what it names is a runtime root, which is exactly a `dir:` source.
+///
+/// # Errors
+///
+/// [`BundleError::Config`] carrying [`ConfigError::ErtsSource`] when the
+/// configured value is not one of the five spellings, which
+/// [`crate::config::ToolsConfig::validate_targets`] refuses before a build can
+/// reach this.
+fn erts_spec_for(
+    opts: &BuildOptions,
+    target: Target,
+) -> Result<crate::erts_source::ErtsSourceSpec, BundleError> {
+    if let Some(root) = &opts.otp_root {
+        return Ok(crate::erts_source::ErtsSourceSpec::Dir(root.clone()));
+    }
+    let name = target.name();
+    opts.erts_spec(target).map_err(|error| {
+        BundleError::Config(ConfigError::ErtsSource {
+            path: opts.root.join(crate::gleam::MANIFEST_NAME),
+            value: opts
+                .target_config
+                .get(&name)
+                .and_then(|config| config.erts.clone())
+                .unwrap_or_default(),
+            target: name,
+            reason: error.to_string(),
+        })
+    })
+}
+
+/// Builds one artifact per target and folds them into one report.
+///
+/// The report's own `strip`, `size_report`, `manifest` and `explain` are the
+/// first target's, because they are the ones every earlier milestone printed
+/// and the ones a caller already reads; [`BuildReport::targets`] holds a row
+/// for each, in the order the targets were named. [`BuildReport::warnings`] is
+/// the exception and is every target's: a warning is something a build could
+/// not do, and dropping the second target's would be the silent skip
+/// `CLAUDE.md` forbids. A build with more than one target prefixes each
+/// warning with the target that raised it, so a line naming a runtime file
+/// says which artifact is missing it.
+///
+/// Sequential, and every target stages into the same work root: the tree one
+/// target staged is packed and measured before the next replaces it, which is
+/// what lets the whole build have one work directory and one removal site.
+///
+/// # Errors
+///
+/// The first failure, from whichever phase and whichever target raised it. A
+/// build that wrote one target's artifact and failed on the next reports the
+/// failure: a partial multi-target build is not a build that succeeded.
+/// [`BundleError::NoTargets`] when `targets` is empty, which [`build_targets`]
+/// has already refused.
+fn build_each_target(
+    opts: &BuildOptions,
+    targets: &[Target],
+    stub: &Path,
+    stub_len: u64,
+    shipment: &Path,
+    work: &Path,
+    diag: &Diag,
+) -> Result<BuildReport, BundleError> {
+    let mut whole: Option<BuildReport> = None;
+    let mut rows: Vec<TargetBuild> = Vec::with_capacity(targets.len());
+    let mut warnings: Vec<String> = Vec::new();
+    let attributed = targets.len() > 1;
+
+    for target in targets {
+        let spec = erts_spec_for(opts, *target)?;
+        let erts = {
+            let _phase = diag.phase("erts");
+            crate::erts_source::resolve(&spec, target)?
+        };
+        diag.kv(
+            "erts",
+            &[
+                ("target", &target.name()),
+                ("source", &erts.provenance),
+                ("linkage", erts.linkage.as_str()),
+            ],
+        );
+
+        let set = {
+            let _phase = diag.phase("closure");
+            closure::app_dependency_closure(
+                shipment,
+                &erts.otp.lib,
+                std::slice::from_ref(&opts.app),
+                &opts.otp_applications,
+            )?
+        };
+        diag.kv("closure", &[("apps", &set.len().to_string())]);
+
+        let job = TargetJob {
+            target: *target,
+            erts: &erts,
+            set: &set,
+        };
+        let mut report = assemble_and_write(opts, &job, stub, stub_len, work, diag)?;
+        rows.extend(report.targets.iter().cloned());
+        warnings.extend(
+            std::mem::take(&mut report.warnings)
+                .into_iter()
+                .map(|warning| {
+                    if attributed {
+                        format!("{}: {warning}", target.name())
+                    } else {
+                        warning
+                    }
+                }),
+        );
+        if whole.is_none() {
+            whole = Some(report);
+        }
+    }
+
+    match whole {
+        Some(mut report) => {
+            report.targets = rows;
+            report.warnings = warnings;
+            Ok(report)
+        }
+        None => Err(BundleError::NoTargets),
+    }
+}
+
+/// One target's inputs, as [`build_each_target`] resolved them.
+///
+/// Three values that travel together and are meaningless apart: the target, the
+/// runtime that was resolved *for* it, and the closure that was taken over that
+/// runtime's library directory.
+struct TargetJob<'a> {
+    /// The target this artifact is for.
+    target: Target,
+    /// The runtime that was resolved for it, and what reading it found.
+    erts: &'a crate::erts_source::ResolvedErts,
+    /// The applications, resolved against [`TargetJob::erts`]'s library.
+    set: &'a AppSet,
+}
+
+/// Stages, strips, measures, packs and writes one target's artifact.
 ///
 /// Split from [`build_with_stub`] so that the work directory has exactly one
 /// removal site, on every path out of the build rather than on each of the
 /// eight that can fail.
 fn assemble_and_write(
     opts: &BuildOptions,
+    job: &TargetJob<'_>,
     stub: &Path,
     stub_len: u64,
-    set: &AppSet,
-    otp: &OtpInfo,
     work: &Path,
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
+    let TargetJob { target, erts, set } = *job;
+    let otp = &erts.otp;
+    let out = opts.artifact_path(target);
     let root = work.join(WORK_STAGE_NAME);
     let mut staged = {
         let _phase = diag.phase("stage");
@@ -430,11 +679,16 @@ fn assemble_and_write(
     let size_report = crate::report::measure(&staged, &strip_report, staged.root())?;
     let staged = staged.refresh()?;
 
-    let manifest = manifest_for(opts, otp, set)?;
+    let manifest = manifest_for(opts, target, erts, set)?;
     let (payload_len, sha256) = {
         let _phase = diag.phase("pack");
-        write_artifact(opts, stub, stub_len, staged.root(), &manifest)?
+        write_artifact(opts, &out, stub, stub_len, staged.root(), &manifest)?
     };
+
+    let manifest_copy = opts.manifest_copy_path(target);
+    if let Some(copy) = &manifest_copy {
+        write_manifest_copy(copy, &manifest)?;
+    }
 
     let explain = opts.explain.then(|| BuildExplain {
         closure: closure::explain(set),
@@ -443,19 +697,54 @@ fn assemble_and_write(
 
     Ok(BuildReport {
         app: opts.app.clone(),
-        out: opts.out.clone(),
+        out: out.clone(),
         stub_len,
         payload_len,
         total_len: stub_len
             .saturating_add(payload_len)
             .saturating_add(TRAILER_LEN),
-        sha256,
+        sha256: sha256.clone(),
         strip: strip_report,
         size_report,
         manifest,
+        targets: vec![TargetBuild {
+            target,
+            out,
+            manifest_copy,
+            stub_len,
+            payload_len,
+            total_len: stub_len
+                .saturating_add(payload_len)
+                .saturating_add(TRAILER_LEN),
+            sha256,
+            otp: erts.provenance_block(),
+        }],
         staging: None,
         warnings,
         explain,
+    })
+}
+
+/// Writes `<out>-<target>.json`, the manifest a suffixed build copies out.
+///
+/// The same document the artifact carries as `ginary.json`, pretty-printed so
+/// that a person reading a directory of artifacts for machines they cannot run
+/// can read it, and so that CI does not have to open an executable for another
+/// architecture to find out what is in it.
+///
+/// # Errors
+///
+/// [`BundleError::ManifestCopy`] naming the file and what stopped it.
+fn write_manifest_copy(path: &Path, manifest: &Manifest) -> Result<(), BundleError> {
+    let mut text =
+        serde_json::to_string_pretty(manifest).map_err(|error| BundleError::ManifestCopy {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    text.push('\n');
+    std::fs::write(path, text).map_err(|error| BundleError::ManifestCopy {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
     })
 }
 
@@ -609,8 +898,14 @@ fn names_a_node(opts: &BuildOptions, vm_args: Option<&str>) -> bool {
     })
 }
 
-/// The manifest for one build, derived from what was actually staged.
-fn manifest_for(opts: &BuildOptions, otp: &OtpInfo, set: &AppSet) -> Result<Manifest, BundleError> {
+/// The manifest for one target, derived from what was actually staged.
+fn manifest_for(
+    opts: &BuildOptions,
+    target: Target,
+    erts: &crate::erts_source::ResolvedErts,
+    set: &AppSet,
+) -> Result<Manifest, BundleError> {
+    let otp = &erts.otp;
     let otp_applications: Vec<AppRef> = set
         .otp_apps()
         .into_iter()
@@ -653,7 +948,11 @@ fn manifest_for(opts: &BuildOptions, otp: &OtpInfo, set: &AppSet) -> Result<Mani
         otp_release: otp.release,
         otp_version: otp.otp_version.clone(),
         erts_version: otp.erts_vsn.clone(),
-        target: Target::host(),
+        // Every field of it read off the emulator that is being packed, which
+        // is what makes the block a record rather than a restatement of the
+        // configuration; see [`crate::erts_source`].
+        otp: erts.provenance_block(),
+        target,
         otp_applications,
         gleam_applications,
         launch: LaunchSpec {
@@ -694,12 +993,13 @@ fn manifest_for(opts: &BuildOptions, otp: &OtpInfo, set: &AppSet) -> Result<Mani
 /// is a complete artifact.
 fn write_artifact(
     opts: &BuildOptions,
+    out: &Path,
     stub: &Path,
     stub_len: u64,
     staging: &Path,
     manifest: &Manifest,
 ) -> Result<(u64, String), BundleError> {
-    let dir = opts.out.parent().unwrap_or(Path::new("."));
+    let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|source| BundleError::Io {
         what: format!("cannot create the output directory {}", dir.display()),
         source,
@@ -762,8 +1062,8 @@ fn write_artifact(
             })?;
     }
 
-    temp.persist(&opts.out).map_err(|error| BundleError::Io {
-        what: format!("cannot write the artifact to {}", opts.out.display()),
+    temp.persist(out).map_err(|error| BundleError::Io {
+        what: format!("cannot write the artifact to {}", out.display()),
         source: error.error,
     })?;
 
@@ -773,6 +1073,47 @@ fn write_artifact(
 /// Why a build did not produce an artifact.
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
+    /// The build asked for a target other than the host.
+    ///
+    /// Every phase below `bundle` is target-aware now, and two things a cross
+    /// build needs are not here yet: the stub for the other target, and a
+    /// runtime for it. Refused before the export, for the same reason
+    /// [`BundleError::BundledStub`] is: the remedy is a different command
+    /// line, and a build that exported and staged before saying so would have
+    /// spent minutes to say it.
+    #[error(
+        "this ginary cannot build for {target}: cross builds arrive with the stub/catalog \
+         milestones; build for {host} today"
+    )]
+    CrossTargetNotAvailable {
+        /// The target that was asked for.
+        target: Target,
+        /// The host, which is the one target that does work.
+        host: Target,
+    },
+    /// The runtime for one target could not be resolved.
+    #[error("cannot resolve the runtime to bundle")]
+    Erts(#[from] crate::erts_source::ErtsError),
+    /// The build resolved no target at all.
+    ///
+    /// [`BuildOptions::merge`] cannot produce it: `--target`, then
+    /// `[tools.ginary] targets`, then the host, and the last of those always
+    /// answers. A caller that assembles the options itself can, and this is an
+    /// error rather than a silent host build because an artifact nobody asked
+    /// for is worse than a build that stops.
+    #[error(
+        "this build names no target; `--target` or `[tools.ginary] targets` has to name at \
+         least one"
+    )]
+    NoTargets,
+    /// The manifest copy beside a suffixed artifact could not be written.
+    #[error("cannot write the manifest copy to {path}: {reason}")]
+    ManifestCopy {
+        /// The file that could not be written.
+        path: PathBuf,
+        /// What stopped it.
+        reason: String,
+    },
     /// The project's configuration is not usable.
     #[error("cannot read the project configuration")]
     Config(#[from] ConfigError),

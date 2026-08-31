@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# A sub-table for a target ginary does not package for. Accepting it would
+# leave its author believing a setting is in force that no build will ever
+# read.
+
+name = "typo_target_app"
+version = "0.1.0"
+
+[tools.ginary.target.linux-riscv64-gnu]
+erts = "catalog"

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `codesing` is a typo for `codesign`. serde names the key; the error has to
+# name the sub-table too, because a manifest can hold seven of them and the
+# line number is not the table.
+
+name = "typo_key_app"
+version = "0.1.0"
+
+[tools.ginary.target.macos-aarch64]
+erts = "host"
+codesing = { identity = "Developer ID Application: Example" }

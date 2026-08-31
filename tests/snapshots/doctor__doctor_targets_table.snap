@@ -1,0 +1,7 @@
+---
+source: tests/doctor.rs
+expression: "doctor::render_targets(&sample_probes())"
+---
+target              erts     resolves  linkage  libc  detail
+linux-x86_64-gnu    host     yes       dynamic  2.38  host:/usr/lib/erlang
+linux-aarch64-musl  catalog  not yet   -        -     arrives with the catalog milestone
