@@ -222,12 +222,10 @@ $ export GINARY_STUB_DIR=$PWD/target/stubs
 $ ginary build --target linux-aarch64-musl
 ```
 
-It attempts five targets. The four Linux ones build today. `windows-x86_64` does **not** yet:
-the launcher path is Unix-only, so the crate does not compile for `x86_64-pc-windows-gnu` — the
-task keeps the target, prints `FAILED windows-x86_64` and exits non-zero rather than dropping it,
-and the Windows launcher is Phase D. The two macOS stubs are not attempted at all and cannot be:
-there is no macOS toolchain in a Linux container, so they come from the release build on a macOS
-runner and from nowhere else.
+It attempts five targets, and all five build: the four Linux ones and `windows-x86_64`. The two
+macOS stubs are not attempted at all and cannot be: there is no macOS toolchain in a Linux
+container, so they come from the release build on a macOS runner and from nowhere else. What the
+Windows stub does and does not prove is the [Windows](#windows) section below.
 
 Whatever the stub came from, it has to pass every gate before a payload is appended: exactly one
 identity marker, this ginary's version, this payload format, the target that was asked for, an
@@ -538,10 +536,10 @@ forwarding, and the application receives its arguments exactly as typed.
   source names. A target other than the host with no `erts` named for it is refused, quoting the
   table to write. Prebuilt runtime downloads and the musl variants are Phase C of
   [the roadmap](docs/dev/log/).
-- **Only the four Linux stubs build here.** `mise run stubs:build` attempts them and
-  `windows-x86_64`; the Windows one does not compile yet, because the launcher path is Unix-only
-  (Phase D), and the task says so and exits non-zero. No macOS stub can be built on Linux at all;
-  the two of them come from the release build on a macOS runner.
+- **Windows is built but not run.** `mise run stubs:build` produces the `windows-x86_64` stub
+  and `mise run build:windows` builds both flavors, but no Windows machine has ever started a
+  packaged application; see [Windows](#windows). No macOS stub can be built on Linux at all; the
+  two of them come from the release build on a macOS runner.
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,
@@ -559,6 +557,85 @@ forwarding, and the application receives its arguments exactly as typed.
   runs a command, and there is no cross toolchain inside ginary. See "Native code: NIFs and port
   programs".
 - Artifacts are not small. A trimmed runtime plus a small application is roughly 7.5 MB.
+
+## Windows
+
+Windows support is **compiled, cross-checked and partly executed — and no Windows machine has
+run a packaged application yet.** The distinction matters, so here is exactly where the line
+falls.
+
+What works, and is checked on every run of the suite:
+
+- **The crate compiles for `x86_64-pc-windows-gnu`, in both flavors.** `mise run build:windows`
+  runs `cross build --release` twice for that triple — the launcher-only stub
+  (`--no-default-features`) and the full command line tool. Everything the Unix launcher needs
+  and Windows does not have is split: `/proc/self/exe`, `flock`, `syncfs`, the uid in the
+  fallback cache root, the mode bits, `pread`, and `execve` itself.
+- **The stub builds and starts.** `mise run stubs:build` produces
+  `ginary-stub-<version>-windows-x86_64.exe`, and it runs under the `cross` image's wine: it
+  prints its payloadless-stub sentence and exits 2. That is a real execution of
+  `Target::host`, of `selfexe::open_self`'s `current_exe` route and of `trailer::read_from`'s
+  `seek_read` loop on a Windows binary.
+- **The rules underneath the launcher are unit-tested on Linux**, because they are pure
+  functions and a Linux machine can check them honestly: the cache root
+  (`GINARY_CACHE_DIR` > `%LOCALAPPDATA%\ginary` > `%TEMP%\ginary-<user>`), the `\\?\`
+  long-path prefix a deep cache entry is extracted under *and* the ordinary spelling `erl.exe`
+  is handed back, the two share modes the locks become, the exit-code mapping, `erl.exe` as the
+  launch program, and that a Windows launch plan is the Unix one with a different program name.
+  See `tests/windows.rs` and `tests/windows_build.rs`.
+- **A Windows runtime tree can be read.** `otp::inspect_root` measures a tree holding `erl.exe`
+  against the Windows required-file list rather than the four Unix programs, and
+  `erts_source::resolve` takes the target off the PE header of that tree's `beam.smp.dll` — the
+  emulator `erl.exe` loads — so a Windows tree in a Linux build is a target mismatch at build
+  time rather than a loader error on somebody else's machine.
+- **The build side refuses what it cannot do.** A `--target windows-x86_64` build whose runtime
+  is `host`, `catalog`, a Linux `tarball:` or a `docker:` image is refused by name; only a
+  `dir:` source holding a tree unpacked from `otp_win64_<version>.zip` is accepted. Assembly
+  reads the required files off the tree rather than off the request — `erl.exe`,
+  `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them — and deletes the `erl.ini` that
+  would point the artifact at the build machine's `Rootdir`. `distribution` and `heart` ask the
+  tree for `epmd.exe` and `heart.exe`, the names a Windows runtime spells them with. Which of
+  the two flavours a tree is gets read off the tree — "does `erts-<vsn>/bin` hold `erl.exe`?" —
+  in one place, so the resolver, `inspect_root` and assembly cannot disagree about it.
+
+What is **untested**, and is the GitHub Actions milestone on a `windows-latest` runner:
+
+- **`erl.exe` has never been started by this launcher.** The spawn, the wait, the job object
+  that keeps a killed launcher from orphaning a runtime, the console control handler and the
+  share-mode lock are compiled and nothing more.
+- **No exit code has been propagated.** `halt(3)` reaching `%ERRORLEVEL%` as 3 is a claim this
+  repository states and does not yet check.
+- **No Windows artifact has been built end to end.** There is no `otp_win64_<version>.zip` on
+  the development machine to point `erts = "dir:…"` at, so what is covered is that such a tree
+  *resolves* — over a fabricated tree carrying real PE headers. `ginary build --target
+  windows-x86_64` over a real unpacked zip is the Actions run.
+- **The `otp_win64_<version>.zip` layout is an assumption.** The required-file probe is
+  data-driven for exactly that reason, and the DLL the emulator is named as — `beam.smp.dll` —
+  is what the documentation says rather than what a real zip was read for.
+- **A cache entry longer than `MAX_PATH` still cannot be launched.** The `\\?\` prefix covers
+  everything ginary itself opens — the extraction, the cache-hit check, the lock, the manifest
+  and the preflight — and `ROOTDIR`, `BINDIR` and the argument vector are handed to `erl.exe`
+  in the ordinary spelling, because that program takes them apart and reassembles them. Past
+  `MAX_PATH` the entry is therefore extracted, found and locked, and the runtime will not start
+  out of it. That limit is `erl.exe`'s.
+- **Nothing runs under a real wine either.** The image's wine has no `bcryptprimitives.dll`,
+  which every Rust *test* binary imports through `std`, so `cross test` cannot start one; the
+  stub, which imports only `kernel32`, `ntdll` and `msvcrt`, does.
+- **No ginary test target compiles for `x86_64-pc-windows-gnu` at all.** `tests/common` is
+  unix-only — `std::os::unix`, `Permissions::from_mode`, `OsStrExt::as_bytes` — and every test
+  target pulls it in, so porting it is the first thing the Actions milestone has to do.
+- **The two lock opens and the `\\?\` extraction are Windows-only code paths.** Their tests
+  are `#[cfg(windows)]` and run nowhere yet; they are type-checked on Linux by lifting the
+  `cfg` for one compile. What they claim: that two launchers of one entry both take the shared
+  lock, and that a prune can rename the entry it holds.
+
+One stated limitation, rather than a gap: **a Linux or macOS artifact cross-built *on* Windows
+records 0o644 for every file.** There is no mode word to read there, and the launcher repairs
+the execute bit only under the artifact's `erts-<vsn>/bin`, so a program shipped under
+`lib/<app>-<vsn>/priv/bin` would arrive without one. Build unix artifacts on a unix machine.
+
+`docs/adr/0015-windows-launcher-stays-resident.md` records why the launcher stays alive as the
+runtime's parent, and `docs/dev/log/D2.md` records the build sizes and the wine transcript.
 
 ## Documentation
 

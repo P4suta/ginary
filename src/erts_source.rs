@@ -8,11 +8,21 @@
 //! which is what the rest of the build reads.
 //!
 //! **This module is the single trust anchor.** Whatever the runtime came from,
-//! the real `beam.smp` is read with [`crate::elf`] and the target, the linkage
-//! and the minimum glibc are derived from *it*. A tarball whose name says
-//! `aarch64` and whose emulator is an x86-64 binary is caught here, at the one
-//! place that looks, rather than by a user whose loader refuses the artifact.
-//! Nothing downstream trusts a provenance string.
+//! the real emulator is read and the target, the linkage and the minimum glibc
+//! are derived from *it*. A tarball whose name says `aarch64` and whose
+//! emulator is an x86-64 binary is caught here, at the one place that looks,
+//! rather than by a user whose loader refuses the artifact. Nothing downstream
+//! trusts a provenance string.
+//!
+//! Which emulator, and which reader, is a property of the tree. A unix root's
+//! `erts-<vsn>/bin/beam.smp` is an ELF program read with [`crate::elf`]; a
+//! Windows root — the contents of `otp_win64_<version>.zip` — has no such file,
+//! and its `beam.smp.dll` is a PE image `erl.exe` loads, read straight from
+//! `object` for the reason `crate::stub` gives: a PE names no interpreter and
+//! the machine field is the whole question. The flavour test is
+//! [`crate::assemble::is_windows_erts_bin`], so assembly and this module cannot
+//! disagree about what a tree is, and a Windows tree handed to a Linux build is
+//! a target mismatch rather than a missing `beam.smp`.
 //!
 //! Four of the five sources are available. `host` and `dir:PATH` need nothing
 //! but a path and resolve through [`resolve`]; `catalog` and `tarball:PATH`
@@ -37,6 +47,8 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use object::Object as _;
+
 use crate::catalog::{CatalogError, CatalogPaths, EnsureContext, OtpReq};
 use crate::diag::Diag;
 use crate::download::Net;
@@ -45,8 +57,15 @@ use crate::manifest::{LibcRequirement, OtpProvenance};
 use crate::otp::{OtpError, OtpInfo};
 use crate::target::{Libc, Linkage, Target};
 
-/// The emulator every ERTS installation holds, and the file that is read.
+/// The emulator a unix ERTS installation holds, and the file that is read.
 pub const EMULATOR: &str = "beam.smp";
+
+/// The emulator a Windows ERTS installation holds, and the file that is read.
+///
+/// The unix tree's `beam.smp` is a program `erlexec` execs; the Windows tree's
+/// is a DLL `erl.exe` loads into its own process. Both are the runtime itself,
+/// so both are what the machine is read off.
+pub const WINDOWS_EMULATOR: &str = crate::target::WINDOWS_EMULATOR_DLL;
 
 /// The milestone `docker:IMAGE` arrives with.
 pub const IMAGE_MILESTONE: &str = "container image";
@@ -261,9 +280,15 @@ impl ResolvedErts {
     }
 }
 
-/// The emulator of a runtime root: `<root>/erts-<vsn>/bin/beam.smp`.
+/// The emulator of a unix runtime root: `<root>/erts-<vsn>/bin/beam.smp`.
 pub fn emulator_path(otp: &OtpInfo) -> PathBuf {
     otp.erts_bin.join(EMULATOR)
+}
+
+/// The emulator of a Windows runtime root:
+/// `<root>/erts-<vsn>/bin/beam.smp.dll`.
+pub fn windows_emulator_path(otp: &OtpInfo) -> PathBuf {
+    otp.erts_bin.join(WINDOWS_EMULATOR)
 }
 
 /// Why a runtime could not be resolved.
@@ -298,6 +323,27 @@ pub enum ErtsError {
     NeedsContext {
         /// The source, as it was written.
         spec: String,
+    },
+    /// The Windows emulator is not a PE image at all.
+    #[error(
+        "the emulator at {path} is not a Windows PE image ({reason}); a runtime for another \
+         target has to be a real cross-built tree, not a stand-in"
+    )]
+    NotAPeRuntime {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// What the reader said.
+        reason: String,
+    },
+    /// The Windows emulator is a PE for a machine ginary has no name for.
+    #[error(
+        "the emulator at {path} is a PE for {machine}, which is not a target ginary packages for"
+    )]
+    UnknownWindowsRuntimeTarget {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// The machine its header named, as `object` spells it.
+        machine: String,
     },
     /// The emulator is not an ELF binary at all.
     #[error(
@@ -366,7 +412,8 @@ pub enum ErtsError {
 /// Resolves one runtime and checks that it is the one the build asked for.
 ///
 /// `Host` discovers the installation `erl` reports and `Dir` inspects the root
-/// it names; both then read the emulator, and the target, the linkage and the
+/// it names; both then read the emulator — `beam.smp` on a unix tree,
+/// `beam.smp.dll` on a Windows one — and the target, the linkage and the
 /// minimum glibc come out of that file rather than out of the spelling.
 /// `catalog` and `tarball:PATH` are implemented and need a context this entry
 /// point has not got, so both earn [`ErtsError::NeedsContext`]; `docker:IMAGE`
@@ -388,6 +435,11 @@ pub fn resolve(spec: &ErtsSourceSpec, requested: &Target) -> Result<ResolvedErts
 /// emulator belongs, so the plumbing above the ELF reader — the provenance
 /// strings, the mismatch, the `nif_loading` rule — is reachable on a machine
 /// with no cross-built runtime on it.
+///
+/// It is the **ELF** seam. A tree
+/// [`crate::assemble::is_windows_erts_bin`] recognises is resolved by the
+/// Windows arm below, which reads a PE and never calls `inspect`; a Windows
+/// fixture therefore holds a real PE image rather than a script.
 ///
 /// # Errors
 ///
@@ -418,6 +470,18 @@ pub fn resolve_with(
             });
         }
     };
+
+    // Which object file is the evidence is a property of the tree, not of the
+    // request: a unix runtime's emulator is an ELF program and a Windows
+    // runtime's is a DLL, and neither reader can read the other's file. The
+    // flavour test is `assemble`'s, so assembly and this function cannot
+    // disagree about what a tree is. `inspect` is the ELF seam and is not
+    // consulted on this arm; a Windows emulator is read straight from
+    // `object`, the way `crate::stub` reads a Windows stub, because a PE names
+    // no interpreter and the machine field is the whole question.
+    if crate::assemble::is_windows_erts_bin(&otp.erts_bin) {
+        return resolve_windows(spec, requested, otp);
+    }
 
     // The trust anchor: from here on nothing the configuration said is used,
     // and every fact comes out of the emulator's own header.
@@ -474,6 +538,83 @@ pub fn resolve_with(
         // `host` and `dir:` make no claim a guard could disagree with.
         warnings: Vec::new(),
     })
+}
+
+/// The Windows arm of [`resolve_with`].
+///
+/// The same shape as the unix one and the same trust anchor: the machine comes
+/// off the emulator's own PE header rather than off the spelling that named
+/// the tree, so a Linux tree in a Windows build and an aarch64 tree in an
+/// x86-64 build are both [`ErtsError::TargetMismatch`] here rather than a
+/// loader error on somebody else's machine.
+///
+/// Three facts are not read, because a Windows runtime cannot vary in them. It
+/// is a set of DLLs `erl.exe` loads, so the linkage is [`Linkage::Dynamic`] and
+/// NIFs load; and Windows has one system C runtime, so the target's libc is
+/// [`Libc::None`] and there is no version floor to record.
+fn resolve_windows(
+    spec: &ErtsSourceSpec,
+    requested: &Target,
+    otp: OtpInfo,
+) -> Result<ResolvedErts, ErtsError> {
+    let emulator = windows_emulator_path(&otp);
+    let arch = read_pe_machine(&emulator)?;
+    let target = Target::new(crate::target::Os::Windows, arch, Libc::None);
+    if target != *requested {
+        return Err(ErtsError::TargetMismatch {
+            path: otp.root.clone(),
+            requested: *requested,
+            actual: target,
+        });
+    }
+
+    Ok(ResolvedErts {
+        libc_min: None,
+        nif_loading: Linkage::Dynamic.loads_nifs(),
+        provenance: match spec {
+            ErtsSourceSpec::Host => format!("host:{}", otp.root.display()),
+            other => other.label(),
+        },
+        otp,
+        target,
+        linkage: Linkage::Dynamic,
+        warnings: Vec::new(),
+    })
+}
+
+/// The architecture a PE image's COFF header names.
+///
+/// # Errors
+///
+/// [`ErtsError::NotAPeRuntime`] when the file cannot be read or is not a PE at
+/// all — an ELF `beam.smp` renamed into a Windows tree lands here — and
+/// [`ErtsError::UnknownWindowsRuntimeTarget`] when it is a PE for a machine
+/// ginary has no target for.
+fn read_pe_machine(emulator: &Path) -> Result<crate::target::Arch, ErtsError> {
+    let bytes = std::fs::read(emulator).map_err(|source| ErtsError::NotAPeRuntime {
+        path: emulator.to_path_buf(),
+        reason: source.to_string(),
+    })?;
+    let file = object::read::File::parse(&*bytes).map_err(|source| ErtsError::NotAPeRuntime {
+        path: emulator.to_path_buf(),
+        reason: source.to_string(),
+    })?;
+    let format = file.format();
+    let architecture = file.architecture();
+    if format != object::BinaryFormat::Pe {
+        return Err(ErtsError::NotAPeRuntime {
+            path: emulator.to_path_buf(),
+            reason: format!("it is {format:?}"),
+        });
+    }
+    match architecture {
+        object::Architecture::X86_64 => Ok(crate::target::Arch::X86_64),
+        object::Architecture::Aarch64 => Ok(crate::target::Arch::Aarch64),
+        other => Err(ErtsError::UnknownWindowsRuntimeTarget {
+            path: emulator.to_path_buf(),
+            machine: format!("{other:?}"),
+        }),
+    }
 }
 
 /// What the interpreter and the `DT_NEEDED` set together say about linkage.

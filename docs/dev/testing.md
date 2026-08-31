@@ -27,7 +27,7 @@
 | `tests/payload.rs` | the payload: deterministic packing, the round trip with modes, eight hand-built malicious archives, the two streaming reads, and three never-panic properties |
 | `tests/diag.rs` | the recorder through injected sinks: both output shapes, event order, elapsed time, and the four ways it stays off |
 | `src/error.rs` unit tests | the five exit codes, the message of each variant, the `hint:` second line, and the panic-hook line |
-| `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic |
+| `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic; the magic and the route are `cfg(unix)`, the other two hold on either platform |
 | `src/cache.rs` unit tests | the `Env` snapshot, the four resolution rules, the `TMPDIR` fallback and the entry path |
 | `src/fault.rs` unit tests | the `<point>[:<action>]` grammar, the closed set of actions resolved through `armed_by`, and that nothing is armed without the feature |
 | `src/launcher.rs` unit tests | the five `GINARY_CMD` values, that nothing near them is recognised, and the table `prune` and `uninstall` both print |
@@ -48,7 +48,7 @@
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
 | `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing; C4 adds the per-target columns of the native table — the rendered table over one verdict of each kind, and the verdicts a project's own configuration reaches over an object under `priv` |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
-| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator |
+| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs` |
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
@@ -62,6 +62,8 @@
 | `tests/native.rs` | the native half of a cross build, over fabricated objects: the scan — every object under `priv` in path order, the magic deciding rather than the extension, an ELF under `ebin` left alone, the format, machine and target of an ELF, a PE and a Mach-O, a library told from a program, the four files that begin like an object and are not one (a truncated ELF, a truncated Mach-O, a DOS `MZ`, an object past the size bound) and the directory a walk stopped at — and the reconciliation: an object already for the target kept, an override applied, verified, refused for the wrong machine and refused when it is not there, a static override accepted with a note, a hook's environment and working directory, a hook that writes nothing, a hook that fails, a hook that builds for the wrong machine, a hook that writes once and cannot answer for a second target, an override winning before a hook runs, the mismatch table and the same rows as an `--allow-native-mismatch` warning, the static-runtime refusal that the flag does not lift, `apply` over a staged tree, and the verdict of each artifact |
 | `tests/e2e_native.rs` | four-way gated: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
+| `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
+| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
 timeout runner moved there in A1a, because `otp::discover` needs the same
@@ -149,8 +151,8 @@ run compiles it to an empty test binary rather than to an error. Twenty-five of 
 targets are in that group. What is left runs in both flavors: `tests/launcher.rs`,
 `tests/launch.rs`, `tests/cache.rs`, `tests/cache_lock.rs`, `tests/payload.rs`,
 `tests/manifest.rs`, `tests/trailer.rs`, `tests/target.rs`, `tests/diag.rs`, `tests/formal.rs`,
-`tests/stubid.rs`, `tests/stub_flavor.rs` and 15 of the 68 modules of `tests/regressions.rs`,
-which are gated one `mod` line at a time.
+`tests/stubid.rs`, `tests/stub_flavor.rs`, `tests/windows.rs` and 19 of the 74 modules of
+`tests/regressions.rs`, which are gated one `mod` line at a time.
 
 That set is not an accident: it is exactly the modules a stub carries. `SyntheticArtifact` is
 built from `payload::pack`, `manifest::Index` and the staging *listing* types, and those are the
@@ -489,6 +491,31 @@ apostrophes in it and a single-quoted shell string cannot hold one. All three go
 `script::script` rather than the builder's own `write_executable`, because this is the one stub a
 test actually execs and that helper is what waits out the `ETXTBSY` window a sibling thread's
 `fork` opens.
+
+D2 added a fifth thing, and it keeps the rule above rather than stepping outside it:
+`FakeOtp::windows()` writes an `erts-<vsn>/bin` holding `erl.exe`, `beam.smp.dll`,
+`inet_gethost.exe` and the `erl.ini` beside them — the three names
+`assemble::WINDOWS_REQUIRED_BINS` requires and the file assembly deletes — plus whatever
+`extra_erts_bins` named. Everything else about the root is the unix builder's, because
+everything else about a Windows runtime is the same.
+
+Every `.exe` and `.dll` it writes is a real, if minimal, PE image: a DOS header whose
+`e_lfanew` points at the PE signature, a COFF header naming the machine, and a PE32+ optional
+header of the size that header declares. Nothing in one is executable and nothing needs to be —
+this machine could not run a PE anyway — but the machine field is real, because it is the one
+field a Windows runtime is read for. `FakeOtp::pe_machine` sets it, so a test about a runtime
+for the wrong architecture changes that number and nothing else. `erl.ini` stays text, which is
+what it is.
+
+So `otp::inspect_root` **accepts** a `FakeOtp::new().windows()` root, and the "no API for an
+invalid tree" rule holds for both flavours. It reads the flavour off the tree —
+`assemble::is_windows_erts_bin`, "does `erts-<vsn>/bin` hold `erl.exe`?" — and measures a
+Windows tree against `assemble::WINDOWS_REQUIRED_BINS` with no execute bit asked for, since a
+zip unpacked on this machine carries whatever the unzipper chose. `erts_source::resolve` reads
+the PE header of that tree's `beam.smp.dll` and answers `windows-x86_64`. A test that needs an
+incomplete tree removes a file from a whole one, which is the rule this section already states;
+the older Windows staging tests still hand `assemble::stage` an `OtpInfo` built by hand, which
+is four paths and two versions and every one of them is what the builder wrote.
 
 `DUMMY_BEAM` changed with them. It was twelve bytes — a bare `FOR1 <size> BEAM` with no chunks —
 which was enough for everything that only counted and copied files. Stripping *opens* the

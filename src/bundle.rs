@@ -67,7 +67,51 @@ pub const WORK_STAGE_NAME: &str = "root";
 pub const ARTIFACT_MODE: u32 = 0o755;
 
 /// The program the launcher execs, relative to `erts-<vsn>/bin`.
-pub const LAUNCH_PROGRAM: &str = "erlexec";
+///
+/// The unix name. [`crate::target::Target::launch_program`] is what a build
+/// asks, because a Windows artifact names `erl.exe` instead.
+pub const LAUNCH_PROGRAM: &str = crate::target::LAUNCH_PROGRAM;
+
+/// The sentence a Windows build with no Windows runtime is refused with.
+///
+/// A Windows ERTS tree is `otp_win64_<version>.zip` from `erlang/otp`, and
+/// nothing on a Linux build machine produces one: there is no host runtime to
+/// fall back to and no way to build one. So the refusal names where such a
+/// tree comes from rather than what is missing, and a build that already has
+/// one unpacked says so with `erts = "dir:<path>"`.
+pub const WINDOWS_ERTS_FROM_CATALOG: &str =
+    "windows ERTS trees arrive with the windows catalog entry";
+
+/// Refuses a Windows build whose runtime cannot be a Windows one.
+///
+/// `dir:` is the one source that can hold a tree somebody unpacked from the
+/// upstream zip, so it is the one source this milestone accepts; every other
+/// spelling — the host runtime, a catalogue with no Windows entry in it yet, a
+/// Linux tarball, a Docker image — would bundle a runtime that cannot run on
+/// the target and would only be found out by whoever ran the artifact.
+///
+/// A target that is not Windows is always accepted: this check has nothing to
+/// say about it.
+///
+/// # Errors
+///
+/// [`BundleError::WindowsErtsUnavailable`] naming the source that was asked
+/// for and [`WINDOWS_ERTS_FROM_CATALOG`].
+pub fn check_windows_erts(
+    target: Target,
+    spec: &crate::erts_source::ErtsSourceSpec,
+) -> Result<(), BundleError> {
+    if target.os != crate::target::Os::Windows {
+        return Ok(());
+    }
+    if matches!(spec, ErtsSourceSpec::Dir(_)) {
+        return Ok(());
+    }
+    Err(BundleError::WindowsErtsUnavailable {
+        target,
+        spec: spec.label(),
+    })
+}
 
 /// The boot script, relative to the extracted root and without `.boot`.
 pub const BOOT_SCRIPT: &str = "bin/no_dot_erlang";
@@ -88,10 +132,16 @@ pub const STAGED_SYS_CONFIG: &str = "releases/sys.config";
 /// the runtime looking for `sys.config.config`.
 pub const STAGED_CONFIG_ARG: &str = "releases/sys";
 
-/// The program a distributed artifact bundles beyond the required four.
+/// The program a distributed artifact bundles beyond the required ones.
+///
+/// The unix spelling. The build appends the target's [`Target::exe_suffix`],
+/// because the value is a file name in the runtime's own `bin` and a Windows
+/// tree spells it `epmd.exe`.
 pub const EPMD_BIN: &str = "epmd";
 
 /// The program an artifact under `heart` bundles.
+///
+/// The unix spelling, suffixed for a Windows target the way [`EPMD_BIN`] is.
 pub const HEART_BIN: &str = "heart";
 
 /// The mode the copied `vm.args` and `sys.config` are given.
@@ -799,6 +849,11 @@ fn build_each_target(
     for entry in stubs {
         let target = &entry.target;
         let spec = erts_spec_for(opts, *target)?;
+        // Before the runtime is fetched rather than after: a catalogue entry
+        // downloaded and then found to be the wrong operating system costs the
+        // user minutes and tells them nothing they could not have been told
+        // from `gleam.toml`.
+        check_windows_erts(*target, &spec)?;
         let erts = {
             let _phase = diag.phase("erts");
             match &sources {
@@ -924,7 +979,7 @@ fn assemble_and_write(
             set,
             otp,
             &StageOptions {
-                extra_bins: runtime_bins(opts),
+                extra_bins: runtime_bins(opts, target),
                 remove_junk: true,
                 force: true,
             },
@@ -1136,16 +1191,26 @@ fn write_manifest_copy(path: &Path, manifest: &Manifest) -> Result<(), BundleErr
     })
 }
 
-/// The programs to stage beyond the required four.
+/// The programs to stage beyond the runtime's required ones.
 ///
 /// The project's own `erts_extra_bins`, plus the one each runtime setting
 /// implies: a distributed artifact needs `epmd` and one under `heart` needs
 /// `heart`. Asking for a program twice stages it once.
-fn runtime_bins(opts: &BuildOptions) -> Vec<String> {
+///
+/// The two names ginary chooses carry [`Target::exe_suffix`], because a name
+/// here is a *file name in the runtime's `bin`* and a Windows tree spells them
+/// `epmd.exe` and `heart.exe`. Without the suffix a Windows build with
+/// `distribution` or `heart` stopped at staging with "the runtime has no
+/// `epmd`" — an error that blamed the runtime for a name ginary picked. The
+/// project's own names are left exactly as they were written: they name files
+/// in a tree the user is looking at, and a suffix appended to somebody else's
+/// spelling would be this function guessing.
+fn runtime_bins(opts: &BuildOptions, target: Target) -> Vec<String> {
     let mut bins = opts.erts_extra_bins.clone();
     let mut want = |name: &str| {
-        if !bins.iter().any(|existing| existing == name) {
-            bins.push(name.to_owned());
+        let name = format!("{name}{}", target.exe_suffix());
+        if !bins.contains(&name) {
+            bins.push(name);
         }
     };
     if opts.distribution {
@@ -1344,26 +1409,7 @@ fn manifest_for(
         target,
         otp_applications,
         gleam_applications,
-        launch: LaunchSpec {
-            program: LAUNCH_PROGRAM.to_owned(),
-            bindir: format!("erts-{}/bin", otp.erts_vsn),
-            boot: BOOT_SCRIPT.to_owned(),
-            pa,
-            eval: format!("'{0}@@main':run('{0}')", opts.app),
-            erl_flags: opts.erl_flags.clone(),
-            // Every one of these is additive and every one has a serde
-            // default, which is what keeps `format_version` at 1: an artifact
-            // this build writes still parses in a launcher that predates them.
-            args_file: opts.vm_args.as_ref().map(|_| STAGED_VM_ARGS.to_owned()),
-            config: opts
-                .sys_config
-                .as_ref()
-                .map(|_| STAGED_CONFIG_ARG.to_owned()),
-            distribution: opts.distribution,
-            filename_encoding: opts.filename_encoding.clone(),
-            heart: opts.heart,
-            env: opts.env.clone(),
-        },
+        launch: launch_spec(opts, target, otp, pa),
         // What the artifact ended up carrying, read back off the staged tree
         // after every replacement was applied; see [`native_manifest_rows`].
         native,
@@ -1371,6 +1417,47 @@ fn manifest_for(
         ginary_version: env!("CARGO_PKG_VERSION").to_owned(),
         extra: BTreeMap::new(),
     })
+}
+
+/// The launch specification the manifest carries, for one target.
+///
+/// Its own function because it is the one part of a manifest that differs
+/// between targets, and the difference is a single field: `program` is the
+/// name of the program the launcher starts the runtime with, which is
+/// `erlexec` everywhere and `erl.exe` on Windows. Everything else — the
+/// bindir, the boot script, the code path, the flags — is what was staged and
+/// what the project asked for, and is the same text on every machine.
+///
+/// A seam rather than a block inside [`manifest_for`], so that the rule can be
+/// checked without a project, a toolchain and a runtime: the value of this
+/// field decides whether a packaged application starts at all, and a build
+/// that got it wrong is found out on the user's machine.
+fn launch_spec(
+    opts: &BuildOptions,
+    target: Target,
+    otp: &crate::otp::OtpInfo,
+    pa: Vec<String>,
+) -> LaunchSpec {
+    LaunchSpec {
+        program: target.launch_program().to_owned(),
+        bindir: format!("erts-{}/bin", otp.erts_vsn),
+        boot: BOOT_SCRIPT.to_owned(),
+        pa,
+        eval: format!("'{0}@@main':run('{0}')", opts.app),
+        erl_flags: opts.erl_flags.clone(),
+        // Every one of these is additive and every one has a serde default,
+        // which is what keeps `format_version` at 1: an artifact this build
+        // writes still parses in a launcher that predates them.
+        args_file: opts.vm_args.as_ref().map(|_| STAGED_VM_ARGS.to_owned()),
+        config: opts
+            .sys_config
+            .as_ref()
+            .map(|_| STAGED_CONFIG_ARG.to_owned()),
+        distribution: opts.distribution,
+        filename_encoding: opts.filename_encoding.clone(),
+        heart: opts.heart,
+        env: opts.env.clone(),
+    }
 }
 
 /// Writes `<stub bytes><payload><trailer>` and renames it onto the output.
@@ -1496,6 +1583,20 @@ pub enum BundleError {
     /// The runtime for one target could not be resolved.
     #[error("cannot resolve the runtime to bundle")]
     Erts(#[from] crate::erts_source::ErtsError),
+    /// A Windows build named a runtime source that cannot hold a Windows tree.
+    #[error(
+        "cannot bundle a runtime for {target} from `{spec}`: {WINDOWS_ERTS_FROM_CATALOG}, or from a `dir:` source holding one"
+    )]
+    WindowsErtsUnavailable {
+        /// The target that was being built for.
+        target: Target,
+        /// The source that was asked for, as it was spelled.
+        ///
+        /// Not called `source`: that is the name `thiserror` reads as the
+        /// error this one wraps, and a runtime source is a string the user
+        /// wrote rather than a failure underneath.
+        spec: String,
+    },
     /// The build resolved no target at all.
     ///
     /// [`BuildOptions::merge`] cannot produce it: `--target`, then
@@ -1617,6 +1718,7 @@ mod tests {
 
     use super::*;
     use crate::config::{BuildFlags, ProjectConfig};
+    use crate::target::{Arch, Libc, Os};
 
     /// The options a project whose `[tools.ginary]` is `table` builds with.
     fn options(root: &Path, table: &str) -> BuildOptions {
@@ -1636,7 +1738,7 @@ mod tests {
     fn a_plain_build_stages_nothing_beyond_the_required_four() {
         let opts = options(Path::new("/w/hello"), "");
 
-        assert_eq!(runtime_bins(&opts), Vec::<String>::new());
+        assert_eq!(runtime_bins(&opts, Target::host()), Vec::<String>::new());
     }
 
     #[test]
@@ -1644,17 +1746,20 @@ mod tests {
         let root = Path::new("/w/hello");
 
         assert_eq!(
-            runtime_bins(&options(root, "distribution = true\n")),
+            runtime_bins(&options(root, "distribution = true\n"), Target::host()),
             vec![EPMD_BIN.to_owned()],
             "a distributed artifact has to carry the daemon it is allowed to start"
         );
         assert_eq!(
-            runtime_bins(&options(root, "heart = true\n")),
+            runtime_bins(&options(root, "heart = true\n"), Target::host()),
             vec![HEART_BIN.to_owned()],
             "and one under heart has to carry the program that restarts it"
         );
         assert_eq!(
-            runtime_bins(&options(root, "distribution = true\nheart = true\n")),
+            runtime_bins(
+                &options(root, "distribution = true\nheart = true\n"),
+                Target::host()
+            ),
             vec![EPMD_BIN.to_owned(), HEART_BIN.to_owned()],
             "both settings, both programs"
         );
@@ -1668,9 +1773,98 @@ mod tests {
         );
 
         assert_eq!(
-            runtime_bins(&opts),
+            runtime_bins(&opts, Target::host()),
             vec!["epmd".to_owned(), "dyn_erl".to_owned()],
             "the project's own order is kept and nothing is asked for twice"
+        );
+    }
+
+    #[test]
+    fn a_windows_build_asks_for_the_programs_by_the_names_the_tree_spells() {
+        let windows = Target::new(Os::Windows, Arch::X86_64, Libc::None);
+
+        assert_eq!(
+            runtime_bins(
+                &options(Path::new("/w/hello"), "distribution = true\nheart = true\n"),
+                windows
+            ),
+            vec!["epmd.exe".to_owned(), "heart.exe".to_owned()],
+            "a Windows ERTS tree ships `epmd.exe` and `heart.exe` and never \
+             `epmd` or `heart`, so asking for the unsuffixed names stops the \
+             build with an error that blames the runtime for a name ginary chose"
+        );
+        assert_eq!(
+            runtime_bins(
+                &options(
+                    Path::new("/w/hello"),
+                    "distribution = true\nerts_extra_bins = [\"epmd.exe\", \"erl_call.exe\"]\n"
+                ),
+                windows
+            ),
+            vec!["epmd.exe".to_owned(), "erl_call.exe".to_owned()],
+            "and a project that already spelled it out is not asked for twice"
+        );
+    }
+
+    // ------------------------------------------------ the launch spec --
+
+    /// A runtime as the manifest reads it: nothing but the version is used
+    /// here, and the version is what the bindir is named after.
+    fn otp_info() -> crate::otp::OtpInfo {
+        crate::otp::OtpInfo {
+            root: PathBuf::from("/opt/otp"),
+            release: 29,
+            erts_vsn: "17.0.5".to_owned(),
+            otp_version: "29.0.5".to_owned(),
+            erts_bin: PathBuf::from("/opt/otp/erts-17.0.5/bin"),
+            lib: PathBuf::from("/opt/otp/lib"),
+        }
+    }
+
+    #[test]
+    fn the_manifest_names_the_program_the_target_starts_its_runtime_with() {
+        let opts = options(Path::new("/w/hello"), "");
+        let windows = Target::new(Os::Windows, Arch::X86_64, Libc::None);
+
+        assert_eq!(
+            launch_spec(&opts, windows, &otp_info(), Vec::new()).program,
+            "erl.exe",
+            "a Windows runtime has no `erlexec`, so a manifest that named one \
+             would send the launcher looking for a file the artifact does not \
+             carry"
+        );
+        for target in crate::target::ALL {
+            let spec = launch_spec(&opts, target, &otp_info(), Vec::new());
+            assert_eq!(
+                spec.program,
+                target.launch_program(),
+                "{} starts its runtime with {}",
+                target.name(),
+                target.launch_program()
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_else_in_the_launch_spec_depends_on_the_target() {
+        let opts = options(Path::new("/w/hello"), "distribution = true\nheart = true\n");
+        let pa = vec!["lib/hello/ebin".to_owned()];
+        let unix = launch_spec(&opts, Target::host(), &otp_info(), pa.clone());
+        let windows = launch_spec(
+            &opts,
+            Target::new(Os::Windows, Arch::X86_64, Libc::None),
+            &otp_info(),
+            pa,
+        );
+
+        assert_eq!(
+            LaunchSpec {
+                program: unix.program.clone(),
+                ..windows
+            },
+            unix,
+            "the program is the whole of the difference, which is what lets one \
+             `launch::plan` serve both launchers"
         );
     }
 

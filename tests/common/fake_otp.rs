@@ -82,6 +82,12 @@ pub const DEFAULT_STDLIB_VSN: &str = "8.0.3";
 /// that needs a module with debug information in it writes one with
 /// [`beam_bytes`], in the open, the same way a test that needs a broken OTP
 /// root builds a whole one and breaks it.
+/// The COFF machine number a 64-bit x86 PE names, `IMAGE_FILE_MACHINE_AMD64`.
+pub const PE_MACHINE_AMD64: u16 = 0x8664;
+
+/// The COFF machine number a 64-bit ARM PE names, `IMAGE_FILE_MACHINE_ARM64`.
+pub const PE_MACHINE_ARM64: u16 = 0xaa64;
+
 pub const DUMMY_BEAM: &[u8] = b"FOR1\x00\x00\x00\x28BEAM\
 AtU8\x00\x00\x00\x04\x00\x00\x00\x00\
 Code\x00\x00\x00\x04\x00\x00\x00\x00\
@@ -309,6 +315,27 @@ pub struct FakeOtp {
     extra_erts_bins: Vec<String>,
     erl_script: Option<ErlScript>,
     apps: Vec<FakeApp>,
+    flavor: ErtsFlavor,
+    pe_machine: u16,
+}
+
+/// Which shape of `erts-<vsn>/bin` a [`FakeOtp`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErtsFlavor {
+    /// `beam.smp`, `erlexec`, `erl_child_setup` and `inet_gethost`, as
+    /// executable shell stubs.
+    Unix,
+    /// [`ginary::assemble::WINDOWS_REQUIRED_BINS`] and `erl.ini`.
+    ///
+    /// Every `.exe` and `.dll` is a real, if minimal, x86-64 PE image, and
+    /// `erl.ini` is text. Not scripts: nothing on this machine could execute a
+    /// PE, and what a Windows tree is read for is not whether a file runs but
+    /// which names are there and what the emulator's own header says it is
+    /// for. `ginary::erts_source::resolve` reads that header off
+    /// `beam.smp.dll`, so a tree whose emulator were a text file would be
+    /// refused as "not a PE image" and no test could reach the resolution it
+    /// is about.
+    Windows,
 }
 
 /// Which stub `bin/erl` a [`FakeOtp`] writes, if any.
@@ -354,11 +381,43 @@ impl FakeOtp {
             start_erl_data: true,
             extra_erts_bins: Vec::new(),
             erl_script: None,
+            flavor: ErtsFlavor::Unix,
+            pe_machine: PE_MACHINE_AMD64,
             apps: vec![
                 FakeApp::new("kernel", DEFAULT_KERNEL_VSN).mod_callback("kernel"),
                 FakeApp::new("stdlib", DEFAULT_STDLIB_VSN).applications(&["kernel"]),
             ],
         }
+    }
+
+    /// Writes a Windows `erts-<vsn>/bin` instead of a unix one.
+    ///
+    /// [`ErtsFlavor::Windows`]: the three names a Windows runtime must hold and
+    /// the `erl.ini` beside them, plus whatever
+    /// [`FakeOtp::extra_erts_bins`] named, as plain files. Everything
+    /// else about the root is unchanged — `bin/no_dot_erlang.boot`, `lib`,
+    /// `releases` — because everything else about a Windows runtime *is* the
+    /// same, which is what makes the launch spec the only thing that differs.
+    ///
+    /// A test that needs a tree with no `erl.ini` in it removes the file
+    /// itself, the way `tests/otp.rs` breaks a whole root rather than asking
+    /// the builder for a broken one.
+    #[must_use]
+    pub fn windows(mut self) -> Self {
+        self.flavor = ErtsFlavor::Windows;
+        self
+    }
+
+    /// The machine the Windows tree's PE images are built for.
+    ///
+    /// [`PE_MACHINE_AMD64`] unless a test asks otherwise. The one thing
+    /// `ginary::erts_source` reads off a Windows runtime is this number, so a
+    /// test about a runtime for the wrong architecture sets it and changes
+    /// nothing else.
+    #[must_use]
+    pub fn pe_machine(mut self, machine: u16) -> Self {
+        self.pe_machine = machine;
+        self
     }
 
     /// Sets the ERTS version, and with it the `erts-<vsn>` directory name.
@@ -486,16 +545,37 @@ impl FakeOtp {
 
         let erts_bin = root.join(format!("erts-{}", self.erts_vsn)).join("bin");
         create_dir_all(&erts_bin);
-        let bins = ginary::otp::REQUIRED_ERTS_BINARIES
-            .iter()
-            .map(|name| (*name).to_owned())
-            .chain(self.extra_erts_bins.iter().cloned());
-        for name in bins {
-            write_executable(
-                &erts_bin.join(&name),
-                format!("#!/bin/sh\n# fake {name} written by tests/common/fake_otp.rs\nexit 0\n")
-                    .as_bytes(),
-            );
+        match self.flavor {
+            ErtsFlavor::Unix => {
+                let bins = ginary::otp::REQUIRED_ERTS_BINARIES
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .chain(self.extra_erts_bins.iter().cloned());
+                for name in bins {
+                    write_executable(
+                        &erts_bin.join(&name),
+                        format!(
+                            "#!/bin/sh\n# fake {name} written by tests/common/fake_otp.rs\nexit 0\n"
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            ErtsFlavor::Windows => {
+                let bins = ginary::assemble::WINDOWS_REQUIRED_BINS
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .chain([ginary::assemble::WINDOWS_ERL_INI.to_owned()])
+                    .chain(self.extra_erts_bins.iter().cloned());
+                for name in bins {
+                    let bytes = if is_pe_name(&name) {
+                        minimal_pe(self.pe_machine)
+                    } else {
+                        format!("fake {name} written by tests/common/fake_otp.rs\n").into_bytes()
+                    };
+                    write(&erts_bin.join(&name), &bytes);
+                }
+            }
         }
 
         let lib = root.join("lib");
@@ -791,6 +871,57 @@ fn create_dir_all(path: &Path) {
 }
 
 /// Writes a file, failing the test if it cannot.
+/// Whether a name in a Windows `erts-<vsn>/bin` is one of its PE images.
+///
+/// `erl.ini` is the only file in a real Windows `bin` that is not one, and it
+/// is the file assembly deletes.
+fn is_pe_name(name: &str) -> bool {
+    Path::new(name).extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")
+    })
+}
+
+/// The smallest byte string `object` reads as an x86-64 PE image.
+///
+/// A DOS header whose `e_lfanew` points at `PE\0\0`, a COFF header naming
+/// `machine` and no sections, and a PE32+ optional header of the size that
+/// header declares. Nothing here is executable and nothing needs to be: what a
+/// Windows runtime is read for is the machine its emulator was built for, and
+/// that is the one field this writes on purpose.
+fn minimal_pe(machine: u16) -> Vec<u8> {
+    /// Where the PE signature is put, and what `e_lfanew` therefore holds.
+    const PE_OFFSET: u32 = 0x40;
+    /// The size of the PE32+ optional header written below: 112 bytes of
+    /// fields and sixteen 8-byte data directories.
+    const OPTIONAL_HEADER_SIZE: u16 = 240;
+    /// `IMAGE_NT_OPTIONAL_HDR64_MAGIC`.
+    const PE32_PLUS: u16 = 0x020b;
+    /// `IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LARGE_ADDRESS_AWARE`.
+    const CHARACTERISTICS: u16 = 0x0022;
+    /// Where `NumberOfRvaAndSizes` sits inside the optional header.
+    const RVA_COUNT_OFFSET: usize = 108;
+
+    let mut bytes = vec![0u8; PE_OFFSET as usize];
+    bytes[0] = b'M';
+    bytes[1] = b'Z';
+    bytes[0x3c..0x40].copy_from_slice(&PE_OFFSET.to_le_bytes());
+    bytes.extend_from_slice(b"PE\0\0");
+
+    bytes.extend_from_slice(&machine.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NumberOfSections
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // TimeDateStamp
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // PointerToSymbolTable
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // NumberOfSymbols
+    bytes.extend_from_slice(&OPTIONAL_HEADER_SIZE.to_le_bytes());
+    bytes.extend_from_slice(&CHARACTERISTICS.to_le_bytes());
+
+    let mut optional = vec![0u8; OPTIONAL_HEADER_SIZE as usize];
+    optional[0..2].copy_from_slice(&PE32_PLUS.to_le_bytes());
+    optional[RVA_COUNT_OFFSET..RVA_COUNT_OFFSET + 4].copy_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&optional);
+    bytes
+}
+
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));

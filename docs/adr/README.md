@@ -31,3 +31,5 @@ only partly built, the record says so under `Consequences`.
   published
 - [0014](0014-native-reconciliation-order.md) — Native code is reconciled in one order, and one
   refusal cannot be waived
+- [0015](0015-windows-launcher-stays-resident.md) — The Windows launcher stays resident, and
+  holds the lock itself

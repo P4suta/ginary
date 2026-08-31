@@ -11,7 +11,10 @@
 //! [`std::env::current_exe`] is the fallback, for a machine with no `/proc`
 //! mounted. It resolves a *path*, so it is a strictly weaker answer — a
 //! renamed artifact is already gone by the time it is used — which is why it
-//! is second rather than first.
+//! is second rather than first. On Windows it is not the fallback but the
+//! whole answer, and the weakness costs nothing there: an image section is
+//! held on a running executable, so the file cannot be replaced under the
+//! process the way it can on unix.
 //!
 //! The [`PathBuf`] the pair carries is for diagnostics only. Nothing reopens
 //! it, and nothing derives the cache key from it.
@@ -22,6 +25,10 @@ use std::path::PathBuf;
 use crate::error::LauncherError;
 
 /// The link the kernel resolves to the running executable's inode.
+///
+/// Unix only: there is nothing like it on Windows, where
+/// [`std::env::current_exe`] is the whole answer.
+#[cfg(unix)]
 pub const PROC_SELF_EXE: &str = "/proc/self/exe";
 
 /// Opens the running executable for reading.
@@ -35,6 +42,7 @@ pub const PROC_SELF_EXE: &str = "/proc/self/exe";
 /// [`LauncherError::SelfExe`] carrying the *fallback's* failure when neither
 /// route works. A machine with no `/proc` is the ordinary case for the first
 /// failure, so reporting it would send every reader down the wrong path.
+#[cfg(unix)]
 pub fn open_self() -> Result<(File, PathBuf), LauncherError> {
     if let Ok(file) = File::open(PROC_SELF_EXE) {
         // The link's target is a diagnostic, not a handle: the descriptor above
@@ -45,6 +53,32 @@ pub fn open_self() -> Result<(File, PathBuf), LauncherError> {
         return Ok((file, path));
     }
 
+    current_exe()
+}
+
+/// Opens the running executable for reading.
+///
+/// There is no `/proc` on Windows, so [`std::env::current_exe`] is not the
+/// fallback here, it is the whole of it. It answers with the path
+/// `GetModuleFileNameW` reports for the process image, which is a *path* rather
+/// than a handle on an inode — so, unlike the unix route, an artifact renamed
+/// while it is starting is no longer found. That costs nothing in practice on
+/// this platform for a reason that is worth stating: Windows holds an image
+/// section on a running executable, so the file cannot be replaced or deleted
+/// under the process the way it can on unix, and the failure this weaker answer
+/// admits is a rename between the process starting and this call, which is a
+/// window of microseconds.
+///
+/// # Errors
+///
+/// [`LauncherError::SelfExe`] when the path cannot be resolved or opened.
+#[cfg(windows)]
+pub fn open_self() -> Result<(File, PathBuf), LauncherError> {
+    current_exe()
+}
+
+/// The running executable, opened by the path the platform reports for it.
+fn current_exe() -> Result<(File, PathBuf), LauncherError> {
     let path = std::env::current_exe().map_err(LauncherError::SelfExe)?;
     let file = File::open(&path).map_err(LauncherError::SelfExe)?;
     Ok((file, path))
@@ -53,10 +87,12 @@ pub fn open_self() -> Result<(File, PathBuf), LauncherError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
+    #[cfg(unix)]
     #[test]
     fn open_self_opens_the_test_binary() {
+        use std::io::Read as _;
+
         let Ok((mut file, path)) = open_self() else {
             panic!("open_self must open the running test binary");
         };

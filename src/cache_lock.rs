@@ -67,6 +67,70 @@ pub const FILL_LOCK_BUDGET: Duration = Duration::from_secs(900);
 /// How often [`wait_exclusive`] retries inside [`FILL_LOCK_BUDGET`].
 const FILL_LOCK_POLL: Duration = Duration::from_millis(25);
 
+/// Which of the two locks a caller wants.
+///
+/// The unix implementation takes an advisory `flock` and the kind is the
+/// operation; the Windows implementation has no advisory lock at all and takes
+/// a *share mode* on the open handle instead, so the kind is what decides
+/// which sharing the handle refuses. See [`windows_share_mode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockKind {
+    /// The lock a running application holds on its own entry.
+    Shared,
+    /// The lock pruning needs before it may remove another.
+    Exclusive,
+}
+
+/// `FILE_SHARE_READ`: another handle may open the file for reading.
+pub const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+/// `FILE_SHARE_DELETE`: another handle may delete or rename the file — and,
+/// with it, the directory the file is in.
+///
+/// That second half is the reason it is here. Windows refuses to rename a
+/// directory that has open handles beneath it unless every one of those
+/// handles permits deletion, and [`crate::cache::prune_app`] renames a cache
+/// entry while still holding `<entry>/.lock` inside it. Without this bit every
+/// prunable entry is reported unremovable and `ginary cache prune` removes
+/// nothing.
+pub const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+
+/// The `dwShareMode` `<entry>/.lock` is opened with on Windows.
+///
+/// Windows has no `flock(2)`, and the advisory lock this module is built on
+/// does not exist there. What does exist is mandatory sharing on the handle
+/// itself: a file opened for writing with `FILE_SHARE_READ` can be opened
+/// again for reading and cannot be opened again for writing, and a file opened
+/// sharing no read or write access cannot be opened again for either. So the
+/// two locks become two share modes, and the correspondence is exact where it
+/// matters — several runtimes may hold one entry at once, and a prune that
+/// wants it exclusively is refused while any of them does.
+///
+/// Two differences a reader has to know about, both recorded in
+/// `docs/adr/0015-windows-launcher-stays-resident.md`:
+///
+/// - the lock is *mandatory* rather than advisory, so a program that knows
+///   nothing about ginary is held to it too;
+/// - it belongs to the handle rather than to an open file description, and
+///   there is no `execve` for it to survive, which is why the Windows launcher
+///   stays alive as the runtime's parent and holds the lock itself.
+pub const fn windows_share_mode(kind: LockKind) -> u32 {
+    match kind {
+        // The runtime opens the file for reading only and lets other readers
+        // in, so every launcher of the same entry gets its handle and the
+        // prune below gets none of them.
+        LockKind::Shared => FILE_SHARE_READ,
+        // No reading and no writing: an entry a prune can open is an entry no
+        // runtime is holding. Deletion is the one thing it does share, and it
+        // shares it with itself — the prune renames the entry directory while
+        // this handle is still open inside it, which Windows refuses for a
+        // directory whose open handles do not permit it. Sharing deletion says
+        // nothing about read or write access, so what the two locks mean to
+        // each other is unchanged.
+        LockKind::Exclusive => FILE_SHARE_DELETE,
+    }
+}
+
 /// `<entry>/.lock`, the file both locks are taken on.
 pub fn lock_path(entry: &Path) -> PathBuf {
     entry.join(LOCK_NAME)
@@ -101,6 +165,7 @@ impl SharedLock {
     /// caller on the launcher path treats every one of them as "no lock"
     /// rather than as a reason not to start: a cache entry that could not be
     /// locked is a pruning risk, and refusing to run would be worse.
+    #[cfg(unix)]
     pub fn acquire(entry: &Path) -> std::io::Result<Self> {
         let path = lock_path(entry);
         let file = open_lock(&path)?;
@@ -115,6 +180,38 @@ impl SharedLock {
             match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
                 Ok(()) => return Ok(Self { file, path }),
                 Err(error) if Instant::now() >= deadline => return Err(error.into()),
+                Err(_) => std::thread::sleep(SHARED_LOCK_POLL),
+            }
+        }
+    }
+
+    /// Opens `<entry>/.lock` for reading with [`windows_share_mode`]'s shared
+    /// mode, and holds it.
+    ///
+    /// The Windows half of the same contract, reached by a different mechanism.
+    /// There is no advisory lock and nothing to inherit across an `execve` that
+    /// does not exist, so what makes the entry unremovable is the open handle
+    /// itself: it asks for read access and shares read access, so another
+    /// launcher's identical open succeeds and [`try_exclusive`]'s open — which
+    /// shares no read access — is refused for as long as any of them is held. The
+    /// launcher keeps this value alive for the runtime's whole lifetime, which
+    /// is why the Windows launcher does not exit at the spawn.
+    ///
+    /// Never blocks, and retries for [`SHARED_LOCK_BUDGET`], for the reason the
+    /// unix half does.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the last open failed with, which a caller on the launcher path
+    /// treats as "no lock" rather than as a reason not to start.
+    #[cfg(windows)]
+    pub fn acquire(entry: &Path) -> std::io::Result<Self> {
+        let path = lock_path(entry);
+        let deadline = Instant::now() + SHARED_LOCK_BUDGET;
+        loop {
+            match open_windows_shared(&path) {
+                Ok(file) => return Ok(Self { file, path }),
+                Err(error) if Instant::now() >= deadline => return Err(error),
                 Err(_) => std::thread::sleep(SHARED_LOCK_POLL),
             }
         }
@@ -163,6 +260,7 @@ impl ExclusiveLock {
 /// are "leave this entry alone", because the cost of skipping an entry is a
 /// directory that stays on disk and the cost of removing one wrongly is a
 /// running application losing its runtime.
+#[cfg(unix)]
 pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
     let path = lock_path(entry);
     let file = open_lock(&path).ok()?;
@@ -170,6 +268,21 @@ pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
     // is held, and a descriptor that leaked into a child would keep an entry
     // locked long after the pruning that took it had finished.
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
+    Some(ExclusiveLock { file, path })
+}
+
+/// Opens `<entry>/.lock` sharing only deletion, or answers [`None`].
+///
+/// The Windows half of [`try_exclusive`], and it answers [`None`] in exactly
+/// the same two cases: a runtime holds the entry — its handle shares read
+/// access, and this open asks for write access as well as read — or the lock
+/// file could not be opened at all. Both mean "leave this entry alone". What
+/// this handle shares is [`FILE_SHARE_DELETE`] and nothing else, so the answer
+/// above is unchanged and the caller may rename the entry it is inside.
+#[cfg(windows)]
+pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
+    let path = lock_path(entry);
+    let file = open_windows_exclusive(&path).ok()?;
     Some(ExclusiveLock { file, path })
 }
 
@@ -188,6 +301,7 @@ pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
 /// Whatever the open or the last `flock` failed with, and
 /// [`std::io::ErrorKind::WouldBlock`] when `budget` ran out with the lock
 /// still held elsewhere.
+#[cfg(unix)]
 pub fn wait_exclusive(entry: &Path, budget: Duration) -> std::io::Result<ExclusiveLock> {
     let path = lock_path(entry);
     let file = open_lock(&path)?;
@@ -195,6 +309,33 @@ pub fn wait_exclusive(entry: &Path, budget: Duration) -> std::io::Result<Exclusi
     loop {
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(ExclusiveLock { file, path }),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("{} is held by another process: {error}", path.display()),
+                ));
+            }
+            Err(_) => std::thread::sleep(FILL_LOCK_POLL),
+        }
+    }
+}
+
+/// Opens `<entry>/.lock` sharing only deletion, retrying up to `budget`.
+///
+/// The Windows half of [`wait_exclusive`]. The open is retried rather than the
+/// lock, because on Windows the open *is* the lock.
+///
+/// # Errors
+///
+/// [`std::io::ErrorKind::WouldBlock`] when `budget` ran out with the entry
+/// still held elsewhere, carrying the last open's failure in its message.
+#[cfg(windows)]
+pub fn wait_exclusive(entry: &Path, budget: Duration) -> std::io::Result<ExclusiveLock> {
+    let path = lock_path(entry);
+    let deadline = Instant::now() + budget;
+    loop {
+        match open_windows_exclusive(&path) {
+            Ok(file) => return Ok(ExclusiveLock { file, path }),
             Err(error) if Instant::now() >= deadline => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -217,5 +358,62 @@ fn open_lock(path: &Path) -> std::io::Result<File> {
         .write(true)
         .create(true)
         .truncate(false)
+        .open(path)
+}
+
+/// Opens `<entry>/.lock` the way a running application holds it on Windows.
+///
+/// Read access only, sharing read access. Both halves matter. Asking for read
+/// access alone is what lets a second launcher of the same entry open it too —
+/// two handles that each share read access are compatible with each other, and
+/// two that asked for write access would not be. Sharing read access alone is
+/// what refuses [`open_windows_exclusive`], which asks for write access.
+///
+/// The share-mode open is tried **first**, and the file is created only when
+/// there is not one. The order is the whole correctness of the function. A
+/// create needs write access, and a launcher that already holds this lock
+/// permits read access and nothing else, so a create attempted first is
+/// refused with a sharing violation and the second launcher of an entry ends
+/// up with no lock at all — the opposite of what the shared lock is for. A
+/// write handle is needed on an entry's very first lock and never again: when
+/// a shared holder exists, so does the file. A prune that took the entry in
+/// between is what the retry loop in [`SharedLock::acquire`] is for.
+#[cfg(windows)]
+fn open_windows_shared(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let shared = || {
+        File::options()
+            .read(true)
+            .share_mode(windows_share_mode(LockKind::Shared))
+            .open(path)
+    };
+    match shared() {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            drop(open_lock(path)?);
+            shared()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Opens `<entry>/.lock` the way pruning holds it on Windows.
+///
+/// Read and write access, sharing only deletion: an open that succeeds proves
+/// no runtime holds the entry, and holds it against every one that arrives
+/// while the prune runs. Deletion is shared because the prune's own next step
+/// is to rename the entry directory this handle is inside; see
+/// [`FILE_SHARE_DELETE`].
+#[cfg(windows)]
+fn open_windows_exclusive(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(windows_share_mode(LockKind::Exclusive))
         .open(path)
 }

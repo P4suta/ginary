@@ -1,0 +1,19 @@
+---
+source: tests/windows.rs
+expression: table
+---
+GINARY_CACHE_DIR set
+  provenance: GINARY_CACHE_DIR
+  fallback: false
+GINARY_CACHE_DIR empty, LOCALAPPDATA set
+  provenance: LOCALAPPDATA
+  fallback: false
+LOCALAPPDATA set
+  provenance: LOCALAPPDATA
+  fallback: false
+LOCALAPPDATA empty, TEMP set
+  provenance: TEMP fallback
+  fallback: true
+nothing set
+  provenance: TEMP fallback
+  fallback: true

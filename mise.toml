@@ -198,6 +198,44 @@ java -XX:+UseParallelGC -jar "$jar" \
   "$root/formal/Cache.tla"
 """
 
+[tasks."build:windows"]
+description = "Cross-build both flavors of ginary for x86_64-pc-windows-gnu and print their sizes"
+# The compile-time half of Windows support, and the only gate there is for it
+# on a Linux machine. Both flavors, because a `cfg` split that compiles one of
+# them is half a split: the launcher-only stub is what a Windows artifact is
+# made of, and the full command line tool is what has to keep compiling for a
+# target whose `std` has no `flock`, no mode bits and no `execve`.
+#
+# `cross`, not `cargo`: `zstd-sys` is C, and building it for this triple needs
+# the mingw toolchain that lives in the cross image and not on this host.
+#
+# What this task does *not* prove is that any of it runs. There is no Windows
+# machine and no `erl.exe` here, so the launcher's spawn, its job object and
+# its console handler are compiled and nothing more. See `docs/dev/log/D2.md`
+# and the `## Windows` section of `README.md`.
+run = '''
+set -eu
+root="${MISE_PROJECT_ROOT:-$PWD}"
+cd "$root"
+# The same separate target directory `stubs:build` uses, and for the same
+# reason: a build script compiled against this machine's glibc will not run in
+# the container.
+export CARGO_TARGET_DIR=target/cross
+triple=x86_64-pc-windows-gnu
+
+echo "build:windows: launcher-only stub ($triple)"
+cross build --release --target "$triple" --no-default-features
+stub=$(stat -c %s "target/cross/$triple/release/ginary.exe")
+
+echo "build:windows: full command line tool ($triple)"
+cross build --release --target "$triple"
+full=$(stat -c %s "target/cross/$triple/release/ginary.exe")
+
+echo
+printf "  %-28s %10d bytes\n" "stub (--no-default-features)" "$stub"
+printf "  %-28s %10d bytes\n" "full (default features)" "$full"
+'''
+
 [tasks."stubs:build"]
 description = "Cross-build the launcher-only stubs into target/stubs and print their sizes"
 # The developer's stub directory. `ginary build --target <t>` looks in

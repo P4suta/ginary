@@ -114,13 +114,28 @@ impl ObjectFormat {
 /// An ELF `e_type` does not answer it on its own — a position-independent
 /// program is an `ET_DYN` like every shared library — so the ELF branch reads
 /// `DF_1_PIE` as well; see [`crate::elf::ElfInfo::is_pie`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeKind {
     /// A shared object: a NIF, a driver, or a library one of them needs.
     SharedObject,
     /// A program the application runs as a child process.
     Executable,
+    /// An unlinked object file: an ELF `ET_REL`, or the same shape in another
+    /// format.
+    ///
+    /// Nothing loads one, and it is named rather than folded into
+    /// [`NativeKind::Unknown`] because a build system that left a `.o` under
+    /// `priv` is a different thing to fix than a file nobody could read.
+    Relocatable,
+    /// A core dump: an ELF `ET_CORE`, or the same shape in another format.
+    Core,
+    /// An ELF whose `e_type` is none of the above, carrying the number the
+    /// header held.
+    ///
+    /// A processor-specific or operating-system-specific type, or a header
+    /// holding a number no standard assigns. The number travels because it is
+    /// the only thing anybody can act on.
+    ElfType(u16),
     /// A file whose magic says it is an object and which will not parse.
     Unknown,
 }
@@ -143,17 +158,56 @@ pub const fn kind_of_elf(kind: crate::elf::ElfKind, is_pie: bool) -> NativeKind 
         crate::elf::ElfKind::SharedObject if is_pie => NativeKind::Executable,
         crate::elf::ElfKind::SharedObject => NativeKind::SharedObject,
         crate::elf::ElfKind::Executable => NativeKind::Executable,
-        _ => NativeKind::Unknown,
+        crate::elf::ElfKind::Relocatable => NativeKind::Relocatable,
+        crate::elf::ElfKind::Core => NativeKind::Core,
+        // Not [`NativeKind::Unknown`]: the header said what it was, and a
+        // column that prints `unknown` over a number the file states is a
+        // report that knows more than it says.
+        crate::elf::ElfKind::Other(e_type) => NativeKind::ElfType(e_type),
     }
 }
 
-impl NativeKind {
+impl Serialize for NativeKind {
+    /// One string, always, whatever the header held.
+    ///
+    /// `Serialize` by hand rather than derived, because the derive spells
+    /// [`NativeKind::ElfType`] as `{"elf_type": 65024}` and every other variant
+    /// as a string: `ginary doctor --json`'s `native[].kind` would change type
+    /// depending on the file it describes, which is the one thing a
+    /// machine-readable report may not do. The words are the ones
+    /// [`NativeKind`]'s [`Display`] prints in the table beside it, so the two
+    /// renderings of the same report cannot disagree — except in the four
+    /// two-word names, which keep the `snake_case` spelling the derive gave
+    /// them because a field a reader already parses may not be renamed for
+    /// tidiness.
+    ///
+    /// [`Display`]: std::fmt::Display
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match *self {
+            Self::SharedObject => serializer.serialize_str("shared_object"),
+            Self::Executable => serializer.serialize_str("executable"),
+            Self::Relocatable => serializer.serialize_str("relocatable"),
+            Self::Core => serializer.serialize_str("core"),
+            Self::ElfType(e_type) => serializer.serialize_str(&format!("e_type {e_type}")),
+            Self::Unknown => serializer.serialize_str("unknown"),
+        }
+    }
+}
+
+impl std::fmt::Display for NativeKind {
     /// The words this kind prints as in a table.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SharedObject => "shared object",
-            Self::Executable => "executable",
-            Self::Unknown => "unknown",
+    ///
+    /// [`NativeKind::ElfType`] prints as `e_type <n>`, which is the header
+    /// field spelled the way `readelf` spells it, because the number is the
+    /// whole of what is known about such a file.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::SharedObject => f.write_str("shared object"),
+            Self::Executable => f.write_str("executable"),
+            Self::Relocatable => f.write_str("relocatable"),
+            Self::Core => f.write_str("core"),
+            Self::ElfType(e_type) => write!(f, "e_type {e_type}"),
+            Self::Unknown => f.write_str("unknown"),
         }
     }
 }
@@ -796,6 +850,8 @@ fn describe_with_object_crate(format: ObjectFormat, bytes: &[u8]) -> ObjectDescr
         kind: match file.kind() {
             object::ObjectKind::Dynamic => NativeKind::SharedObject,
             object::ObjectKind::Executable => NativeKind::Executable,
+            object::ObjectKind::Relocatable => NativeKind::Relocatable,
+            object::ObjectKind::Core => NativeKind::Core,
             _ => NativeKind::Unknown,
         },
         facts: Some(ObjectFacts {

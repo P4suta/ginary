@@ -89,6 +89,92 @@ application starts.
 else in the application directory is left where it is, `erl_crash.dump` included, which is why
 that directory survives an uninstall when a dump is in it.
 
+### On Windows: where the cache is, and what holds it
+
+Neither of the two mechanisms above exists on Windows, so both are replaced. Nothing here has
+run on a Windows machine yet — see the [Windows](../../README.md#windows) section of the README
+for what that leaves untested — but this is what the code does, and it is where to look first.
+
+**The cache root** is resolved by the same precedence with two different variables in the
+middle:
+
+| order | root | provenance `ginary cache dir` prints |
+|---|---|---|
+| 1 | `%GINARY_CACHE_DIR%`, verbatim | `GINARY_CACHE_DIR` |
+| 2 | `%LOCALAPPDATA%\ginary` | `LOCALAPPDATA` |
+| 3 | `%TEMP%\ginary-<user>`, then `%TMP%`, then `C:\Windows\Temp` | `TEMP fallback` |
+
+An exported-but-empty variable counts as unset, exactly as it does on unix. `LOCALAPPDATA` is
+the per-user, non-roaming directory, which is what a cache of extracted runtimes should be —
+`APPDATA` roams, and a domain login would carry forty megabytes of BEAM across the network.
+The `<user>` component of the fallback comes from `%USERNAME%`; a value that is not one path
+component, or is not set at all, becomes `unknown`, because a cache in the wrong directory is a
+much bigger problem than one nobody can tell apart. The fallback root is *created* but not
+proved to be this user's the way the unix `${TMPDIR}/ginary-<uid>` is: `%TEMP%` is per-account
+and carries the ACL that says so, and writing one by hand is Win32 security work D2 does not do.
+
+Extraction paths go through the `\\?\` prefix (`\\?\UNC\server\share` for a UNC root), which
+skips the `MAX_PATH` normalisation. A cache entry is
+`%LOCALAPPDATA%\ginary\<app>\<key>\lib\<name>-<vsn>\ebin\<module>.beam`, which is a hundred
+and fifty characters before the application is named, so a deep home directory is exactly the
+shape that would otherwise fail in the middle of an extraction.
+
+The prefix goes on **once**, at `CacheDirs::extraction_dir`, and everything an extraction writes
+is joined onto that: the temporary tree, every file the unpacker creates, the per-file flush that
+reopens each of them, and both ends of the rename. A path joined onto a verbatim path is verbatim
+too, which is what makes one call enough — prefixing only the unpacker's destination moved the
+limit one step later, into the flush.
+
+`ensure_extracted` **answers with that same spelling**, and the rule the two helpers in
+`src/winpath.rs` state is one sentence: *ginary opens the verbatim spelling and hands `erl.exe`
+the ordinary one.* So the cache-hit check, the `<entry>\.lock` open, the manifest probe and
+`launch::preflight` all open the directory the extraction created, and `GINARY_TRACE` shows
+verbatim paths for `cache_tmp`, `cache_hit` and `rename` alike.
+
+The prefix comes off **once** too, in `launch::plan`, which is where a cache path stops being
+ginary's business: `ROOTDIR`, `BINDIR`, `HOME` and every path in the argument vector are put
+back into the ordinary spelling with `winpath::plain_path`, because `erl.exe` takes those apart
+and reassembles them rather than merely opening them. The one path the plan keeps verbatim is
+the program the launcher spawns itself. The `launch` trace record therefore shows a verbatim
+`program` beside an ordinary `ROOTDIR`, and that is not a bug.
+
+The limit that remains is `erl.exe`'s. An entry past `MAX_PATH` extracts, is found, is locked
+and passes preflight, and then the runtime will not start out of it, because what the runtime
+was handed is the ordinary spelling. Nothing here can fix that from ginary's side.
+
+**The lock** is not an `flock` — Windows has none. `<entry>\.lock` is opened with a *share mode*
+instead, and the two locks become two share modes:
+
+| lock | access asked for | `dwShareMode` |
+|---|---|---|
+| a running application's | read | `FILE_SHARE_READ` |
+| a prune's | read and write | `FILE_SHARE_DELETE` |
+
+Two launchers of one entry both succeed — each asks for read access and each permits it — and a
+prune is refused for as long as either holds it. The prune's `FILE_SHARE_DELETE` shares no
+reading and no writing, so that answer is unchanged; what it permits is the prune's own next
+step. It renames the entry directory while still holding `<entry>\.lock` inside it, and Windows
+refuses to rename a directory whose open handles do not permit deletion — without the bit every
+prunable entry would be reported unremovable and `ginary cache prune` would remove nothing. The
+lock is not dropped before the rename instead, because that would reopen the window between
+"nobody holds this" and "it is gone" that the lock exists to close.
+
+Three differences from the unix side are worth knowing when a Windows entry will not go away:
+
+- the lock is **mandatory**, not advisory, so any program with `<entry>\.lock` open for writing
+  blocks a prune, including one that has never heard of ginary;
+- it belongs to the **handle**, and there is no `execve` for it to survive, so the launcher
+  stays alive as the runtime's parent and holds it itself. `Get-Process` shows two processes,
+  the artifact and `erl.exe` under it;
+- a launcher that is killed takes the runtime with it, because the child is in a job object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. That is the *replacement* for the inherited descriptor:
+  without it a killed launcher would leave a `beam.smp` holding an entry nothing releases.
+
+Mode bits are a no-op throughout: `chmod` records `files=0` in the trace, nothing under the
+bindir is made executable because there is no bit to set, and the `mode` column of
+`ginary.index.json` is informational on a Windows artifact — it holds what the archive header
+said, and nothing reads it back to enforce anything.
+
 ## Diagnosing the environment today
 
 ```console

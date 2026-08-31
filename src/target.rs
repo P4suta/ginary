@@ -212,6 +212,41 @@ pub const ALL: [Target; 7] = [
     Target::new(Os::Windows, Arch::X86_64, Libc::None),
 ];
 
+/// The program a unix runtime is started with, `erlexec`.
+///
+/// It is what computes `ROOTDIR`, `BINDIR` and the emulator's own argument
+/// vector out of the environment the launcher sets, and then execs
+/// `beam.smp`. [`crate::bundle::LAUNCH_PROGRAM`] is the build side's name for
+/// it; this one is here because [`Target::launch_program`] is on the launcher
+/// path, where the build side does not exist.
+pub const LAUNCH_PROGRAM: &str = "erlexec";
+
+/// The program a Windows runtime is started with, `erl.exe`.
+///
+/// There is no `erlexec` in a Windows tree. `erl.exe` takes its own directory
+/// as the `bin`, the directory two levels above it as the root, and loads the
+/// emulator as a DLL into its own process, which is why a Windows launcher
+/// spawns and waits rather than execs. [`crate::assemble::WINDOWS_LAUNCH_BINARY`]
+/// is the build side's name for it.
+pub const WINDOWS_LAUNCH_PROGRAM: &str = "erl.exe";
+
+/// The emulator a Windows `erl.exe` loads into its own process.
+///
+/// The unix tree's `beam.smp` is a program `erlexec` execs; the Windows tree's
+/// is a DLL, so an artifact needs it for the same reason and finds it by a
+/// different rule. [`crate::assemble::WINDOWS_EMULATOR_DLL`] is the build
+/// side's name for it; this one is here because
+/// [`crate::launch::preflight`] is on the launcher path.
+pub const WINDOWS_EMULATOR_DLL: &str = "beam.smp.dll";
+
+/// The port program a Windows runtime resolves host names with.
+///
+/// `inet_gethost` under another spelling. It is in
+/// [`crate::otp::REQUIRED_ERTS_BINARIES`] on unix for the reason it is
+/// required here — a runtime without it resolves no host name — and a Windows
+/// ERTS tree ships it as `inet_gethost.exe`.
+pub const WINDOWS_RESOLVER_PROGRAM: &str = "inet_gethost.exe";
+
 impl Target {
     /// Builds a target without checking that the combination is supported.
     ///
@@ -253,6 +288,24 @@ impl Target {
             // Not in `ALL`, rejected by `FromStr`, and no runtime is published
             // for it. Kept only so the match is exhaustive.
             (Os::Windows, Arch::Aarch64, _) => "aarch64-pc-windows-gnu",
+        }
+    }
+
+    /// Returns the name of the program the launcher starts the runtime with.
+    ///
+    /// `erlexec` everywhere but Windows, where it is `erl.exe`. The difference
+    /// is not a spelling: `erlexec` is the program that computes `ROOTDIR`,
+    /// `BINDIR` and the emulator's own argument vector out of the environment
+    /// the launcher sets, and the Windows runtime has no such program —
+    /// `erl.exe` locates its `bin` from its own path, takes the root two levels
+    /// above it, and loads the emulator as a DLL in its own process.
+    ///
+    /// It is the value [`crate::manifest::LaunchSpec::program`] carries, so a
+    /// launcher reads it out of the artifact rather than deciding it again.
+    pub const fn launch_program(self) -> &'static str {
+        match self.os {
+            Os::Windows => WINDOWS_LAUNCH_PROGRAM,
+            Os::Linux | Os::Macos => LAUNCH_PROGRAM,
         }
     }
 

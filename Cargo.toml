@@ -44,13 +44,6 @@ object = { version = "0.40.0", default-features = false, features = [
   "pe",
   "std",
 ] }
-# Two system calls the launcher cannot do without and the standard library does
-# not expose: `getuid` for the `${TMPDIR}/ginary-<uid>` fallback, and `syncfs`
-# for the one-call durability barrier before a cache entry is renamed into
-# place. rustix wraps both safely, so the crate keeps `#![forbid(unsafe_code)]`
-# rather than opening an `unsafe` block on the launcher path; on Linux it uses
-# its own raw syscall backend, so nothing new is dynamically linked.
-rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 # The payload's checksum, the trailer's `sha256` and every entry of the index.
@@ -76,6 +69,33 @@ toml = { version = "0.9.12", default-features = false, features = ["parse", "ser
 # because a thread count that varies with the machine varies the output bytes.
 zstd = { version = "0.13.3", default-features = false }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip", "platform-verifier"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Three system calls the launcher cannot do without and the standard library
+# does not expose: `getuid` for the `${TMPDIR}/ginary-<uid>` fallback, `flock`
+# for the lock a running application holds on its cache entry, and `syncfs` for
+# the one-call durability barrier before an entry is renamed into place. rustix
+# wraps all three safely, so the unix launcher path opens no `unsafe` block; on
+# Linux it uses its own raw syscall backend, so nothing new is dynamically
+# linked. Unix only: none of the three exists on Windows, which takes a share
+# mode on the handle and a per-file `fsync` instead. See `src/cache_lock.rs`.
+rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# The two Win32 facilities the Windows launcher is built on, and nothing else.
+# `SetConsoleCtrlHandler` keeps Ctrl-C from killing the launcher out from under
+# the runtime it is waiting for, and a job object with
+# `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` makes a killed launcher take the runtime
+# with it rather than leaving an orphan holding a cache entry. Both are needed
+# because Windows has no `execve`: the launcher stays resident as the runtime's
+# parent. See `docs/adr/0015-windows-launcher-stays-resident.md`.
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"

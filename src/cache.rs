@@ -62,6 +62,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use rustix::io::Errno;
 
 use crate::diag::Diag;
@@ -100,6 +101,37 @@ pub const HOME_VAR: &str = "HOME";
 
 /// The temporary directory the fallback root lives in.
 pub const TMPDIR_VAR: &str = "TMPDIR";
+
+/// The Windows per-user application data directory, `%LOCALAPPDATA%`.
+///
+/// The Windows counterpart of `XDG_CACHE_HOME`: a per-user directory that is
+/// not roamed, which is exactly what a cache of extracted runtimes should not
+/// be. `ginary` is appended to it.
+pub const LOCALAPPDATA_VAR: &str = "LOCALAPPDATA";
+
+/// The Windows temporary directory, `%TEMP%`.
+pub const TEMP_VAR: &str = "TEMP";
+
+/// The older spelling of [`TEMP_VAR`], read when it is not set.
+pub const TMP_VAR: &str = "TMP";
+
+/// The user name the Windows fallback root carries.
+///
+/// The counterpart of the uid in `${TMPDIR}/ginary-<uid>`: a temporary
+/// directory can be shared, so the name says whose cache this is.
+pub const USERNAME_VAR: &str = "USERNAME";
+
+/// The temporary directory the Windows fallback falls back to.
+///
+/// Windows sets `%TEMP%` for every interactive process, so this is reached
+/// only by a service or a scrubbed environment. It is the machine-wide
+/// directory Windows itself guarantees, and the `<user>` component keeps two
+/// accounts on one machine apart inside it.
+pub const WINDOWS_DEFAULT_TEMP: &str = r"C:\Windows\Temp";
+
+/// The user the Windows fallback root is named after when `%USERNAME%` is not
+/// set.
+pub const UNKNOWN_USER: &str = "unknown";
 
 /// A snapshot of the process environment.
 ///
@@ -165,6 +197,10 @@ pub enum Origin {
     Home,
     /// `${TMPDIR:-/tmp}/ginary-<uid>`.
     Fallback,
+    /// `%LOCALAPPDATA%\ginary`, on Windows.
+    LocalAppData,
+    /// `%TEMP%\ginary-<user>`, on Windows.
+    WindowsFallback,
 }
 
 impl Origin {
@@ -175,6 +211,8 @@ impl Origin {
             Self::XdgCacheHome => "XDG_CACHE_HOME",
             Self::Home => "HOME",
             Self::Fallback => "TMPDIR fallback",
+            Self::LocalAppData => "LOCALAPPDATA",
+            Self::WindowsFallback => "TEMP fallback",
         }
     }
 }
@@ -203,6 +241,29 @@ impl CacheDirs {
     /// `<root>/<app>/<key>`, one complete extraction.
     pub fn key_dir(&self, app: &str, key: &str) -> PathBuf {
         self.app_dir(app).join(key)
+    }
+
+    /// [`CacheDirs::app_dir`] in the form every path an extraction *writes*
+    /// under is derived from.
+    ///
+    /// On Windows that is the `\\?\` form, and applying it here rather than
+    /// at each call site is the whole point: a path joined onto a verbatim path
+    /// is verbatim too, so the temporary tree, the files under it, the flush
+    /// that walks them and the rename that publishes them are all covered by
+    /// one call. Prefixing only the unpacker's destination moved the length
+    /// limit one step later — into the per-file `fsync`, which reopens each
+    /// path it was given. On unix [`crate::winpath::long_path`] is the identity
+    /// and this is [`CacheDirs::app_dir`].
+    ///
+    /// It is also what [`crate::cache::ensure_extracted`] answers with, so that
+    /// every path ginary itself opens afterwards — the hit check, the `.lock`,
+    /// the manifest probe, [`crate::launch::preflight`] — is the one the
+    /// extraction wrote. The single place the ordinary spelling is put back is
+    /// [`crate::launch::plan`], where the entry becomes `ROOTDIR`, `BINDIR` and
+    /// text in an argument vector: a `\\?\` path is a shape `erl.exe` takes
+    /// apart and puts back together rather than one it merely opens.
+    pub fn extraction_dir(&self, app: &str) -> PathBuf {
+        crate::winpath::long_path(&self.app_dir(app)).into_owned()
     }
 }
 
@@ -308,6 +369,86 @@ pub fn fallback_root(env: &Env, uid: u32) -> PathBuf {
     Path::new(base).join(format!("{DIR_NAME}-{uid}"))
 }
 
+/// Resolves the cache root on Windows from an environment snapshot.
+///
+/// `GINARY_CACHE_DIR`, then `%LOCALAPPDATA%\ginary`, then
+/// `%TEMP%\ginary-<user>`. The same shape as [`resolve`] and the same rules
+/// about emptiness — an exported-but-empty variable counts as unset — with the
+/// two roots Windows spells differently in the middle. `%LOCALAPPDATA%` is not
+/// required to be absolute the way `XDG_CACHE_HOME` is: there is no
+/// specification saying it may be ignored, and a relative one is a broken
+/// environment rather than a convention.
+///
+/// Pure: nothing is created and nothing is probed. `user` is
+/// [`current_user`]'s answer in the launcher and a fixed string in a test, so
+/// that every rule below is a unit test rather than a process with a doctored
+/// environment.
+pub fn resolve_windows(env: &Env, user: &str) -> CacheDirs {
+    if let Some(value) = non_empty(env.get(GINARY_CACHE_DIR_VAR)) {
+        return CacheDirs {
+            root: PathBuf::from(value),
+            origin: Origin::GinaryCacheDir,
+            is_fallback: false,
+        };
+    }
+
+    if let Some(value) = non_empty(env.get(LOCALAPPDATA_VAR)) {
+        return CacheDirs {
+            root: Path::new(value).join(DIR_NAME),
+            origin: Origin::LocalAppData,
+            is_fallback: false,
+        };
+    }
+
+    CacheDirs {
+        root: windows_fallback_root(env, user),
+        origin: Origin::WindowsFallback,
+        is_fallback: true,
+    }
+}
+
+/// `%TEMP%\ginary-<user>`, the Windows fallback root.
+///
+/// `%TEMP%`, then `%TMP%`, then [`WINDOWS_DEFAULT_TEMP`].
+pub fn windows_fallback_root(env: &Env, user: &str) -> PathBuf {
+    let base = non_empty(env.get(TEMP_VAR))
+        .or_else(|| non_empty(env.get(TMP_VAR)))
+        .unwrap_or_else(|| OsStr::new(WINDOWS_DEFAULT_TEMP));
+    Path::new(base).join(format!("{DIR_NAME}-{user}"))
+}
+
+/// The user name the Windows fallback root is named after.
+///
+/// `%USERNAME%`, or [`UNKNOWN_USER`] when it is unset or empty. The name is a
+/// path component, so a value holding a separator is refused the same way an
+/// application name is and [`UNKNOWN_USER`] is used instead: a cache in the
+/// wrong directory is worse than a cache nobody can tell apart.
+pub fn current_user(env: &Env) -> String {
+    non_empty(env.get(USERNAME_VAR))
+        .and_then(OsStr::to_str)
+        .filter(|name| is_user_name(name))
+        .unwrap_or(UNKNOWN_USER)
+        .to_owned()
+}
+
+/// Whether `name` may be joined onto a temporary directory as one component.
+///
+/// The rule is the one [`check_app`] applies to an application name, stated
+/// for a value Windows lets a user pick: not empty, neither of the two
+/// directory names that walk upwards, and holding none of the characters that
+/// would make it more than one component — the two separators and the colon a
+/// drive is named with. A name that fails it is not refused, because there is
+/// nothing to refuse to: [`current_user`] uses [`UNKNOWN_USER`] instead, and a
+/// cache nobody can tell apart is a much smaller problem than a cache in the
+/// wrong directory.
+fn is_user_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && !name.contains(|character: char| character.is_control())
+}
+
 /// Resolves the cache root and creates it.
 ///
 /// When the resolved root cannot be created because the filesystem says so —
@@ -321,6 +462,7 @@ pub fn fallback_root(env: &Env, uid: u32) -> PathBuf {
 ///
 /// [`LauncherError::Cache`] when neither the resolved root nor the fallback
 /// can be created.
+#[cfg(unix)]
 pub fn prepare(env: &Env, uid: u32, warn: &mut dyn Write) -> Result<CacheDirs, LauncherError> {
     let resolved = resolve(env, uid);
     if resolved.is_fallback {
@@ -357,11 +499,119 @@ pub fn prepare(env: &Env, uid: u32, warn: &mut dyn Write) -> Result<CacheDirs, L
     Ok(fallback)
 }
 
+/// Resolves the Windows cache root and creates it.
+///
+/// The shape of [`prepare`], with the two differences Windows makes. The first
+/// is the fallback's name: `%TEMP%\ginary-<user>` rather than
+/// `${TMPDIR}/ginary-<uid>`, because there is no uid. The second is what
+/// creating it checks. The unix fallback lives in a directory every account on
+/// the machine can write to, so an existing one is proved to be this user's
+/// before anything is extracted into it; `%TEMP%` is per-account on Windows and
+/// carries an ACL that says so, and the checks that would prove the same thing
+/// about `C:\Windows\Temp` are Win32 security descriptors that
+/// `docs/adr/0015-windows-launcher-stays-resident.md` records as unwritten and
+/// untested. So the directory is created and no ownership claim is made about
+/// it — which is why [`WINDOWS_DEFAULT_TEMP`] is a last resort reached only by
+/// a process whose environment has been scrubbed.
+///
+/// # Errors
+///
+/// [`LauncherError::Cache`] when neither the resolved root nor the fallback can
+/// be created.
+#[cfg(windows)]
+pub fn prepare_windows(env: &Env, warn: &mut dyn Write) -> Result<CacheDirs, LauncherError> {
+    let user = current_user(env);
+    let resolved = resolve_windows(env, &user);
+    if resolved.is_fallback {
+        std::fs::create_dir_all(&resolved.root)
+            .map_err(|source| LauncherError::cache(&resolved.root, source))?;
+        return Ok(resolved);
+    }
+    let error = match std::fs::create_dir_all(&resolved.root) {
+        Ok(()) => return Ok(resolved),
+        Err(error) => error,
+    };
+    if !is_refusal(&error) {
+        return Err(LauncherError::cache(resolved.root, error));
+    }
+
+    let fallback = CacheDirs {
+        root: windows_fallback_root(env, &user),
+        origin: Origin::WindowsFallback,
+        is_fallback: true,
+    };
+    std::fs::create_dir_all(&fallback.root)
+        .map_err(|source| LauncherError::cache(&fallback.root, source))?;
+
+    // The same line the unix side writes, and it names both roots for the same
+    // reason: an operator who sees only the second cannot tell a deliberate
+    // `GINARY_CACHE_DIR` from a `%LOCALAPPDATA%` an installer locked down.
+    let _ = writeln!(
+        warn,
+        "{PREFIX}the cache directory {} could not be created ({error}), using {} instead",
+        resolved.root.display(),
+        fallback.root.display()
+    );
+    let _ = warn.flush();
+    Ok(fallback)
+}
+
 /// The real user id of this process.
 ///
 /// The fallback root carries it, so two users sharing `/tmp` get two caches.
+///
+/// Unix only, and deliberately so: Windows has no uid, and inventing one there
+/// would put a number nothing produced into a directory name. The Windows
+/// fallback root is named after `%USERNAME%` instead — see [`current_user`] —
+/// and [`resolve_here`] is what a caller on either platform asks.
+#[cfg(unix)]
 pub fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// Resolves the cache root with the rules of the platform this build runs on.
+///
+/// [`resolve`] on unix, with this process's uid in the fallback name;
+/// [`resolve_windows`] on Windows, with `%USERNAME%`. The two rules are public
+/// and testable on either machine; this is the one-line dispatch that keeps
+/// every caller from repeating the `cfg`.
+#[cfg(unix)]
+pub fn resolve_here(env: &Env) -> CacheDirs {
+    resolve(env, current_uid())
+}
+
+/// Resolves the cache root with the rules of the platform this build runs on.
+///
+/// See the unix half of this function for what it dispatches to and why.
+#[cfg(windows)]
+pub fn resolve_here(env: &Env) -> CacheDirs {
+    resolve_windows(env, &current_user(env))
+}
+
+/// Resolves the cache root for this platform and creates it.
+///
+/// [`prepare`] on unix; `prepare_windows` on Windows, which this build does
+/// not compile. The dispatch [`resolve_here`] is, for the side of the pair that
+/// writes.
+///
+/// # Errors
+///
+/// Whatever the platform's own `prepare` answers.
+#[cfg(unix)]
+pub fn prepare_here(env: &Env, warn: &mut dyn Write) -> Result<CacheDirs, LauncherError> {
+    prepare(env, current_uid(), warn)
+}
+
+/// Resolves the cache root for this platform and creates it.
+///
+/// See the unix half of this function.
+///
+/// # Errors
+///
+/// Whatever [`prepare_windows`] answers.
+#[cfg(windows)]
+pub fn prepare_here(env: &Env, warn: &mut dyn Write) -> Result<CacheDirs, LauncherError> {
+    prepare_windows(env, warn)
 }
 
 /// The mode the fallback root is created with.
@@ -389,6 +639,7 @@ pub const FALLBACK_ROOT_MODE: u32 = APP_DIR_MODE;
 ///
 /// [`LauncherError::Cache`] when the directory cannot be created, and when
 /// what is there is not a directory this user may trust.
+#[cfg(unix)]
 fn create_fallback_root(root: &Path, uid: u32) -> Result<(), LauncherError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -526,13 +777,19 @@ fn is_alive(pid: u32) -> bool {
 
 /// Extracts the payload into the cache, or proves it is already there.
 ///
-/// Returns the complete entry's directory. The ten steps are listed in the
-/// module documentation; the two that decide the module's correctness are the
-/// last two. The rename *is* the completion marker, so no marker file is
-/// written, and a rename that fails with `EEXIST`, `ENOTEMPTY` or `EISDIR`
-/// means another process finished first — its entry is verified, this
-/// process's temporary tree is removed, and the winner's directory is
-/// returned.
+/// Returns the complete entry's directory, in the spelling the extraction
+/// wrote it under — the `\\?\` form on Windows, `<root>/<app>/<key>` on unix.
+/// Every read that follows takes that answer, so the cache-hit check, the
+/// lock, the manifest probe and [`crate::launch::preflight`] all open the file
+/// this function created; [`crate::launch::plan`] is where it is spelled the
+/// ordinary way again, for the runtime.
+///
+/// The ten steps are listed in the module documentation; the two that decide
+/// the module's correctness are the last two. The rename *is* the completion
+/// marker, so no marker file is written, and a rename that fails with
+/// `EEXIST`, `ENOTEMPTY` or `EISDIR` means another process finished first —
+/// its entry is verified, this process's temporary tree is removed, and the
+/// winner's directory is returned.
 ///
 /// # Errors
 ///
@@ -549,8 +806,13 @@ pub fn ensure_extracted(
 ) -> Result<PathBuf, LauncherError> {
     check_app(&dirs.root, app)?;
     let key = trailer.cache_key();
-    let app_dir = dirs.app_dir(app);
-    let target = app_dir.join(&key);
+    // One spelling, and it is the verbatim one on Windows: everything this
+    // function writes hangs off `writing`, and `entry` — what it answers with,
+    // what the hit check opens, what the caller locks, reads the manifest out
+    // of and preflights — is joined onto the same path. See
+    // [`CacheDirs::extraction_dir`]. On unix both are `<root>/<app>`.
+    let writing = dirs.extraction_dir(app);
+    let entry = writing.join(&key);
     let pid = std::process::id();
 
     // The fault that simulates a lost rename race has to reach the rename, and
@@ -562,24 +824,30 @@ pub fn ensure_extracted(
     // (1) The entry is complete when, and only when, `ginary.json` is a
     // regular file in it. Nothing else is a marker, because nothing else
     // arrives atomically.
-    if !lost_race && target.join(MANIFEST_NAME).is_file() {
-        diag.kv("cache_hit", &[("path", &target.display().to_string())]);
-        return Ok(target);
+    if !lost_race && entry.join(MANIFEST_NAME).is_file() {
+        diag.kv("cache_hit", &[("path", &entry.display().to_string())]);
+        return Ok(entry);
     }
 
-    create_app_dir(&app_dir)?;
-    discard_incomplete(&app_dir, &key, pid);
+    create_app_dir(&writing)?;
+    discard_incomplete(&writing, &key, pid);
 
     // (2) Somebody else's leftovers, and our own from a previous run of this
     // pid. A tree whose process is alive is another launcher's, and is left.
-    sweep(&app_dir, pid, diag)?;
+    sweep(&writing, pid, diag)?;
 
     // (3) The temporary tree this process extracts into.
-    let tmp = app_dir.join(format!(".{key}.{TMP_PREFIX}{pid}"));
+    let tmp = writing.join(format!(".{key}.{TMP_PREFIX}{pid}"));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir(&tmp).map_err(|source| LauncherError::cache(&tmp, source))?;
     diag.kv("cache_tmp", &[("path", &tmp.display().to_string())]);
 
+    // Every file the payload holds is written under this directory, and a cache
+    // entry is already a hundred and fifty characters deep before the
+    // application is named. `tmp` is already verbatim on Windows, because it
+    // was joined onto `writing`, and so is every path derived from it below:
+    // the bindir the chmod walks, the files the flush reopens, and the two
+    // ends of the rename.
     let manifest = match extract_into(exe, trailer, &tmp, diag) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -610,13 +878,16 @@ pub fn ensure_extracted(
     }
 
     // (9) The rename is the completion marker, and (10) there is no other one.
-    match rename_into_place(&tmp, &target, lost_race) {
+    // Both ends are spelled the same way — Windows will not rename a verbatim
+    // path onto an ordinary one — and that same spelling is what is answered,
+    // so that nothing downstream opens a path this function did not write.
+    match rename_into_place(&tmp, &entry, lost_race) {
         Ok(reused) => {
             diag.kv(
                 "rename",
                 &[("reused", if reused { "true" } else { "false" })],
             );
-            Ok(target)
+            Ok(entry)
         }
         Err(error) => {
             let _ = std::fs::remove_dir_all(&tmp);
@@ -721,14 +992,71 @@ fn rename_into_place(tmp: &Path, target: &Path, forced: bool) -> Result<bool, La
 }
 
 /// Whether a failed `rename(2)` means the destination is already an entry.
+#[cfg(unix)]
 fn is_occupied(error: &std::io::Error) -> bool {
     is_errno(error, &[Errno::EXIST, Errno::NOTEMPTY, Errno::ISDIR])
 }
 
+/// Whether a failed `MoveFile` means the destination is already an entry.
+///
+/// The same three meanings Windows spells with its own numbers. There is no
+/// `Errno` to read them out of — rustix is a unix dependency — so the values
+/// are named here, and named rather than written inline for the reason the unix
+/// side reads them out of rustix: a bare 183 in a condition is a number nobody
+/// can check.
+#[cfg(windows)]
+fn is_occupied(error: &std::io::Error) -> bool {
+    is_win32_error(
+        error,
+        &[
+            ERROR_FILE_EXISTS,
+            ERROR_ALREADY_EXISTS,
+            ERROR_DIR_NOT_EMPTY,
+            ERROR_ACCESS_DENIED,
+        ],
+    )
+}
+
 /// Whether a failed `create_dir_all` is the filesystem refusing rather than
 /// something ginary has no answer for.
+#[cfg(unix)]
 fn is_refusal(error: &std::io::Error) -> bool {
     is_errno(error, &[Errno::ACCESS, Errno::ROFS])
+}
+
+/// Whether a failed `create_dir_all` is Windows refusing rather than something
+/// ginary has no answer for.
+#[cfg(windows)]
+fn is_refusal(error: &std::io::Error) -> bool {
+    is_win32_error(error, &[ERROR_ACCESS_DENIED, ERROR_WRITE_PROTECT])
+}
+
+/// `ERROR_ACCESS_DENIED`: the ACL said no.
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// `ERROR_WRITE_PROTECT`: the volume is read-only.
+#[cfg(windows)]
+const ERROR_WRITE_PROTECT: i32 = 19;
+
+/// `ERROR_FILE_EXISTS`: the destination name is taken.
+#[cfg(windows)]
+const ERROR_FILE_EXISTS: i32 = 80;
+
+/// `ERROR_DIR_NOT_EMPTY`: the destination directory holds something.
+#[cfg(windows)]
+const ERROR_DIR_NOT_EMPTY: i32 = 145;
+
+/// `ERROR_ALREADY_EXISTS`: the destination is already there.
+#[cfg(windows)]
+const ERROR_ALREADY_EXISTS: i32 = 183;
+
+/// Whether `error` carries one of `wanted`, as a Win32 error code.
+#[cfg(windows)]
+fn is_win32_error(error: &std::io::Error, wanted: &[i32]) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| wanted.contains(&code))
 }
 
 /// Whether `error` carries one of `wanted`.
@@ -737,6 +1065,7 @@ fn is_refusal(error: &std::io::Error) -> bool {
 /// here: POSIX fixes the *names*, and `ENOTEMPTY` is 39 on Linux and 66 on the
 /// BSDs. A hardcoded 39 would make the lost-rename-race branch miss on a
 /// target this file already has a `cfg` for, and turn a reuse into exit 124.
+#[cfg(unix)]
 fn is_errno(error: &std::io::Error, wanted: &[Errno]) -> bool {
     error
         .raw_os_error()
@@ -748,6 +1077,7 @@ fn is_errno(error: &std::io::Error, wanted: &[Errno]) -> bool {
 /// The mode is set after creation rather than through the creation mask,
 /// because `create_dir_all` creates the parents too and those belong to
 /// whoever configured the cache root.
+#[cfg(unix)]
 fn create_app_dir(app_dir: &Path) -> Result<(), LauncherError> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -756,11 +1086,25 @@ fn create_app_dir(app_dir: &Path) -> Result<(), LauncherError> {
         .map_err(|source| LauncherError::cache(app_dir, source))
 }
 
+/// Creates `<root>/<app>`, which on Windows is all there is to do.
+///
+/// [`APP_DIR_MODE`] is a POSIX mode and Windows has none: access there is an
+/// ACL, and a directory created under `%LOCALAPPDATA%` or `%TEMP%` inherits the
+/// per-account one its parent carries. Setting nothing is therefore the
+/// accurate translation of "keep other accounts out", not a weaker one — and
+/// writing an ACL by hand is the Win32 security work
+/// `docs/adr/0015-windows-launcher-stays-resident.md` records as out of scope.
+#[cfg(windows)]
+fn create_app_dir(app_dir: &Path) -> Result<(), LauncherError> {
+    std::fs::create_dir_all(app_dir).map_err(|source| LauncherError::cache(app_dir, source))
+}
+
 /// Gives every regular file under `dir` the mode `mode`, and answers how many.
 ///
 /// A `dir` that is not there is zero files rather than an error: what the
 /// runtime is missing is [`crate::launch::preflight`]'s to say, and it says it
 /// by naming the file.
+#[cfg(unix)]
 fn chmod_tree(dir: &Path, mode: u32) -> Result<usize, LauncherError> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -773,12 +1117,28 @@ fn chmod_tree(dir: &Path, mode: u32) -> Result<usize, LauncherError> {
     Ok(changed)
 }
 
+/// Nothing, on a platform with no execute bit to set.
+///
+/// Windows decides what may be run from the file's extension and its ACL, not
+/// from a mode word, so there is no bit here whose absence would stop `erl.exe`
+/// from starting. The answer is therefore zero files changed rather than a
+/// count of files something was done to, and the `mode` column of
+/// `ginary.index.json` is informational on a Windows artifact: it records what
+/// the build machine's archive said, and nothing reads it back to enforce
+/// anything. `docs/dev/debugging.md` says so where a reader would look.
+#[cfg(windows)]
+fn chmod_tree(dir: &Path, mode: u32) -> Result<usize, LauncherError> {
+    let _ = (dir, mode);
+    Ok(0)
+}
+
 /// Flushes the extracted tree, and then the directory the rename will happen
 /// in.
 ///
 /// Answers whether one `syncfs` did it. The fallback is a `fsync` per file,
 /// which is the same guarantee at a much higher price; it exists because
 /// `syncfs` is Linux's and because a filesystem may refuse it.
+#[cfg(unix)]
 fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     let handle = File::open(tmp).map_err(|source| LauncherError::cache(tmp, source))?;
     let synced = syncfs(&handle);
@@ -802,6 +1162,32 @@ fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     Ok(synced)
 }
 
+/// Flushes the extracted tree, one file at a time.
+///
+/// Windows has neither `syncfs` nor a directory handle an ordinary `open` can
+/// produce — `CreateFile` on a directory needs `FILE_FLAG_BACKUP_SEMANTICS`,
+/// which `std::fs::File::open` does not pass — so the two things the unix
+/// version does beyond the per-file barrier cannot be done here. The answer is
+/// therefore always `false`, and it means what it says on both platforms: no
+/// one-call barrier was available, every file was flushed individually.
+///
+/// The directory entry the rename creates is not flushed, and the consequence
+/// is recorded rather than hidden: a machine that loses power between the
+/// rename and NTFS's own metadata flush can come back with an entry whose
+/// `ginary.json` is there and whose contents are not. The launcher's answer to
+/// that is the one it already has for a corrupt entry — the completeness check
+/// fails and the entry is extracted again — so the cost is one repeated
+/// extraction rather than a broken artifact.
+#[cfg(windows)]
+fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
+    for path in files_under(tmp).map_err(|error| LauncherError::cache(tmp, error))? {
+        let file = File::open(&path).map_err(|source| LauncherError::cache(&path, source))?;
+        file.sync_all()
+            .map_err(|source| LauncherError::cache(&path, source))?;
+    }
+    Ok(false)
+}
+
 /// One `syncfs(2)` for the whole filesystem the tree is on.
 #[cfg(target_os = "linux")]
 fn syncfs(handle: &File) -> bool {
@@ -809,7 +1195,7 @@ fn syncfs(handle: &File) -> bool {
 }
 
 /// Elsewhere there is no such call, so the per-file fallback is the only path.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn syncfs(handle: &File) -> bool {
     let _ = handle;
     false

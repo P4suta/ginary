@@ -112,11 +112,28 @@
 //! - [`catalog`] — the prebuilt-OTP catalogue, the cache it fills, and
 //!   `ginary otp repack`, which produces both without publishing anything.
 //!
+//! Milestone D2 adds the two modules Windows needs and nothing else does:
+//!
+//! - [`winpath`] — the `\\?\` prefix a deep cache entry is extracted under,
+//!   and the identity that stands in for it on unix;
+//! - `launch_windows` — the spawn-and-wait launcher, compiled only for
+//!   Windows, which stays resident because there is no `execve` to hand the
+//!   process over with.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
 #![warn(missing_docs)]
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`, and the difference is one module. Every line of
+// ginary is safe Rust except `launch_windows::win32`, which makes the three
+// `kernel32` calls the Windows launcher cannot be written without — the console
+// control handler and the job object that keeps a killed launcher from
+// orphaning a runtime. Neither has a safe counterpart anywhere, and `forbid`
+// cannot be lifted for a single module. That module carries the only
+// `#[allow(unsafe_code)]` in the crate; `deny` keeps every other file, and
+// every other target, exactly as strict as `forbid` was. See
+// `docs/adr/0015-windows-launcher-stays-resident.md`.
+#![deny(unsafe_code)]
 
 #[cfg(feature = "cli")]
 pub mod appfile;
@@ -154,6 +171,8 @@ pub mod gleam;
 #[cfg(feature = "cli")]
 pub mod inspect;
 pub mod launch;
+#[cfg(windows)]
+pub mod launch_windows;
 pub mod launcher;
 pub mod manifest;
 #[cfg(feature = "cli")]
@@ -176,3 +195,4 @@ pub mod target;
 pub mod trailer;
 #[cfg(feature = "cli")]
 pub mod verify;
+pub mod winpath;

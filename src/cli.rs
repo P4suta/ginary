@@ -951,7 +951,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
         Command::Cache {
             command: CacheCommand::Dir { json },
         } => {
-            let dirs = cache::resolve(&cache::Env::from_env(), cache::current_uid());
+            let dirs = cache::resolve_here(&cache::Env::from_env());
             write_cache_dir(&dirs, *json, out)
         }
         Command::Cache {
@@ -965,7 +965,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             {
                 anyhow::bail!("{}", cache::AppNameRefusal(app));
             }
-            let dirs = cache::resolve(&cache::Env::from_env(), cache::current_uid());
+            let dirs = cache::resolve_here(&cache::Env::from_env());
             let report = cache::clean(&dirs.root, app.as_deref())
                 .with_context(|| format!("cannot clean the cache at {}", dirs.root.display()))?;
             write_cache_clean(&dirs, app.as_deref(), &report, *json, out)
@@ -981,7 +981,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 anyhow::bail!("{}", cache::AppNameRefusal(app));
             }
             let env = cache::Env::from_env();
-            let dirs = cache::resolve(&env, cache::current_uid());
+            let dirs = cache::resolve_here(&env);
             let options = cache::PruneOptions {
                 days: days.unwrap_or_else(|| cache::prune_days(&env)),
                 all: *all,

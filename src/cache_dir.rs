@@ -121,6 +121,15 @@ pub fn resolve(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
         crate::cache::Origin::XdgCacheHome => Source::XdgCacheHome,
         crate::cache::Origin::Home => Source::Home,
         crate::cache::Origin::Fallback => return Err(CacheDirError::Unresolved),
+        // Unreachable: the snapshot above holds only the three portable
+        // variables, so `resolve` has nothing to reach a Windows root with.
+        // The build side's own Windows directory is not this function's — a
+        // stub cache under `%LOCALAPPDATA%` is a decision nothing has needed
+        // yet — and inventing a source here would be a projection of a rule
+        // that does not exist.
+        crate::cache::Origin::LocalAppData | crate::cache::Origin::WindowsFallback => {
+            return Err(CacheDirError::Unresolved);
+        }
     };
     Ok(CacheDir {
         path: resolved.root,

@@ -749,8 +749,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, PayloadError> {
 /// every other entry, and an unpack into a populated directory must fail the
 /// same way wherever it lands.
 fn create_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PayloadError> {
-    use std::os::unix::fs::PermissionsExt;
-
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -758,7 +756,30 @@ fn create_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PayloadError>
     file.write_all(bytes)?;
     file.flush()?;
     drop(file);
+    set_mode(path, mode)?;
+    Ok(())
+}
+
+/// Gives `path` the permission bits an archive entry carried.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), PayloadError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))?;
+    Ok(())
+}
+
+/// Nothing, on a platform with no permission bits to give.
+///
+/// A Windows file has an ACL and a read-only flag, neither of which a POSIX
+/// mode word maps onto: 0o644 and 0o755 are the same file there. Setting
+/// nothing is the accurate translation, and it is the same decision
+/// [`crate::cache`] makes for the extracted bindir — the `mode` column of
+/// `ginary.index.json` is informational on Windows, recording what the archive
+/// said rather than what the filesystem was told.
+#[cfg(windows)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), PayloadError> {
+    let _ = (path, mode);
     Ok(())
 }
 

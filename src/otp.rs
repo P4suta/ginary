@@ -11,6 +11,12 @@
 //! The checks are the ones the launcher will depend on at run time: the four
 //! ERTS binaries exist and are executable, `bin/no_dot_erlang.boot` is there,
 //! and there is exactly one `kernel` and one `stdlib` in `lib/`.
+//!
+//! A Windows runtime tree — the contents of `otp_win64_<version>.zip` — holds
+//! none of those four programs, so which list applies is read off the tree by
+//! [`crate::assemble::is_windows_erts_bin`] and a Windows tree is measured
+//! against [`crate::assemble::WINDOWS_REQUIRED_BINS`]. Everything else about
+//! the root is the same, which is why only that one check is split.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -372,7 +378,17 @@ fn single_erts_version(root: &Path) -> Result<String, OtpError> {
 }
 
 /// Checks that every program the launcher needs is there and can be run.
+///
+/// Which programs those are is a property of the tree rather than of the build
+/// that asked for it: [`crate::assemble::is_windows_erts_bin`] is the one
+/// flavour test, and a tree it recognises is measured against
+/// [`crate::assemble::WINDOWS_REQUIRED_BINS`] instead. A directory that is
+/// neither flavour is a unix tree missing its programs, which is what the
+/// error then says.
 fn check_erts_binaries(erts_bin: &Path) -> Result<(), OtpError> {
+    if crate::assemble::is_windows_erts_bin(erts_bin) {
+        return check_windows_erts_binaries(erts_bin);
+    }
     for name in REQUIRED_ERTS_BINARIES {
         let path = erts_bin.join(name);
         let metadata = match std::fs::metadata(&path) {
@@ -391,6 +407,29 @@ fn check_erts_binaries(erts_bin: &Path) -> Result<(), OtpError> {
             if metadata.permissions().mode() & 0o111 == 0 {
                 return Err(OtpError::ErtsBinaryNotExecutable { path });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Checks the three programs a Windows `erts-<vsn>/bin` must hold.
+///
+/// No execute bit is asked for, and not because the check is weaker there. A
+/// Windows filesystem has no mode word at all, and a tree unpacked from
+/// `otp_win64_<version>.zip` **on a Linux build machine** carries whatever the
+/// unzipper chose, which is a fact about the unzipper. What decides whether a
+/// Windows file can be run is its object header, and
+/// [`crate::erts_source::resolve`] reads that.
+fn check_windows_erts_binaries(erts_bin: &Path) -> Result<(), OtpError> {
+    for name in crate::assemble::WINDOWS_REQUIRED_BINS {
+        let path = erts_bin.join(name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(OtpError::MissingErtsBinary { path }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OtpError::MissingErtsBinary { path });
+            }
+            Err(source) => return Err(OtpError::Io { path, source }),
         }
     }
     Ok(())

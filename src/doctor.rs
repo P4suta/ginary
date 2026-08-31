@@ -211,6 +211,11 @@ const PROBE_PROGRAM: &[u8] = b"#!/bin/sh\nexit 0\n";
 
 /// The mode the probe file is given, which is the mode the cache gives every
 /// program under an extracted bindir.
+///
+/// Unix only: Windows decides what may be run from the file's extension and
+/// its ACL, so there is no bit to give and the probe's answer there is what
+/// happened when it was started rather than what it was marked as.
+#[cfg(unix)]
 const PROBE_MODE: u32 = 0o755;
 
 /// How long a probe is retried while the kernel answers `ETXTBSY`.
@@ -492,8 +497,17 @@ pub struct NativeObject {
     ///
     /// [`crate::native::NativeKind`] rather than the raw `e_type`, and for the
     /// reason [`crate::native::kind_of_elf`] gives: this cell and the verdict
-    /// cells beside it have to be two halves of one answer. `ginary inspect`
-    /// is where an ELF's own `e_type` is reported.
+    /// cells beside it have to be two halves of one answer, and `e_type` alone
+    /// calls a position-independent program a shared object.
+    ///
+    /// Only that one distinction is translated. An `e_type` the rule has no
+    /// verdict for still reaches this cell as itself —
+    /// [`crate::native::NativeKind::Relocatable`],
+    /// [`crate::native::NativeKind::Core`], or
+    /// [`crate::native::NativeKind::ElfType`] printing the number the header
+    /// held — because a column that renders a stated fact as `unknown` sends a
+    /// reader looking for a corruption that is not there. `ginary elf deps
+    /// --json` reports the same field untranslated, as `kind`.
     pub kind: crate::native::NativeKind,
     /// Its `DT_NEEDED` entries.
     pub needed: Vec<String>,
@@ -597,7 +611,7 @@ impl ProjectReport {
                 let mut row = vec![
                     object.path.clone(),
                     object.machine.clone(),
-                    object.kind.as_str().to_owned(),
+                    object.kind.to_string(),
                     yes_no(object.matches_host).to_owned(),
                     if object.needed.is_empty() {
                         DASH.to_owned()

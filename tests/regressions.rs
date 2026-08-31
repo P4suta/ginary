@@ -196,3 +196,22 @@ mod c4_the_hook_shell_was_cmd_on_a_windows_host;
 #[cfg(feature = "cli")]
 #[path = "regressions/c4_the_kind_column_disagreed_with_the_verdict.rs"]
 mod c4_the_kind_column_disagreed_with_the_verdict;
+#[path = "regressions/d2_a_windows_artifact_could_not_pass_preflight.rs"]
+mod d2_a_windows_artifact_could_not_pass_preflight;
+#[cfg(feature = "cli")]
+#[path = "regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs"]
+mod d2_a_windows_runtime_root_could_not_be_resolved;
+#[cfg(feature = "cli")]
+#[path = "regressions/d2_a_windows_runtime_was_staged_without_its_resolver.rs"]
+mod d2_a_windows_runtime_was_staged_without_its_resolver;
+#[path = "regressions/d2_the_extraction_dropped_the_verbatim_prefix_after_unpacking.rs"]
+mod d2_the_extraction_dropped_the_verbatim_prefix_after_unpacking;
+#[cfg(feature = "cli")]
+#[path = "regressions/d2_the_kind_column_called_a_stated_e_type_unknown.rs"]
+mod d2_the_kind_column_called_a_stated_e_type_unknown;
+#[path = "regressions/d2_the_launcher_opened_a_path_it_had_not_written.rs"]
+mod d2_the_launcher_opened_a_path_it_had_not_written;
+#[path = "regressions/d2_the_windows_prune_could_not_rename_what_it_locked.rs"]
+mod d2_the_windows_prune_could_not_rename_what_it_locked;
+#[path = "regressions/d2_the_windows_shared_lock_created_the_file_it_shared.rs"]
+mod d2_the_windows_shared_lock_created_the_file_it_shared;

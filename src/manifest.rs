@@ -573,8 +573,36 @@ fn hash_file(path: &Path) -> Result<(u64, String), std::io::Error> {
 }
 
 /// A file's permission bits, `st_mode & 0o7777`.
+#[cfg(unix)]
 fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     Ok(std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777)
+}
+
+/// The permission bits a Windows build records for a file.
+///
+/// Windows has no mode word, so there is nothing to read; what is recorded is
+/// what the `tar` crate itself writes into the archive header on this platform,
+/// 0o755 for a directory and 0o644 for everything else. Recording the same
+/// value on both sides is what keeps `ginary verify` — which compares the index
+/// against the header — from reporting a mismatch that means nothing, and the
+/// column is informational on a Windows artifact rather than a permission
+/// anything enforces.
+///
+/// **A unix artifact cross-built on Windows loses execute bits outside the
+/// bindir.** There is no mode to read, so an executable under
+/// `lib/<app>-<vsn>/priv/bin` is recorded 0o644 and extracted 0o644;
+/// [`crate::cache::ensure_extracted`] repairs the bindir and nothing else,
+/// because the bindir is the only place it knows every file has to be
+/// runnable. It is a stated limitation rather than a silent one: it is in the
+/// README's `## Windows` section and in
+/// `docs/adr/0015-windows-launcher-stays-resident.md`, and the honest fix —
+/// carrying the source tree's modes through a Windows build — needs a mode
+/// column that does not come from the filesystem, which no milestone has asked
+/// for yet.
+#[cfg(windows)]
+fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok(if metadata.is_dir() { 0o755 } else { 0o644 })
 }

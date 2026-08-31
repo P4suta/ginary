@@ -42,6 +42,17 @@
 //! valid UTF-8 arrives as the bytes the user typed. The launcher never looks
 //! at those bytes: `--help` belongs to the packaged application.
 //!
+//! ## The two spellings of the root
+//!
+//! On Windows the root [`plan`] is handed is the `\\?\` form the extraction
+//! wrote it under, because everything ginary itself opens is spelled that way.
+//! [`plan`] is where it stops being ginary's: [`LaunchPlan::program`] keeps the
+//! prefix — this process spawns it — and `ROOTDIR`, `BINDIR`, `HOME` and every
+//! path in the argument vector are put back into the ordinary spelling with
+//! [`crate::winpath::plain_path`], because `erl.exe` takes those apart and
+//! reassembles them. On unix there is one spelling and the conversion is the
+//! identity.
+//!
 //! ## The environment
 //!
 //! Set: `ROOTDIR`, `BINDIR`, `EMU`, `PROGNAME`, and — only when the user has
@@ -63,13 +74,15 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cache::Env;
 use crate::diag::Diag;
-use crate::error::{HINT_EXEC_EACCES, HINT_EXEC_ENOENT, LauncherError, PREFIX};
+use crate::error::{LauncherError, PREFIX};
+// The two hints only a unix `execve` failure can earn; see `hint_for`.
+#[cfg(unix)]
+use crate::error::{HINT_EXEC_EACCES, HINT_EXEC_ENOENT};
 use crate::manifest::Manifest;
 
 /// The variables the launcher removes by name, in the order they are removed.
@@ -101,9 +114,63 @@ pub const CRASH_DUMP_NAME: &str = "erl_crash.dump";
 /// supervision policy and the launcher does not know better than it.
 pub const HEART_COMMAND_VAR: &str = "HEART_COMMAND";
 
-/// The programs [`preflight`] checks under the manifest's bindir, besides the
-/// launch program itself.
+/// The programs [`preflight`] checks under a unix artifact's bindir, besides
+/// the launch program itself.
 pub const REQUIRED_BINARIES: [&str; 3] = ["beam.smp", "erl_child_setup", "inet_gethost"];
+
+/// The files [`preflight`] checks under a Windows artifact's bindir, besides
+/// the launch program itself.
+///
+/// Not the same list under other names. `erl.exe` loads its emulator as a DLL
+/// rather than exec'ing it, so [`crate::target::WINDOWS_EMULATOR_DLL`] stands
+/// where `beam.smp` does; there is no `erl_child_setup`, because there is no
+/// `fork` for it to be the helper of; and `inet_gethost` is there under the
+/// spelling a Windows tree gives it. What an artifact carries is decided by
+/// [`crate::assemble::windows_required_bins`], and this is the launcher's half
+/// of the same rule.
+pub const WINDOWS_REQUIRED_BINARIES: [&str; 2] = [
+    crate::target::WINDOWS_EMULATOR_DLL,
+    crate::target::WINDOWS_RESOLVER_PROGRAM,
+];
+
+/// Which of the two lists an artifact for `os` is held to.
+///
+/// The manifest's target decides, not the machine this launcher is running on:
+/// the question is what the artifact carries, and an artifact carries what it
+/// was built for. A launcher that read its own platform here would be right
+/// on every machine that can run the artifact and wrong in every test, which
+/// is the shape of rule that is never checked.
+#[must_use]
+pub const fn required_binaries(os: crate::target::Os) -> &'static [&'static str] {
+    match os {
+        crate::target::Os::Windows => &WINDOWS_REQUIRED_BINARIES,
+        crate::target::Os::Linux | crate::target::Os::Macos => &REQUIRED_BINARIES,
+    }
+}
+
+/// The exit code a supervised or spawned run reports for a child that ended
+/// with none of its own.
+///
+/// On unix that is a child killed by a signal, which
+/// [`supervise`] reports as `128 + signo` instead, so this is reached only
+/// where there is no signal to report: Windows, where every process that ends
+/// has an exit code and [`None`] means the wait itself could not say.
+pub const NO_EXIT_CODE: u8 = 1;
+
+/// The exit code the Windows launcher exits with for a child that ended this
+/// way.
+///
+/// A Windows exit code is a full 32-bit value and a process exit code here is
+/// a byte, so the same rule the unix side follows applies: a code that does
+/// not fit is [`u8::MAX`] rather than its low byte, because truncating
+/// `0x1_0000_0000 - 5` to zero would report a crashed runtime as a clean run.
+/// A child with no code at all is [`NO_EXIT_CODE`].
+pub fn windows_exit_code(code: Option<i32>) -> u8 {
+    match code {
+        Some(code) => u8::try_from(code).unwrap_or(u8::MAX),
+        None => NO_EXIT_CODE,
+    }
+}
 
 /// The expression `GINARY_CMD=selftest` gives `-eval` instead of the
 /// manifest's.
@@ -174,8 +241,16 @@ pub fn plan(
 ) -> Result<LaunchPlan, LauncherError> {
     m.validate()?;
 
+    // The program is opened by this process, so it keeps `root` exactly as the
+    // extraction spelled it — the `\\?\` form on Windows. Everything else
+    // below is built from `handed`, the ordinary spelling, because everything
+    // else below is read by `erl.exe`: `ROOTDIR`, `BINDIR`, `HOME` and every
+    // path in the argument vector. This is the one place the two spellings
+    // part company; see [`crate::winpath`].
+    let program = root.join(&m.launch.bindir).join(&m.launch.program);
+    let handed = crate::winpath::plain_path(root);
+    let root = handed.as_ref();
     let bindir = root.join(&m.launch.bindir);
-    let program = bindir.join(&m.launch.program);
 
     let mut args: Vec<OsString> = Vec::new();
 
@@ -320,7 +395,10 @@ fn heart_command(self_exe: &Path, user_args: &[OsString]) -> OsString {
 /// the one construction `sh` has for it. On bytes rather than characters: the
 /// value reaches `execve` as bytes and an argument that is not valid UTF-8 must
 /// survive.
+#[cfg(unix)]
 fn shell_word(word: &OsStr) -> OsString {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
     let bytes = word.as_bytes();
     if !bytes.is_empty() && bytes.iter().all(|byte| is_shell_safe(*byte)) {
         return word.to_os_string();
@@ -336,6 +414,64 @@ fn shell_word(word: &OsStr) -> OsString {
     }
     quoted.push(b'\'');
     OsString::from_vec(quoted)
+}
+
+/// One element of a Windows command line, quoted if the C runtime would touch
+/// it.
+///
+/// A different rule for a different parser, and the reason it is different is
+/// worth stating. `HEART_COMMAND` is not handed to a shell on Windows: the
+/// runtime's `heart` port program restarts the emulator with `CreateProcess`,
+/// whose one argument is a command line that the started program's own C
+/// runtime splits again. So the quoting is the `CommandLineToArgvW` rule —
+/// double quotes around a word that needs them, a backslash run before a quote
+/// doubled, an embedded quote escaped — and not `/bin/sh`'s single quotes,
+/// which that parser would hand back as part of the word.
+///
+/// Untested on a running Windows: it is the one part of the Windows launcher
+/// that only a real `heart` restart exercises.
+/// `docs/adr/0015-windows-launcher-stays-resident.md` records it as such.
+#[cfg(windows)]
+fn shell_word(word: &OsStr) -> OsString {
+    const QUOTE: Unit = b'"' as Unit;
+    const BACKSLASH: Unit = b'\\' as Unit;
+
+    let wide = units(word);
+    if !wide.is_empty() && wide.iter().all(|unit| is_ascii_unit(*unit, is_shell_safe)) {
+        return word.to_os_string();
+    }
+
+    let mut quoted: Vec<Unit> = Vec::with_capacity(wide.len().saturating_add(2));
+    quoted.push(QUOTE);
+    // A run of backslashes is only special immediately before a quote, so it is
+    // held back until the unit after it says whether it has to be doubled.
+    let mut pending = 0usize;
+    for unit in wide {
+        match unit {
+            BACKSLASH => pending = pending.saturating_add(1),
+            QUOTE => {
+                push_units(&mut quoted, BACKSLASH, pending.saturating_mul(2));
+                quoted.push(BACKSLASH);
+                quoted.push(QUOTE);
+                pending = 0;
+            }
+            other => {
+                push_units(&mut quoted, BACKSLASH, pending);
+                quoted.push(other);
+                pending = 0;
+            }
+        }
+    }
+    // The closing quote is a quote, so a trailing run is doubled too.
+    push_units(&mut quoted, BACKSLASH, pending.saturating_mul(2));
+    quoted.push(QUOTE);
+    from_units(quoted)
+}
+
+/// Appends `count` copies of `unit`.
+#[cfg(windows)]
+fn push_units(into: &mut Vec<Unit>, unit: Unit, count: usize) {
+    into.extend(std::iter::repeat_n(unit, count));
 }
 
 /// Whether a byte is one `/bin/sh` gives back unchanged, unquoted.
@@ -360,12 +496,105 @@ fn split_flags(value: Option<&OsStr>) -> Vec<OsString> {
     let Some(value) = value else {
         return Vec::new();
     };
-    value
-        .as_bytes()
-        .split(|byte| byte.is_ascii_whitespace())
+    units(value)
+        .split(|unit| is_ascii_unit(*unit, |byte| byte.is_ascii_whitespace()))
         .filter(|field| !field.is_empty())
-        .map(|field| OsString::from_vec(field.to_vec()))
+        .map(|field| from_units(field.to_vec()))
         .collect()
+}
+
+/// One code unit of an [`OsStr`] on this platform.
+///
+/// A byte on unix, where an `OsStr` is bytes and reaches `execve` as bytes; a
+/// UTF-16 code unit on Windows, where it is what `CreateProcessW` is given.
+/// Naming the difference once is what lets the three rules below — the
+/// whitespace split, the `ERL_OTP...\_FLAGS` family and the command-line
+/// quoting — be one implementation rather than two, and it costs no `unsafe`
+/// on either platform: both halves are safe standard library conversions.
+#[cfg(unix)]
+type Unit = u8;
+
+/// One code unit of an [`OsStr`] on this platform. See the unix definition.
+#[cfg(windows)]
+type Unit = u16;
+
+/// The code units `value` is made of.
+#[cfg(unix)]
+fn units(value: &OsStr) -> Vec<Unit> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    value.as_bytes().to_vec()
+}
+
+/// The code units `value` is made of. See the unix definition.
+#[cfg(windows)]
+fn units(value: &OsStr) -> Vec<Unit> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    value.encode_wide().collect()
+}
+
+/// The [`OsString`] `units` spells.
+///
+/// Nothing is validated, and nothing may be: a value that is not valid Unicode
+/// has to survive the round trip, which is the whole reason this is not
+/// [`str`].
+#[cfg(unix)]
+fn from_units(units: Vec<Unit>) -> OsString {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    OsString::from_vec(units)
+}
+
+/// The [`OsString`] `units` spells. See the unix definition.
+#[cfg(windows)]
+fn from_units(units: Vec<Unit>) -> OsString {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    OsString::from_wide(&units)
+}
+
+/// Whether `unit` is an ASCII byte `predicate` accepts.
+///
+/// A code unit that is not ASCII is never one of the characters any of these
+/// rules is about — not whitespace, not a shell metacharacter, not a letter of
+/// `ERL_OTP` — so it answers `false` without a conversion that could lose it.
+fn is_ascii_unit(unit: Unit, predicate: impl Fn(u8) -> bool) -> bool {
+    ascii_of(unit).is_some_and(predicate)
+}
+
+/// The ASCII byte `unit` is, if it is one.
+#[cfg(unix)]
+fn ascii_of(unit: Unit) -> Option<u8> {
+    unit.is_ascii().then_some(unit)
+}
+
+/// The ASCII byte `unit` is, if it is one.
+///
+/// A UTF-16 code unit above 0x7f is either a character no rule here is about or
+/// half of a surrogate pair, and neither has an ASCII byte to be compared as.
+#[cfg(windows)]
+fn ascii_of(unit: Unit) -> Option<u8> {
+    u8::try_from(unit).ok().filter(u8::is_ascii)
+}
+
+/// Whether `units` opens with the ASCII text `prefix`.
+fn starts_with_ascii(units: &[Unit], prefix: &str) -> bool {
+    units.len() >= prefix.len()
+        && units
+            .iter()
+            .zip(prefix.as_bytes())
+            .all(|(unit, byte)| *unit == Unit::from(*byte))
+}
+
+/// Whether `units` ends with the ASCII text `suffix`.
+fn ends_with_ascii(units: &[Unit], suffix: &str) -> bool {
+    units.len() >= suffix.len()
+        && units
+            .iter()
+            .rev()
+            .zip(suffix.as_bytes().iter().rev())
+            .all(|(unit, byte)| *unit == Unit::from(*byte))
 }
 
 /// Whether a variable name is one of the `ERL_OTP...\_FLAGS` family.
@@ -374,15 +603,15 @@ fn split_flags(value: Option<&OsStr>) -> Vec<OsString> {
 /// the user owns, and scrubbing one of those would be the launcher deleting
 /// something it was never told about.
 fn is_otp_flags_family(name: &OsStr) -> bool {
-    let bytes = name.as_bytes();
-    bytes.starts_with(REMOVED_PREFIX.as_bytes()) && bytes.ends_with(REMOVED_SUFFIX.as_bytes())
+    let units = units(name);
+    starts_with_ascii(&units, REMOVED_PREFIX) && ends_with_ascii(&units, REMOVED_SUFFIX)
 }
 
 /// Checks that the extracted tree holds a runnable runtime.
 ///
-/// The manifest's launch program, [`REQUIRED_BINARIES`] under the manifest's
-/// bindir, and `<root>/<launch.boot>.boot`. Programs must have the user
-/// execute bit; the boot file only has to exist.
+/// The manifest's launch program, [`required_binaries`] for the manifest's
+/// target under the manifest's bindir, and `<root>/<launch.boot>.boot`.
+/// Programs must have the user execute bit; the boot file only has to exist.
 ///
 /// # Errors
 ///
@@ -393,7 +622,7 @@ fn is_otp_flags_family(name: &OsStr) -> bool {
 pub fn preflight(root: &Path, m: &Manifest) -> Result<(), PreflightIssue> {
     let bindir = root.join(&m.launch.bindir);
     check_program(&bindir.join(&m.launch.program))?;
-    for name in REQUIRED_BINARIES {
+    for name in required_binaries(m.target.os) {
         check_program(&bindir.join(name))?;
     }
 
@@ -405,6 +634,7 @@ pub fn preflight(root: &Path, m: &Manifest) -> Result<(), PreflightIssue> {
 }
 
 /// One program: it must be there, and it must have the user execute bit.
+#[cfg(unix)]
 fn check_program(path: &Path) -> Result<(), PreflightIssue> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -419,6 +649,25 @@ fn check_program(path: &Path) -> Result<(), PreflightIssue> {
         });
     }
     Ok(())
+}
+
+/// One program: on Windows it only has to be there.
+///
+/// There is no execute bit to check. What may be run is decided by the file's
+/// extension and by its ACL, and neither is a thing a launcher can read cheaply
+/// or would be right to second-guess — a `.exe` a policy refuses fails at the
+/// spawn with a message from Windows itself, which is a better error than one
+/// this function could invent. [`PreflightIssue::NotExecutable`] is therefore
+/// unreachable here, and that is the honest shape: the check that exists is the
+/// one that can be made.
+#[cfg(windows)]
+fn check_program(path: &Path) -> Result<(), PreflightIssue> {
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Ok(());
+    }
+    Err(PreflightIssue::Missing {
+        path: path.to_path_buf(),
+    })
 }
 
 /// The plan a selftest runs: the same launch, with nothing of the application.
@@ -502,8 +751,6 @@ pub fn run_bounded(
     diag: &Diag,
     budget: std::time::Duration,
 ) -> Result<(), RunIssue> {
-    use std::os::unix::process::ExitStatusExt as _;
-
     record(&plan, diag);
 
     let mut command = std::process::Command::new(&plan.program);
@@ -549,12 +796,36 @@ pub fn run_bounded(
         std::thread::sleep(POLL_INTERVAL);
     };
 
-    match (status.code(), status.signal()) {
+    match (status.code(), signal_of(&status)) {
         (Some(0), _) => Ok(()),
         (Some(code), _) => Err(RunIssue::Exit { code }),
         (None, Some(signal)) => Err(RunIssue::Signal { signal }),
         (None, None) => Err(RunIssue::Exit { code: -1 }),
     }
+}
+
+/// The signal that killed a child, if one did.
+///
+/// The unix answer is `WTERMSIG`.
+#[cfg(unix)]
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    status.signal()
+}
+
+/// The signal that killed a child, which on Windows is never one.
+///
+/// Windows has no signals. Every process that ends has a 32-bit exit code —
+/// an access violation ends one with `0xC0000005`, which reaches
+/// [`std::process::ExitStatus::code`] as a negative `i32` and is a code like
+/// any other. So this is always [`None`], and the `(None, None)` arms that
+/// follow it are the ones a Windows child reaches when the wait itself could
+/// not say what happened.
+#[cfg(windows)]
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    let _ = status;
+    None
 }
 
 /// How often [`run_bounded`] asks whether the child has finished.
@@ -574,6 +845,7 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 /// value because success is the end of this process. `ENOENT` from a program
 /// that is on disk, and `EACCES` from one whose execute bit is set, both carry
 /// a [`crate::error::LauncherError::hint`].
+#[cfg(unix)]
 pub fn exec(plan: LaunchPlan, diag: &Diag) -> LauncherError {
     use std::os::unix::process::CommandExt as _;
 
@@ -604,6 +876,7 @@ pub fn exec(plan: LaunchPlan, diag: &Diag) -> LauncherError {
 /// `ENOENT` from a program that is on disk is never about the program: it is
 /// the loader the program names. `EACCES` from a program whose execute bit is
 /// set is never about the bit: it is the mount.
+#[cfg(unix)]
 fn hint_for(error: &std::io::Error, program: &Path) -> Option<&'static str> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -619,20 +892,41 @@ fn hint_for(error: &std::io::Error, program: &Path) -> Option<&'static str> {
     }
 }
 
+/// The advice a failed spawn carries on Windows, which is none.
+///
+/// Both unix hints exist because an errno means something other than what it
+/// says: `ENOENT` from a program that is on disk is the *loader* the program
+/// names, and `EACCES` from a program whose execute bit is set is the mount.
+/// Neither confusion exists here. A Windows spawn that cannot find a DLL fails
+/// with `ERROR_MOD_NOT_FOUND` and says so, and there is no execute bit to
+/// mislead anybody. Inventing a hint for a failure this launcher has never seen
+/// on a real Windows would be a guess printed as advice.
+#[cfg(windows)]
+fn hint_for(error: &std::io::Error, program: &Path) -> Option<&'static str> {
+    let _ = (error, program);
+    None
+}
+
 /// `ENOENT`: no such file or directory.
+#[cfg(unix)]
 const ENOENT: i32 = 2;
 
 /// `EACCES`: permission denied.
+#[cfg(unix)]
 const EACCES: i32 = 13;
 
-/// Writes the plan to the trace, as the last thing before `execve`.
+/// Writes the plan to the trace, as the last thing before the runtime starts.
+///
+/// `pub(crate)` because [`crate::launch_windows`] records the same plan the
+/// same way before its spawn: a trace whose shape depended on the platform
+/// would be a trace with two parsers.
 ///
 /// The argument vector and the two environment lists are JSON arrays *encoded
 /// as strings*, because a `Diag` value is a string and one object per line is
 /// the trace's whole contract. That is what makes `GINARY_TRACE` a
 /// reproduction rather than a summary: every `-pa` and every scrubbed variable
 /// is in the record.
-fn record(plan: &LaunchPlan, diag: &Diag) {
+pub(crate) fn record(plan: &LaunchPlan, diag: &Diag) {
     if !diag.is_enabled() {
         return;
     }
@@ -675,8 +969,6 @@ pub(crate) fn json_array<S: AsRef<str>>(values: impl Iterator<Item = S>) -> Stri
 /// `crash_dump_dir` while the child ran, its `Slogan` line is written to the
 /// trace and to standard error.
 pub fn supervise(plan: LaunchPlan, diag: &Diag, crash_dump_dir: &Path) -> ExitCode {
-    use std::os::unix::process::ExitStatusExt as _;
-
     record(&plan, diag);
 
     let dump = crash_dump_dir.join(CRASH_DUMP_NAME);
@@ -708,12 +1000,12 @@ pub fn supervise(plan: LaunchPlan, diag: &Diag, crash_dump_dir: &Path) -> ExitCo
         }
     };
 
-    let signal = status.signal();
+    let signal = signal_of(&status);
     // The shell's convention, and the only one available: a parent has an exit
     // code and nothing else with which to report a signal.
     let code = match (status.code(), signal) {
         (Some(code), _) => u8::try_from(code).unwrap_or(u8::MAX),
-        (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(u8::MAX),
+        (None, Some(signal)) => u8::try_from(128i32.saturating_add(signal)).unwrap_or(u8::MAX),
         (None, None) => u8::MAX,
     };
     diag.kv(
@@ -790,75 +1082,87 @@ mod tests {
         );
     }
 
-    /// A file at `path` with mode `mode`.
-    fn write_program(path: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write the program");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .expect("set the mode");
-    }
+    /// The five claims about the advice a failed `execve` carries.
+    ///
+    /// `hint_for` reads an errno and a mode bit, and neither exists on
+    /// Windows, where the function is documented to answer [`None`] for
+    /// everything. So the module is `cfg(unix)` rather than the tests being
+    /// rewritten to hold on both: a test that asserted "no hint" on Windows
+    /// would be asserting the absence of a rule instead of a rule.
+    #[cfg(unix)]
+    mod hints {
+        use super::*;
 
-    fn io(code: i32) -> std::io::Error {
-        std::io::Error::from_raw_os_error(code)
-    }
+        /// A file at `path` with mode `mode`.
+        fn write_program(path: &Path, mode: u32) {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write the program");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .expect("set the mode");
+        }
 
-    #[test]
-    fn enoent_from_a_program_that_is_on_disk_is_about_the_loader() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let program = dir.path().join("erlexec");
-        write_program(&program, 0o755);
+        fn io(code: i32) -> std::io::Error {
+            std::io::Error::from_raw_os_error(code)
+        }
 
-        assert_eq!(
-            hint_for(&io(ENOENT), &program),
-            Some(HINT_EXEC_ENOENT),
-            "a program that is there and answers ENOENT is naming its interpreter"
-        );
-    }
+        #[test]
+        fn enoent_from_a_program_that_is_on_disk_is_about_the_loader() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let program = dir.path().join("erlexec");
+            write_program(&program, 0o755);
 
-    #[test]
-    fn enoent_from_a_program_that_is_not_there_says_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
+            assert_eq!(
+                hint_for(&io(ENOENT), &program),
+                Some(HINT_EXEC_ENOENT),
+                "a program that is there and answers ENOENT is naming its interpreter"
+            );
+        }
 
-        assert_eq!(
-            hint_for(&io(ENOENT), &dir.path().join("absent")),
-            None,
-            "guessing at the loader for a program that is simply missing would \
+        #[test]
+        fn enoent_from_a_program_that_is_not_there_says_nothing() {
+            let dir = tempfile::tempdir().expect("tempdir");
+
+            assert_eq!(
+                hint_for(&io(ENOENT), &dir.path().join("absent")),
+                None,
+                "guessing at the loader for a program that is simply missing would \
              send a user looking for the wrong thing"
-        );
-    }
+            );
+        }
 
-    #[test]
-    fn eacces_on_a_program_whose_execute_bit_is_set_is_about_the_mount() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let program = dir.path().join("erlexec");
-        write_program(&program, 0o755);
+        #[test]
+        fn eacces_on_a_program_whose_execute_bit_is_set_is_about_the_mount() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let program = dir.path().join("erlexec");
+            write_program(&program, 0o755);
 
-        assert_eq!(hint_for(&io(EACCES), &program), Some(HINT_EXEC_EACCES));
-    }
+            assert_eq!(hint_for(&io(EACCES), &program), Some(HINT_EXEC_EACCES));
+        }
 
-    #[test]
-    fn eacces_on_a_program_whose_execute_bit_is_clear_says_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let program = dir.path().join("erlexec");
-        write_program(&program, 0o644);
+        #[test]
+        fn eacces_on_a_program_whose_execute_bit_is_clear_says_nothing() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let program = dir.path().join("erlexec");
+            write_program(&program, 0o644);
 
-        assert_eq!(
-            hint_for(&io(EACCES), &program),
-            None,
-            "the bit is the explanation, and `noexec` would be a red herring"
-        );
-    }
+            assert_eq!(
+                hint_for(&io(EACCES), &program),
+                None,
+                "the bit is the explanation, and `noexec` would be a red herring"
+            );
+        }
 
-    #[test]
-    fn every_other_failure_carries_no_advice() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let program = dir.path().join("erlexec");
-        write_program(&program, 0o755);
+        #[test]
+        fn every_other_failure_carries_no_advice() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let program = dir.path().join("erlexec");
+            write_program(&program, 0o755);
 
-        // ENOMEM, ELOOP, ENOEXEC: real `execve` failures ginary has nothing
-        // useful to add to.
-        for code in [12, 40, 8] {
-            assert_eq!(hint_for(&io(code), &program), None, "os error {code}");
+            // ENOMEM, ELOOP, ENOEXEC: real `execve` failures ginary has nothing
+            // useful to add to.
+            for code in [12, 40, 8] {
+                assert_eq!(hint_for(&io(code), &program), None, "os error {code}");
+            }
         }
     }
 

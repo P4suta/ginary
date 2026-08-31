@@ -32,7 +32,10 @@
 //! application only `ebin` and `priv` are taken and `*.appup` is dropped, so
 //! [`EXCLUDED_APP_DIRS`] never travels — not under its own name, and not under
 //! `ebin` or `priv` by way of a symlink, whether the link is inside them or is
-//! one of them.
+//! one of them. A Windows runtime's `bin` is read by [`windows_required_bins`]
+//! instead — the three names in [`WINDOWS_REQUIRED_BINS`] and every DLL beside
+//! them — and which of the two lists applies is read off the tree rather than
+//! off the target that was asked for.
 //!
 //! **The boot file is checked against the tree.** `no_dot_erlang.boot` names
 //! the `kernel` and `stdlib` versions it was built against, as literal
@@ -374,8 +377,6 @@ impl StagedRoot {
         mode: u32,
         category: Category,
     ) -> Result<(), AssembleError> {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let full = self.root.join(path);
         if let Some(parent) = full.parent() {
             create_dir(parent)?;
@@ -384,12 +385,7 @@ impl StagedRoot {
             path: full.clone(),
             source,
         })?;
-        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode)).map_err(
-            |source| AssembleError::Io {
-                path: full.clone(),
-                source,
-            },
-        )?;
+        set_mode(&full, mode)?;
 
         let staged = StagedFile {
             path: path.to_owned(),
@@ -901,7 +897,22 @@ fn build(
     create_dir(root)?;
 
     let erts_dir = format!("erts-{}", otp.erts_vsn);
-    let staged_bins = stage_erts_bins(otp, opts, &root.join(&erts_dir).join("bin"))?;
+    let staged_bin = root.join(&erts_dir).join("bin");
+    let mut staged_bins = stage_erts_bins(otp, opts, &staged_bin)?;
+    // Belt and braces. The Windows probe never contributes `erl.ini` — it is
+    // neither one of the required names nor a DLL — but `--extra-bin erl.ini`
+    // would put one back, and an `erl.ini` in the artifact points `erl.exe` at
+    // the build machine's `Rootdir`. It is removed from the staged tree rather
+    // than from the runtime the build read, which is somebody's installation.
+    //
+    // Before the complement is computed, and the name comes out of the staged
+    // set with it: a file that was copied and then deleted is not a staged
+    // file, and a report that called it one would name it as staged, omit it
+    // from the index and list it under junk in the same breath.
+    let staged_erl_ini = remove_windows_erl_ini(&staged_bin)?;
+    if staged_erl_ini.is_some() {
+        staged_bins.remove(WINDOWS_ERL_INI);
+    }
     let excluded_erts_bins = excluded_bins(&otp.erts_bin, &staged_bins)?;
 
     let boot = otp.root.join("bin").join(BOOT_NAME);
@@ -912,11 +923,22 @@ fn build(
     let mut apps = stage_apps(set, root)?;
     let boot_refs = check_boot_refs(&boot, &boot_bytes, root, &apps)?;
 
-    let junk_removed = if opts.remove_junk {
+    let mut junk_removed = if opts.remove_junk {
         remove_junk(root, &apps)?
     } else {
         Vec::new()
     };
+    // In the account whether or not junk removal was asked for: this one is
+    // not junk, it is a file that would have made the artifact resolve its
+    // root against another machine, and a removal nobody can see the cost of
+    // is a removal nobody can explain.
+    if let Some(size) = staged_erl_ini {
+        // Relative to the staged root, which is what every other entry in the
+        // account is: an absolute path here would name the temporary directory
+        // this build happened to use.
+        junk_removed.push((relative(root, &staged_bin.join(WINDOWS_ERL_INI)), size));
+        junk_removed.sort();
+    }
 
     let sources: BTreeMap<String, StagedSource> = apps
         .iter()
@@ -947,6 +969,187 @@ fn build(
     })
 }
 
+/// The program a Windows runtime is started with, and the one file a Windows
+/// `erts-<vsn>/bin` must hold.
+pub const WINDOWS_LAUNCH_BINARY: &str = crate::target::WINDOWS_LAUNCH_PROGRAM;
+
+/// The emulator a Windows `erl.exe` loads into its own process.
+///
+/// The unix tree's `beam.smp` is a program `erlexec` execs; the Windows tree's
+/// is a DLL `erl.exe` loads, so it is required for the same reason and found
+/// by a different rule.
+#[cfg(feature = "cli")]
+pub const WINDOWS_EMULATOR_DLL: &str = crate::target::WINDOWS_EMULATOR_DLL;
+
+/// The port program a Windows runtime resolves host names with.
+///
+/// `inet_gethost` under the spelling a Windows tree gives it. It is one of
+/// [`crate::otp::REQUIRED_ERTS_BINARIES`] on unix — "every one of them must
+/// exist under `erts-<vsn>/bin`" — and it is required here for exactly that
+/// reason: an artifact without it starts a runtime that cannot resolve a host
+/// name, and finds that out the first time the application opens a socket.
+#[cfg(feature = "cli")]
+pub const WINDOWS_RESOLVER_PROGRAM: &str = crate::target::WINDOWS_RESOLVER_PROGRAM;
+
+/// The file deleted beside [`WINDOWS_LAUNCH_BINARY`] during assembly.
+///
+/// `erl.ini` holds the absolute `Rootdir` of the machine the runtime was
+/// installed on, and `erl.exe` prefers it to its own location. An artifact
+/// that carried one would look for its runtime wherever the build machine
+/// happened to keep it, so it is removed and `erl.exe` is left to locate
+/// itself: its own directory is the `bin`, and two levels above it is the
+/// root.
+#[cfg(feature = "cli")]
+pub const WINDOWS_ERL_INI: &str = "erl.ini";
+
+/// The three names a Windows `erts-<vsn>/bin` must hold, whatever else is in
+/// it.
+///
+/// The launch program, the emulator it loads, and the resolver every runtime
+/// needs. A tree missing any of them is not a runtime, and finding that out at
+/// extraction time on somebody else's machine is what
+/// [`windows_required_bins`] exists to prevent. [`crate::launch::preflight`]
+/// holds the extracted artifact to the same names.
+#[cfg(feature = "cli")]
+pub const WINDOWS_REQUIRED_BINS: [&str; 3] = [
+    WINDOWS_LAUNCH_BINARY,
+    WINDOWS_EMULATOR_DLL,
+    WINDOWS_RESOLVER_PROGRAM,
+];
+
+/// The names a Windows `erts-<vsn>/bin` contributes to the artifact.
+///
+/// Data-driven rather than a fixed list, because a Windows ERTS tree is a zip
+/// somebody else built and the set of DLLs in it moves between releases:
+/// [`WINDOWS_REQUIRED_BINS`] and every `*.dll` beside them travel, and every
+/// other program — `werl.exe`, `erlsrv.exe`, `dialyzer.exe`, `Install.exe` —
+/// is left behind the same way [`crate::otp::REQUIRED_ERTS_BINARIES`] leaves
+/// the unix tree's spare programs behind. The answer is sorted, so a staged
+/// tree does not depend on the order a directory was read back in.
+///
+/// # Errors
+///
+/// [`AssembleError::MissingErtsBinary`] naming the first of
+/// [`WINDOWS_REQUIRED_BINS`] that is not there: a tree missing any of them is
+/// not a runtime, and finding that out at extraction time on somebody else's
+/// machine is exactly what this check exists to prevent.
+/// [`AssembleError::Io`] when the directory cannot be listed.
+#[cfg(feature = "cli")]
+pub fn windows_required_bins(erts_bin: &Path) -> Result<Vec<String>, AssembleError> {
+    let mut present: BTreeSet<String> = BTreeSet::new();
+    for entry in read_dir(erts_bin)? {
+        let entry = entry.map_err(|source| AssembleError::Io {
+            path: erts_bin.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        present.insert(file_name_of(&path)?);
+    }
+
+    // All three by name, and all three before anything is collected: a tree
+    // missing any of them is not a runtime, and a staged tree that is missing
+    // one is found out at extraction time on somebody else's machine.
+    for required in WINDOWS_REQUIRED_BINS {
+        if !present.contains(required) {
+            return Err(AssembleError::MissingErtsBinary {
+                name: required.to_owned(),
+                searched: erts_bin.join(required),
+            });
+        }
+    }
+
+    Ok(present
+        .into_iter()
+        .filter(|name| WINDOWS_REQUIRED_BINS.contains(&name.as_str()) || is_windows_library(name))
+        .collect())
+}
+
+/// Whether `name` is a DLL, whatever case the tree spells the suffix in.
+///
+/// `erl.exe` loads its emulator and every driver beside it out of its own
+/// directory, so a DLL there is part of the runtime rather than a program
+/// somebody could have run. The suffix is compared case-insensitively because
+/// a Windows filesystem does not distinguish the two spellings and an upstream
+/// zip is under no obligation to pick one.
+#[cfg(feature = "cli")]
+fn is_windows_library(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+}
+
+/// Gives a staged file the permission bits the listing records for it.
+#[cfg(all(unix, feature = "cli"))]
+fn set_mode(path: &Path, mode: u32) -> Result<(), AssembleError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
+        AssembleError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// Nothing, on a platform with no permission bits to give.
+///
+/// The same decision [`crate::payload`] and [`crate::cache`] make, for the same
+/// reason: a Windows file has an ACL and a read-only flag, and a POSIX mode
+/// word maps onto neither. The `mode` the caller passed is still recorded in
+/// the listing and in `ginary.index.json`, where it is informational.
+#[cfg(all(windows, feature = "cli"))]
+fn set_mode(path: &Path, mode: u32) -> Result<(), AssembleError> {
+    let _ = (path, mode);
+    Ok(())
+}
+
+/// Whether `erts_bin` is a Windows runtime's `bin` rather than a unix one.
+///
+/// The launch program is the marker, because it is the one file the two trees
+/// cannot share: a Windows tree has no `erlexec` and a unix tree has no
+/// `erl.exe`. Reading the flavour off the tree rather than off the requested
+/// target is what keeps the two lists from crossing — a unix runtime staged
+/// for a Windows target is refused by name for a missing `erl.exe` instead of
+/// being staged as if the request had been right.
+///
+/// It is the one flavour test there is. [`crate::otp::inspect_root`] asks it
+/// which list of required programs a tree is measured against, and
+/// [`crate::erts_source::resolve`] asks it which object file is the evidence,
+/// so a tree cannot be a Windows one to assembly and a unix one to the
+/// resolver.
+#[cfg(feature = "cli")]
+pub fn is_windows_erts_bin(erts_bin: &Path) -> bool {
+    erts_bin.join(WINDOWS_LAUNCH_BINARY).is_file()
+}
+
+/// Removes [`WINDOWS_ERL_INI`] from a staged Windows `bin`, if it is there.
+///
+/// Returns the size of the file that was removed, or [`None`] when there was
+/// none — a tree that never had one is the ordinary case for a runtime built
+/// from source, and it is not a failure.
+///
+/// # Errors
+///
+/// [`AssembleError::Io`] when the file is there and cannot be removed. A
+/// staged `erl.ini` left behind is not a smaller problem than a failed build:
+/// the artifact would resolve its root against the build machine.
+#[cfg(feature = "cli")]
+pub fn remove_windows_erl_ini(bin: &Path) -> Result<Option<u64>, AssembleError> {
+    let path = bin.join(WINDOWS_ERL_INI);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return Ok(None);
+    };
+    let size = metadata.len();
+    std::fs::remove_file(&path).map_err(|source| AssembleError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(Some(size))
+}
+
 /// Whether `name` may be staged out of the runtime's `bin` directory.
 ///
 /// A program name is one file name: not empty, not `.` or `..`, and holding
@@ -973,16 +1176,28 @@ fn stage_erts_bins(
     create_dir(bin)?;
     let mut staged = BTreeSet::new();
 
-    for name in crate::otp::REQUIRED_ERTS_BINARIES {
-        let from = otp.erts_bin.join(name);
+    // Which names are required is a property of the tree rather than of the
+    // target that was asked for: a Windows runtime has no `erlexec` and a unix
+    // one has no `erl.exe`, so the flavour is read off the directory and the
+    // build cannot stage one list out of the other's tree.
+    let required: Vec<String> = if is_windows_erts_bin(&otp.erts_bin) {
+        windows_required_bins(&otp.erts_bin)?
+    } else {
+        crate::otp::REQUIRED_ERTS_BINARIES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    };
+    for name in required {
+        let from = otp.erts_bin.join(&name);
         if !from.is_file() {
             return Err(AssembleError::MissingErtsBinary {
-                name: name.to_owned(),
+                name: name.clone(),
                 searched: from,
             });
         }
-        copy_file(&from, &bin.join(name))?;
-        staged.insert(name.to_owned());
+        copy_file(&from, &bin.join(&name))?;
+        staged.insert(name);
     }
 
     for name in &opts.extra_bins {

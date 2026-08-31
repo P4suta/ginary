@@ -22,7 +22,6 @@
 //! must never present ginary's help text instead of saying what is wrong.
 
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 
 /// The eight bytes a trailer starts with.
 ///
@@ -176,7 +175,7 @@ impl Trailer {
         };
 
         let mut raw = [0u8; 64];
-        file.read_exact_at(&mut raw, offset)?;
+        read_exact_at(file, &mut raw, offset)?;
         Self::parse(&raw, file_len)
     }
 
@@ -185,6 +184,49 @@ impl Trailer {
     pub fn cache_key(&self) -> String {
         hex::encode(&self.payload_sha256[..8])
     }
+}
+
+/// Fills `buffer` from `offset`, without moving the file's own cursor.
+///
+/// `pread(2)`, which is what the launcher needs here: `main` reads the trailer
+/// out of the running executable and then hands the same open file to the
+/// payload reader, so a read that moved the cursor would be a read the next
+/// stage has to undo.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+
+    file.read_exact_at(buffer, offset)
+}
+
+/// Fills `buffer` from `offset`, without moving the file's own cursor.
+///
+/// The Windows counterpart, `seek_read`, is an overlapped `ReadFile` and gives
+/// the same guarantee about the cursor — but it is allowed to answer with fewer
+/// bytes than were asked for, so the loop is this function's own rather than
+/// the standard library's. A read that answers zero bytes before the buffer is
+/// full has hit the end of the file, and 64 bytes that are not there are not a
+/// trailer.
+#[cfg(windows)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt as _;
+
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        let at = offset.saturating_add(filled as u64);
+        match file.seek_read(&mut buffer[filled..], at) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the file ended before its last 64 bytes had been read",
+                ));
+            }
+            Ok(read) => filled = filled.saturating_add(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// The little-endian `u64` at `offset`.

@@ -178,14 +178,17 @@ fn dispatch(
     }
 
     let manifest = read_manifest(exe, trailer, diag)?;
-    let dirs = cache::prepare(env, cache::current_uid(), &mut std::io::stderr())?;
+    let dirs = cache::prepare_here(env, &mut std::io::stderr())?;
     let entry = cache::ensure_extracted(exe, trailer, &manifest.app, &dirs, diag)?;
     let entry = repair_once(exe, trailer, &manifest, &dirs, entry, diag)?;
 
     // The dump belongs to the application rather than to the payload that
-    // happened to produce it, so it goes one level above the entry.
+    // happened to produce it, so it goes one level above the entry. It is the
+    // ordinary spelling because it is handed to the runtime as
+    // `ERL_CRASH_DUMP`; the prune renames and removes directories itself, so
+    // it walks the same tree in the spelling the extraction wrote.
     let crash_dump_dir = dirs.app_dir(&manifest.app);
-    prune_siblings(&crash_dump_dir, trailer, env, diag);
+    prune_siblings(&dirs.extraction_dir(&manifest.app), trailer, env, diag);
 
     // Last, and never released: the descriptor is inherited across `execve`
     // and the kernel drops the lock when the runtime exits. A lock that could
@@ -211,11 +214,42 @@ fn dispatch(
         drop(lock);
         return Ok(code);
     }
-    // `exec` returns only when the runtime did not start, so reaching the next
-    // line means the lock is being dropped by a process that never launched.
+    start(plan, diag, lock)
+}
+
+/// Hands the process over to the runtime, and never comes back if it worked.
+///
+/// `execve`, so the lock's descriptor is inherited and this process ends here.
+/// Reaching the next line means the runtime did not start, and the lock is
+/// being dropped by a process that never launched.
+#[cfg(unix)]
+fn start(
+    plan: launch::LaunchPlan,
+    diag: &Diag,
+    lock: Option<crate::cache_lock::SharedLock>,
+) -> Result<ExitCode, LauncherError> {
     let error = launch::exec(plan, diag);
     drop(lock);
     Err(error)
+}
+
+/// Starts the runtime as a child and stays alive until it exits.
+///
+/// Windows has no `execve`. The launcher therefore remains the runtime's
+/// parent for the whole of its life, which is what keeps the shared lock held
+/// — there is no open file description for it to be inherited through — and
+/// what lets a job object take the runtime with it if this process is killed.
+/// The lock is dropped after the wait, at the one moment the entry stops being
+/// in use. See `docs/adr/0015-windows-launcher-stays-resident.md`.
+#[cfg(windows)]
+fn start(
+    plan: launch::LaunchPlan,
+    diag: &Diag,
+    lock: Option<crate::cache_lock::SharedLock>,
+) -> Result<ExitCode, LauncherError> {
+    let code = crate::launch_windows::run(plan, diag);
+    drop(lock);
+    Ok(code)
 }
 
 /// Takes the shared lock, and confirms the entry survived being locked.
@@ -368,13 +402,13 @@ fn maintenance(
         Cmd::Directory => {
             // A question, not an instruction: nothing is created, so
             // `directory` on a cold machine still answers.
-            let dirs = cache::resolve(env, cache::current_uid());
+            let dirs = cache::resolve_here(env);
             let entry = dirs.key_dir(&manifest.app, &trailer.cache_key());
             let _ = writeln!(out, "{}", entry.display());
             ExitCode::SUCCESS
         }
         Cmd::ExtractOnly => {
-            let dirs = cache::prepare(env, cache::current_uid(), &mut std::io::stderr())?;
+            let dirs = cache::prepare_here(env, &mut std::io::stderr())?;
             let entry = cache::ensure_extracted(exe, trailer, &manifest.app, &dirs, diag)?;
             let _ = writeln!(out, "{}", entry.display());
             ExitCode::SUCCESS
@@ -386,7 +420,7 @@ fn maintenance(
         Cmd::Uninstall => {
             // `resolve`, not `prepare`: uninstalling on a machine that never
             // ran this artifact must not create the cache it is emptying.
-            let dirs = cache::resolve(env, cache::current_uid());
+            let dirs = cache::resolve_here(env);
             cache::check_app(&dirs.root, &manifest.app)?;
             let report = cache::uninstall(&dirs.app_dir(&manifest.app));
             let _ = write!(out, "{}", render_prune(&report));
@@ -395,7 +429,7 @@ fn maintenance(
             ExitCode::SUCCESS
         }
         Cmd::SelfTest => {
-            let dirs = cache::prepare(env, cache::current_uid(), &mut std::io::stderr())?;
+            let dirs = cache::prepare_here(env, &mut std::io::stderr())?;
             selftest(exe, exe_path, trailer, &manifest, &dirs, diag, &mut out)
         }
     };

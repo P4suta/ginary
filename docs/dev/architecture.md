@@ -22,7 +22,7 @@ and must never look at `argv`.
 ## Module map
 
 Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)*,
-*(B2)*, *(C1)*, *(C2)* or *(C4)* exist; the rest are the plan.
+*(B2)*, *(C1)*, *(C2)*, *(C4)* or *(D2)* exist; the rest are the plan.
 
 ```
 build side
@@ -51,16 +51,21 @@ build side
   inspect.rs       (A4) reads a packaged application from the outside
 
 launcher side
-  selfexe.rs       (A3b) opens the running executable by inode
-  cache.rs         (A3b) resolve, sweep, extract, rename, clean; (B1) prune, uninstall
-  cache_lock.rs    (B1) the flock a runtime holds on its entry, across execve
+  selfexe.rs       (A3b) opens the running executable by inode; (D2) current_exe
+                   is the whole answer on Windows
+  cache.rs         (A3b) resolve, sweep, extract, rename, clean; (B1) prune,
+                   uninstall; (D2) the %LOCALAPPDATA% resolution
+  cache_lock.rs    (B1) the flock a runtime holds on its entry, across execve;
+                   (D2) the share mode that stands in for it on Windows
   launch.rs        (A3b) builds the LaunchPlan (argv and env), execs or supervises
+  launch_windows.rs (D2) cfg(windows): spawns erl.exe and stays alive for it
   launcher.rs      (A3b) the launcher-mode entry point and GINARY_CMD
   diag.rs          (A3a) phase timing, GINARY_DEBUG, GINARY_TRACE
   fault.rs         (A3b) named fault points, `fault-injection` feature only
 
 shared
-  target.rs        (A0) <os>-<arch>[-<libc>]
+  target.rs        (A0) <os>-<arch>[-<libc>]; (D2) the launch program of each
+  winpath.rs       (D2) the `\\?\` prefix, and the ordinary spelling put back
   stubid.rs        (C2) the 128-byte identity marker, and the scanner for it
   cache_dir.rs     (A0) the build side's view of `cache::resolve`
   doctor.rs        (A0) toolchain and environment probing; (B2) the cache probe,
@@ -224,8 +229,12 @@ which application of a shipment is the one being packaged, and guessing wrong wo
 bundle the wrong closure.
 
 `inspect_root` is the single point of truth about a runtime: whatever the ERTS came from, the
-real `beam.smp` is read with the `object` crate to derive the target, the linkage and the
-minimum glibc. Nothing downstream trusts the provenance metadata alone.
+real emulator is read with the `object` crate to derive the target, the linkage and the minimum
+glibc. Nothing downstream trusts the provenance metadata alone. Which emulator, and which of the
+two required-file lists a tree is measured against, is read off the tree by
+`assemble::is_windows_erts_bin` — a unix root's `beam.smp` as an ELF, a Windows root's
+`beam.smp.dll` as a PE — so the resolver, `inspect_root` and assembly cannot disagree about what
+a tree is.
 
 ## The staging root
 
