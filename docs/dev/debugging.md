@@ -119,11 +119,19 @@ skips the `MAX_PATH` normalisation. A cache entry is
 and fifty characters before the application is named, so a deep home directory is exactly the
 shape that would otherwise fail in the middle of an extraction.
 
-The prefix goes on **once**, at `CacheDirs::extraction_dir`, and everything an extraction writes
-is joined onto that: the temporary tree, every file the unpacker creates, the per-file flush that
-reopens each of them, and both ends of the rename. A path joined onto a verbatim path is verbatim
-too, which is what makes one call enough — prefixing only the unpacker's destination moved the
-limit one step later, into the flush.
+The prefix goes on once per *walk*, and there are two kinds. An extraction gets it at
+`CacheDirs::extraction_dir`, and everything the extraction writes is joined onto that: the
+temporary tree, every file the unpacker creates, the per-file flush that reopens each of them,
+and both ends of the rename. A path joined onto a verbatim path is verbatim too, which is what
+makes one call enough — prefixing only the unpacker's destination moved the limit one step later,
+into the flush.
+
+A **removal** gets it for itself, in `cache.rs`: `sweep`, `discard_incomplete`, `prune_app`,
+`uninstall`, `prune` and `clean` each put the directory they were given into the verbatim
+spelling before listing it, rather than trusting the caller to have done it. Prefixing an
+already-prefixed path is a no-op, so a caller holding either spelling reaches the same tree — and
+a removal that walked the ordinary one would find a past-`MAX_PATH` entry, take its lock and then
+fail the `rename` aside, reporting `unremovable` forever with no error anywhere.
 
 `ensure_extracted` **answers with that same spelling**, and the rule the two helpers in
 `src/winpath.rs` state is one sentence: *ginary opens the verbatim spelling and hands `erl.exe`
@@ -131,12 +139,17 @@ the ordinary one.* So the cache-hit check, the `<entry>\.lock` open, the manifes
 `launch::preflight` all open the directory the extraction created, and `GINARY_TRACE` shows
 verbatim paths for `cache_tmp`, `cache_hit` and `rename` alike.
 
-The prefix comes off **once** too, in `launch::plan`, which is where a cache path stops being
-ginary's business: `ROOTDIR`, `BINDIR`, `HOME` and every path in the argument vector are put
-back into the ordinary spelling with `winpath::plain_path`, because `erl.exe` takes those apart
-and reassembles them rather than merely opening them. The one path the plan keeps verbatim is
-the program the launcher spawns itself. The `launch` trace record therefore shows a verbatim
-`program` beside an ordinary `ROOTDIR`, and that is not a bug.
+The prefix comes off in exactly two places, both with `winpath::plain_path`. The first is
+`launch::plan`, which is where a cache path stops being ginary's business: `ROOTDIR`, `BINDIR`,
+`HOME` and every path in the argument vector are put back into the ordinary spelling, because
+`erl.exe` takes those apart and reassembles them rather than merely opening them. The one path
+the plan keeps verbatim is the program the launcher spawns itself. The `launch` trace record
+therefore shows a verbatim `program` beside an ordinary `ROOTDIR`, and that is not a bug.
+
+The second is the removal reports. A `PruneReport`, a `CleanReport` and the path inside a cache
+error name a path *to a person* rather than open one, so what `ginary cache prune`,
+`ginary cache clean` and `GINARY_CMD=uninstall` print is the spelling their caller asked about,
+not the one the walk used.
 
 The limit that remains is `erl.exe`'s. An entry past `MAX_PATH` extracts, is found, is locked
 and passes preflight, and then the runtime will not start out of it, because what the runtime

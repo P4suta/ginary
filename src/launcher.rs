@@ -185,10 +185,12 @@ fn dispatch(
     // The dump belongs to the application rather than to the payload that
     // happened to produce it, so it goes one level above the entry. It is the
     // ordinary spelling because it is handed to the runtime as
-    // `ERL_CRASH_DUMP`; the prune renames and removes directories itself, so
-    // it walks the same tree in the spelling the extraction wrote.
+    // `ERL_CRASH_DUMP` — and the prune is given the same one, because
+    // `cache::prune_app` puts the directory it walks into the spelling the
+    // extraction wrote itself. One spelling at the call site and the rule in
+    // the walker: keeping both here is what let the two drift apart.
     let crash_dump_dir = dirs.app_dir(&manifest.app);
-    prune_siblings(&dirs.extraction_dir(&manifest.app), trailer, env, diag);
+    prune_siblings(&crash_dump_dir, trailer, env, diag);
 
     // Last, and never released: the descriptor is inherited across `execve`
     // and the kernel drops the lock when the runtime exits. A lock that could
@@ -318,6 +320,10 @@ fn take_lock(entry: &Path, diag: &Diag) -> Option<crate::cache_lock::SharedLock>
 /// that cannot be removed are all left alone, and none of them says anything
 /// on standard error. What was pruned goes to the trace, because an entry that
 /// vanished is a thing a bug report has to be able to explain.
+///
+/// `app_dir` is the ordinary spelling. [`cache::prune_app`] opens the verbatim
+/// one — on Windows a `MAX_PATH`-length entry cannot be renamed aside or
+/// removed through any other — and reports the ordinary one back.
 fn prune_siblings(app_dir: &Path, trailer: &Trailer, env: &Env, diag: &Diag) {
     let days = cache::prune_days(env);
     let options = cache::PruneOptions { days, all: false };

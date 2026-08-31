@@ -258,10 +258,12 @@ impl CacheDirs {
     /// It is also what [`crate::cache::ensure_extracted`] answers with, so that
     /// every path ginary itself opens afterwards — the hit check, the `.lock`,
     /// the manifest probe, [`crate::launch::preflight`] — is the one the
-    /// extraction wrote. The single place the ordinary spelling is put back is
-    /// [`crate::launch::plan`], where the entry becomes `ROOTDIR`, `BINDIR` and
-    /// text in an argument vector: a `\\?\` path is a shape `erl.exe` takes
-    /// apart and puts back together rather than one it merely opens.
+    /// extraction wrote. The ordinary spelling is put back in exactly two
+    /// places: [`crate::launch::plan`], where the entry becomes `ROOTDIR`,
+    /// `BINDIR` and text in an argument vector — a `\\?\` path is a shape
+    /// `erl.exe` takes apart and puts back together rather than one it merely
+    /// opens — and the removal reports, where a path is named to a person
+    /// rather than opened.
     pub fn extraction_dir(&self, app: &str) -> PathBuf {
         crate::winpath::long_path(&self.app_dir(app)).into_owned()
     }
@@ -291,6 +293,19 @@ pub fn check_app(root: &Path, app: &str) -> Result<(), LauncherError> {
         root,
         std::io::Error::other(format!("{}", AppNameRefusal(app))),
     ))
+}
+
+/// [`check_app`], for a caller that may have been given no application at all.
+///
+/// [`None`] means "every application under `root`", which joins nothing onto
+/// the root and so has nothing to refuse. The check happens before the root is
+/// put into the spelling a removal walks it in — see [`walked`] — so what a
+/// refusal names is the root the caller asked about.
+fn check_app_of(root: &Path, app: Option<&str>) -> Result<(), LauncherError> {
+    match app {
+        Some(app) => check_app(root, app),
+        None => Ok(()),
+    }
 }
 
 /// Whether `app` is a name the cache may join onto a root.
@@ -697,6 +712,45 @@ pub struct SweepReport {
     pub kept: Vec<PathBuf>,
 }
 
+/// The spelling a removal walk opens a cache directory with.
+///
+/// Every removal in this module — [`sweep`], [`discard_incomplete`],
+/// [`prune_app`], [`uninstall`], [`prune`] and [`clean`] — walks a tree the
+/// extraction wrote under [`CacheDirs::extraction_dir`], which on Windows is
+/// the `\\?\` spelling. A walk that opened the ordinary spelling would stop at
+/// `MAX_PATH` on exactly the deep `%LOCALAPPDATA%` entry the prefix exists for:
+/// the entry would be listed, reported `Unremovable` and left on disk forever,
+/// and `GINARY_CMD=uninstall` would answer that it had uninstalled nothing.
+/// So the prefix is added here, once per walk, and every path `read_dir` hands
+/// back inherits it.
+///
+/// Adding it rather than requiring it of the caller is deliberate:
+/// [`crate::winpath::long_path_str`] leaves an already-verbatim path alone, so
+/// a caller holding a [`CacheDirs::extraction_dir`] and one holding a
+/// [`CacheDirs::app_dir`] reach the same tree. That is what lets the rule live
+/// in one place per walk rather than at every call site, which is where the
+/// two spellings drifted apart. On unix this is the identity.
+fn walked(dir: &Path) -> std::borrow::Cow<'_, Path> {
+    crate::winpath::long_path(dir)
+}
+
+/// One path a removal walk found, in the spelling it is reported by.
+///
+/// The inverse of [`walked`], applied to everything that leaves these
+/// functions: a [`PruneReport`], a [`CleanReport`] and the path inside a
+/// [`LauncherError::Cache`] are all read by a person, and `\\?\` is a fact
+/// about how the tree was opened rather than part of the path's identity. It
+/// is the same conversion, and for the same reason, that [`crate::launch::plan`]
+/// makes when a cache path stops being ginary's business.
+///
+/// Unlike [`walked`] this one is compiled on every platform, because
+/// [`crate::winpath::plain_path`] acts only on a path whose text begins with
+/// `\\?\` and no unix path does — which is what makes the rule a test on the
+/// machine ginary is developed on.
+fn reported(path: &Path) -> PathBuf {
+    crate::winpath::plain_path(path).into_owned()
+}
+
 /// Removes the temporary and corrupt trees of dead processes from `app_dir`.
 ///
 /// A tree is `.<key>.tmp-<pid>` or `.<key>.corrupt-<pid>`, and it is removed
@@ -711,12 +765,13 @@ pub struct SweepReport {
 /// [`LauncherError::Cache`] when `app_dir` exists and cannot be listed. A
 /// directory that is not there yet is an empty report, not an error.
 pub fn sweep(app_dir: &Path, self_pid: u32, diag: &Diag) -> Result<SweepReport, LauncherError> {
-    let entries = match std::fs::read_dir(app_dir) {
+    let app_dir = walked(app_dir);
+    let entries = match std::fs::read_dir(&app_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SweepReport::default());
         }
-        Err(error) => return Err(LauncherError::cache(app_dir, error)),
+        Err(error) => return Err(LauncherError::cache(reported(&app_dir), error)),
     };
 
     let mut report = SweepReport::default();
@@ -727,13 +782,13 @@ pub fn sweep(app_dir: &Path, self_pid: u32, diag: &Diag) -> Result<SweepReport, 
         };
         let path = entry.path();
         if pid != self_pid && is_alive(pid) {
-            report.kept.push(path);
+            report.kept.push(reported(&path));
             continue;
         }
         // Best effort: a removal that loses a race with another sweeper has
         // still reached the outcome this call was made for.
         if std::fs::remove_dir_all(&path).is_ok() || !path.exists() {
-            report.removed.push(path);
+            report.removed.push(reported(&path));
         }
     }
     report.removed.sort();
@@ -912,6 +967,7 @@ pub fn ensure_extracted(
 /// Answers whether anything was discarded. Best effort: a removal that loses a
 /// race with another sweeper has still reached the outcome it was called for.
 pub fn discard_incomplete(app_dir: &Path, key: &str, pid: u32) -> bool {
+    let app_dir = walked(app_dir);
     let target = app_dir.join(key);
     if !target.exists() || target.join(MANIFEST_NAME).is_file() {
         return false;
@@ -1387,7 +1443,8 @@ pub fn prune_app(
     if options.days == 0 && !options.all {
         return report;
     }
-    let Ok(entries) = std::fs::read_dir(app_dir) else {
+    let app_dir = walked(app_dir);
+    let Ok(entries) = std::fs::read_dir(&app_dir) else {
         return report;
     };
     let pid = std::process::id();
@@ -1417,7 +1474,7 @@ pub fn prune_app(
             };
             let age = now.duration_since(modified).unwrap_or_default();
             if age.as_secs() < options.days.saturating_mul(SECONDS_PER_DAY) {
-                report.kept.push((path, KeptReason::Fresh));
+                report.kept.push((reported(&path), KeptReason::Fresh));
                 continue;
             }
         }
@@ -1427,7 +1484,7 @@ pub fn prune_app(
         // that stays on disk, and the cost of removing one wrongly is a
         // running application losing its runtime.
         let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
-            report.kept.push((path, KeptReason::Locked));
+            report.kept.push((reported(&path), KeptReason::Locked));
             continue;
         };
 
@@ -1436,12 +1493,12 @@ pub fn prune_app(
             // Nobody holds it and it is old enough to go; the file system
             // refused. Reported rather than dropped: a `kept` column that
             // silently omits an entry makes the summary a count of nothing.
-            report.kept.push((path, KeptReason::Unremovable));
+            report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
         drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
-            report.removed.push(path);
+            report.removed.push(reported(&path));
         } else {
             // The entry was renamed and could not be removed, so the tree is
             // still there under a name that says nothing about what it holds.
@@ -1449,7 +1506,7 @@ pub fn prune_app(
             // launcher can still hit beats a directory nobody will ever look
             // at again.
             let _ = std::fs::rename(&aside, &path);
-            report.kept.push((path, KeptReason::Unremovable));
+            report.kept.push((reported(&path), KeptReason::Unremovable));
         }
     }
     report.removed.sort();
@@ -1501,7 +1558,8 @@ fn record_prune(report: &PruneReport, diag: &Diag) {
 /// is a fact the caller has to be told, not a failure.
 pub fn uninstall(app_dir: &Path) -> PruneReport {
     let mut report = PruneReport::default();
-    let Ok(entries) = std::fs::read_dir(app_dir) else {
+    let app_dir = walked(app_dir);
+    let Ok(entries) = std::fs::read_dir(&app_dir) else {
         return report;
     };
     let pid = std::process::id();
@@ -1521,28 +1579,28 @@ pub fn uninstall(app_dir: &Path) -> PruneReport {
         // very thing the directory is worth keeping for.
         if !path.join(MANIFEST_NAME).is_file() {
             if is_cache_residue(name) && remove_anything(&path) {
-                report.removed.push(path);
+                report.removed.push(reported(&path));
             }
             continue;
         }
 
         let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
-            report.kept.push((path, KeptReason::Locked));
+            report.kept.push((reported(&path), KeptReason::Locked));
             continue;
         };
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
         if std::fs::rename(&path, &aside).is_err() {
             // Nobody holds it: the file system refused, which is a different
             // thing to tell a user and a different thing to do about it.
-            report.kept.push((path, KeptReason::Unremovable));
+            report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
         drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
-            report.removed.push(path);
+            report.removed.push(reported(&path));
         } else {
             let _ = std::fs::rename(&aside, &path);
-            report.kept.push((path, KeptReason::Unremovable));
+            report.kept.push((reported(&path), KeptReason::Unremovable));
         }
     }
     report.removed.sort();
@@ -1552,7 +1610,7 @@ pub fn uninstall(app_dir: &Path) -> PruneReport {
     // entry somebody is running out of is an application that is still
     // installed, and the crash dumps beside it are still worth reading.
     if report.kept.is_empty() {
-        let _ = std::fs::remove_dir(app_dir);
+        let _ = std::fs::remove_dir(&app_dir);
     }
     report
 }
@@ -1628,12 +1686,11 @@ pub fn prune(
     options: PruneOptions,
     now: std::time::SystemTime,
 ) -> Result<PruneReport, LauncherError> {
+    check_app_of(root, app)?;
+    let root = walked(root);
     let app_dirs: Vec<PathBuf> = match app {
-        Some(app) => {
-            check_app(root, app)?;
-            vec![root.join(app)]
-        }
-        None => match std::fs::read_dir(root) {
+        Some(app) => vec![root.join(app)],
+        None => match std::fs::read_dir(&root) {
             Ok(entries) => {
                 let mut found: Vec<PathBuf> = entries
                     .filter_map(Result::ok)
@@ -1645,7 +1702,7 @@ pub fn prune(
             // A cache that was never created has nothing to prune, and saying
             // so is not the same as failing.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(LauncherError::cache(root, error)),
+            Err(error) => return Err(LauncherError::cache(reported(&root), error)),
         },
     };
 
@@ -1685,12 +1742,11 @@ pub struct CleanReport {
 /// that does not exist is an empty report, not an error: cleaning a cache that
 /// was never created is what the caller asked for.
 pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherError> {
+    check_app_of(root, app)?;
+    let root = walked(root);
     let targets: Vec<PathBuf> = match app {
-        Some(app) => {
-            check_app(root, app)?;
-            vec![root.join(app)]
-        }
-        None => match std::fs::read_dir(root) {
+        Some(app) => vec![root.join(app)],
+        None => match std::fs::read_dir(&root) {
             Ok(entries) => {
                 let mut found: Vec<PathBuf> = entries
                     .filter_map(Result::ok)
@@ -1700,7 +1756,7 @@ pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherErro
                 found
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(LauncherError::cache(root, error)),
+            Err(error) => return Err(LauncherError::cache(reported(&root), error)),
         },
     };
 
@@ -1709,10 +1765,12 @@ pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherErro
         if !target.exists() {
             continue;
         }
-        let (_, bytes) = measure(&target).map_err(|error| LauncherError::cache(&target, error))?;
-        std::fs::remove_dir_all(&target).map_err(|source| LauncherError::cache(&target, source))?;
+        let (_, bytes) =
+            measure(&target).map_err(|error| LauncherError::cache(reported(&target), error))?;
+        std::fs::remove_dir_all(&target)
+            .map_err(|source| LauncherError::cache(reported(&target), source))?;
         report.bytes = report.bytes.saturating_add(bytes);
-        report.removed.push(target);
+        report.removed.push(reported(&target));
     }
     report.removed.sort();
     Ok(report)
@@ -1841,6 +1899,40 @@ mod tests {
         assert_eq!(Origin::XdgCacheHome.describe(), "XDG_CACHE_HOME");
         assert_eq!(Origin::Home.describe(), "HOME");
         assert_eq!(Origin::Fallback.describe(), "TMPDIR fallback");
+    }
+
+    #[test]
+    fn a_removal_reports_the_ordinary_spelling_of_what_it_walked() {
+        // What `read_dir` hands back under a verbatim root: the prefix is on
+        // every path, because a path joined onto a verbatim path is verbatim.
+        assert_eq!(
+            reported(Path::new(
+                r"\\?\C:\Users\ada\AppData\Local\ginary\hello\0123456789abcdef"
+            )),
+            PathBuf::from(r"C:\Users\ada\AppData\Local\ginary\hello\0123456789abcdef"),
+            "a prune table and an uninstall report are read by a person, and the verbatim \
+             prefix is a fact about how the tree was opened rather than part of the path"
+        );
+        assert_eq!(
+            reported(Path::new(r"\\?\UNC\server\share\ginary\hello")),
+            PathBuf::from(r"\\server\share\ginary\hello")
+        );
+        assert_eq!(
+            reported(Path::new("/home/ada/.cache/ginary/hello")),
+            PathBuf::from("/home/ada/.cache/ginary/hello"),
+            "and a path that never carried the prefix is untouched"
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_removal_walks_what_it_was_given_on_unix() {
+        let dir = Path::new("/home/ada/.cache/ginary/hello");
+        assert_eq!(
+            walked(dir),
+            std::borrow::Cow::Borrowed(dir),
+            "the prefix is Windows path syntax, so off Windows the walk borrows its argument"
+        );
     }
 
     #[test]

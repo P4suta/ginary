@@ -196,6 +196,9 @@ mod c4_the_hook_shell_was_cmd_on_a_windows_host;
 #[cfg(feature = "cli")]
 #[path = "regressions/c4_the_kind_column_disagreed_with_the_verdict.rs"]
 mod c4_the_kind_column_disagreed_with_the_verdict;
+#[path = "regressions/d2_a_removal_walked_the_ordinary_spelling_of_a_verbatim_tree.rs"]
+mod d2_a_removal_walked_the_ordinary_spelling_of_a_verbatim_tree;
+
 #[path = "regressions/d2_a_windows_artifact_could_not_pass_preflight.rs"]
 mod d2_a_windows_artifact_could_not_pass_preflight;
 #[cfg(feature = "cli")]

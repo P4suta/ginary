@@ -15,7 +15,8 @@
 //! The rule is one sentence: **ginary opens the verbatim spelling and hands
 //! `erl.exe` the ordinary one.**
 //!
-//! [`long_path`] is the first half. It is applied at **one** call site,
+//! [`long_path`] is the first half, and it is applied once per *walk* of the
+//! cache rather than at every path. The extraction's walk is
 //! [`crate::cache::CacheDirs::extraction_dir`]: a path joined onto a verbatim
 //! path is verbatim too, so prefixing the directory an extraction hangs off
 //! covers the temporary tree, every file the unpacker creates, the flush that
@@ -25,13 +26,25 @@
 //! [`crate::launch::preflight`] as well. Prefixing only what the unpacker
 //! writes moved the limit one step later rather than removing it, twice.
 //!
-//! [`plain_path`] is the second half, and it is applied at one call site too:
-//! [`crate::launch::plan`], where a cache path stops being ginary's business
-//! and becomes `ROOTDIR`, `BINDIR` and text in the argument vector `erl.exe`
-//! is started with. A `\\?\` path is a shape that program takes apart and
-//! reassembles rather than one it merely opens. What the launcher spawns
-//! *itself* — [`crate::launch::LaunchPlan::program`] — keeps the prefix,
-//! because opening it is this process's own business.
+//! The other walks are the removals — [`crate::cache::sweep`],
+//! [`crate::cache::discard_incomplete`], [`crate::cache::prune_app`],
+//! [`crate::cache::uninstall`], [`crate::cache::prune`] and
+//! [`crate::cache::clean`] — and each applies it to the directory it was
+//! given rather than trusting its caller to have done so. Prefixing an
+//! already-verbatim path is a no-op, so either spelling reaches the same tree,
+//! and the rule cannot drift from one call site to the next: a removal that
+//! walked the ordinary spelling would list a past-`MAX_PATH` entry, lock it,
+//! and then fail to rename it aside.
+//!
+//! [`plain_path`] is the second half, and it is applied in the two places a
+//! path stops being something ginary opens. [`crate::launch::plan`] is one: a
+//! cache path becomes `ROOTDIR`, `BINDIR` and text in the argument vector
+//! `erl.exe` is started with, and a `\\?\` path is a shape that program takes
+//! apart and reassembles rather than one it merely opens. What the launcher
+//! spawns *itself* — [`crate::launch::LaunchPlan::program`] — keeps the
+//! prefix, because opening it is this process's own business. The removal
+//! reports are the other: a prune table and the path inside a cache error are
+//! read by a person, so they name the spelling their caller asked about.
 //!
 //! One of the two is compiled out on unix and the other is not, and the
 //! asymmetry is deliberate. [`long_path`] *adds* a prefix, and its rule fires
