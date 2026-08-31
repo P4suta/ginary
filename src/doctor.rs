@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache_dir::{self, EnvSnapshot};
 use crate::config::{ProjectConfig, TargetConfig};
-use crate::elf::{self, ElfKind};
+use crate::elf;
 use crate::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use crate::otp;
 use crate::process::{NULL_DEVICE, run_with_timeout};
@@ -489,11 +489,22 @@ pub struct NativeObject {
     /// The machine, as [`crate::elf::ElfInfo::machine`] spells it.
     pub machine: String,
     /// What kind of object the file is.
-    pub kind: crate::elf::ElfKind,
+    ///
+    /// [`crate::native::NativeKind`] rather than the raw `e_type`, and for the
+    /// reason [`crate::native::kind_of_elf`] gives: this cell and the verdict
+    /// cells beside it have to be two halves of one answer. `ginary inspect`
+    /// is where an ELF's own `e_type` is reported.
+    pub kind: crate::native::NativeKind,
     /// Its `DT_NEEDED` entries.
     pub needed: Vec<String>,
     /// Whether its machine is the one this host runs.
     pub matches_host: bool,
+    /// What a build for each configured target would decide about it.
+    ///
+    /// Keyed by canonical target name, and rendered as one column per entry of
+    /// [`ProjectReport::targets`], so that the question a cross build answers
+    /// with an error is one `ginary doctor` answers with a table.
+    pub verdicts: BTreeMap<String, crate::native::Verdict>,
 }
 
 /// What `doctor` says when it is run inside a Gleam project.
@@ -511,6 +522,20 @@ pub struct ProjectReport {
     pub config: ConfigStatus,
     /// Every ELF under the shipment's `priv`, in path order.
     pub native: Vec<NativeObject>,
+    /// The targets `[tools.ginary] targets` resolves to, in that order.
+    ///
+    /// One column of the native table each. Empty when the table names none
+    /// and when it cannot be read, which is the case the table's other
+    /// columns are still worth printing for.
+    pub targets: Vec<String>,
+    /// What could not be worked out about the native table.
+    ///
+    /// One line under the table each, and empty in the ordinary case. A
+    /// per-target column that could not be filled in prints the same `-` as a
+    /// file the scan has no row for, so the difference between the two has to
+    /// be said out loud somewhere: a shipment `doctor` could not walk is a
+    /// reported decision, never a table that looks complete and is not.
+    pub native_notes: Vec<String>,
 }
 
 impl ProjectReport {
@@ -549,48 +574,95 @@ impl ProjectReport {
             ConfigStatus::Error { message } => format!("[tools.ginary]: {message}\n"),
         });
 
-        if self.native.is_empty() {
+        if self.native.is_empty() && self.native_notes.is_empty() {
             return text;
         }
-        let rows: Vec<[String; 5]> = self
+        text.push('\n');
+        if self.native.is_empty() {
+            return self.render_native_notes(text);
+        }
+        // One column per configured target, after the five that say what the
+        // object *is*: `machine` is a fact about the file and a verdict is
+        // what a build for one target would do about it, and only the second
+        // kind of column answers "can I ship this".
+        let mut header: Vec<String> = ["path", "machine", "kind", "host", "needed"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        header.extend(self.targets.iter().cloned());
+        let rows: Vec<Vec<String>> = self
             .native
             .iter()
             .map(|object| {
-                [
+                let mut row = vec![
                     object.path.clone(),
                     object.machine.clone(),
-                    kind_label(object.kind),
+                    object.kind.as_str().to_owned(),
                     yes_no(object.matches_host).to_owned(),
                     if object.needed.is_empty() {
                         DASH.to_owned()
                     } else {
                         object.needed.join(", ")
                     },
-                ]
+                ];
+                row.extend(self.targets.iter().map(|target| {
+                    object
+                        .verdicts
+                        .get(target)
+                        .map_or_else(|| DASH.to_owned(), |verdict| verdict.as_str().to_owned())
+                }));
+                row
             })
             .collect();
-        text.push('\n');
-        text.push_str(&crate::closure::render_table(
-            ["path", "machine", "kind", "host", "needed"],
-            &rows,
-        ));
+        text.push_str(&render_wide_table(&header, &rows));
+        self.render_native_notes(text)
+    }
+
+    /// Appends one line per [`ProjectReport::native_notes`] entry.
+    fn render_native_notes(&self, mut text: String) -> String {
+        for note in &self.native_notes {
+            text.push_str(&format!("native: {note}\n"));
+        }
         text
     }
 }
 
+/// [`crate::closure::render_table`] over a width nothing knows at compile time.
+///
+/// The native table has five fixed columns and one per configured target, and
+/// a project can configure seven, so the const-generic renderer every other
+/// table in the tool uses cannot express it. The layout is the same one, cell
+/// for cell: every column but the last padded to its widest cell and two
+/// spaces between, so no line carries trailing whitespace.
+fn render_wide_table(header: &[String], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = header.iter().map(String::len).collect();
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+
+    let mut text = String::new();
+    let mut push = |cells: &[String]| {
+        for (index, cell) in cells.iter().enumerate() {
+            if index + 1 == cells.len() {
+                text.push_str(cell);
+            } else {
+                text.push_str(&format!("{cell:width$}  ", width = widths[index]));
+            }
+        }
+        text.push('\n');
+    };
+
+    push(header);
+    for row in rows {
+        push(row);
+    }
+    text
+}
+
 /// What a missing value prints as.
 const DASH: &str = "-";
-
-/// The word one [`ElfKind`] prints as.
-fn kind_label(kind: ElfKind) -> String {
-    match kind {
-        ElfKind::Relocatable => "relocatable".to_owned(),
-        ElfKind::Executable => "executable".to_owned(),
-        ElfKind::SharedObject => "shared object".to_owned(),
-        ElfKind::Core => "core".to_owned(),
-        ElfKind::Other(value) => format!("e_type {value}"),
-    }
-}
 
 /// The directory component under which an application keeps its native code.
 const PRIV_DIR: &str = "priv";
@@ -639,6 +711,45 @@ struct RawTools {
     ginary: Option<serde::de::IgnoredAny>,
 }
 
+/// `[tools.ginary] targets`, read on its own and tolerantly.
+///
+/// A second parse of the same text rather than a field on [`RawManifest`],
+/// because that one is what keeps a project's *identity* readable when its
+/// `[tools.ginary]` does not parse: a typed field there would take the name
+/// and the version down with a malformed `targets`. Here a failure is an empty
+/// list, which is what a table that names none produces anyway.
+#[derive(Debug, Default, Deserialize)]
+struct DeclaredManifest {
+    /// The `[tools]` table.
+    #[serde(default)]
+    tools: DeclaredTools,
+}
+
+/// The `[tools]` table of a [`DeclaredManifest`].
+#[derive(Debug, Default, Deserialize)]
+struct DeclaredTools {
+    /// The `[tools.ginary]` table.
+    #[serde(default)]
+    ginary: DeclaredGinary,
+}
+
+/// The `[tools.ginary]` table of a [`DeclaredManifest`].
+#[derive(Debug, Default, Deserialize)]
+struct DeclaredGinary {
+    /// The `targets` array, exactly as it was written.
+    #[serde(default)]
+    targets: Vec<String>,
+}
+
+/// The target selections `[tools.ginary] targets` names, or nothing.
+fn declared_targets(text: &str) -> Vec<String> {
+    toml::from_str::<DeclaredManifest>(text)
+        .unwrap_or_default()
+        .tools
+        .ginary
+        .targets
+}
+
 /// Reads the project `start` is in, when it is in one.
 ///
 /// `None` when no `gleam.toml` is found at or above `start`, which is the
@@ -659,10 +770,37 @@ pub fn project_context(start: &Path, now: SystemTime) -> Option<ProjectReport> {
 
     let shipment_dir = project.shipment();
     let shipment = shipment_report(&shipment_dir, now);
-    let native = if shipment.is_some() {
+    let mut native = if shipment.is_some() {
         native_objects(&shipment_dir)
     } else {
         Vec::new()
+    };
+
+    // The whole configuration this time, and not only whether it parsed: the
+    // targets are what the native table gets a column each for, and the
+    // per-target `native` maps are half of what decides each verdict. A table
+    // that does not parse leaves both empty, which is the case the table's
+    // other columns are still worth printing for.
+    let config = ProjectConfig::from_toml(&text, &manifest).ok();
+    let targets = config.as_ref().map_or_else(Vec::new, |config| {
+        // What the table *names*, not what a build would resolve: a project
+        // that has never mentioned a target is one this table has nothing to
+        // add a column about, and `[tools.ginary] targets` defaults to `host`
+        // inside [`ProjectConfig`] precisely so a build always has one.
+        if declared_targets(&text).is_empty() {
+            Vec::new()
+        } else {
+            crate::target::resolve_targets(&[], &config.tools.targets).unwrap_or_default()
+        }
+    });
+    // Only when there is a shipment to walk: a project that has never
+    // exported one has nothing to scan, and reporting that a directory which
+    // was never created could not be read would be a note about nothing.
+    let native_notes = match (&config, &shipment) {
+        (Some(config), Some(_)) => {
+            fill_verdicts(&shipment_dir, &config.tools, &targets, &mut native)
+        }
+        _ => Vec::new(),
     };
 
     Some(ProjectReport {
@@ -672,7 +810,105 @@ pub fn project_context(start: &Path, now: SystemTime) -> Option<ProjectReport> {
         shipment,
         config: config_status(&text, &manifest, raw.tools.and_then(|tools| tools.ginary)),
         native,
+        targets: targets.iter().map(|target| target.name()).collect(),
+        native_notes,
     })
+}
+
+/// Fills in what a build for each configured target would decide.
+///
+/// The scan is [`crate::native::scan_shipment`]'s, not this module's: a
+/// verdict has to be reached over the same list a build reads, and that list
+/// holds PE and Mach-O objects this table has no row for. Rows are matched by
+/// path, so an object `doctor` cannot describe simply gets no column filled in
+/// rather than a verdict attributed to the wrong file.
+///
+/// Whether a target's runtime can load a NIF is [`target_loads_nifs`]'s
+/// answer, which is the configuration's rather than a runtime's. A build says
+/// the last word; this table says what the project asked for.
+///
+/// The returned lines are [`ProjectReport::native_notes`]: a scan that failed
+/// leaves every column blank, and a blank column is what a file with no row in
+/// the scan prints too, so the difference is stated rather than left to be
+/// guessed.
+fn fill_verdicts(
+    shipment: &Path,
+    tools: &crate::config::ToolsConfig,
+    targets: &[Target],
+    rows: &mut [NativeObject],
+) -> Vec<String> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let artifacts = match crate::native::scan_shipment(shipment) {
+        Ok(artifacts) => artifacts,
+        // Reported, never passed over. A `priv` directory this walk cannot
+        // list is a shipment nothing below could be decided about, and a
+        // table of dashes with no sentence beside it is the silent skip
+        // `CLAUDE.md` forbids.
+        Err(error) => {
+            return vec![format!(
+                "the shipment could not be scanned, so no column says what a build would \
+                 do: {}",
+                error_chain(&error)
+            )];
+        }
+    };
+    let hooks = tools.native_hooks();
+    let none = BTreeMap::new();
+    for target in targets {
+        let config = tools.target.get(&target.name());
+        let cfg = crate::native::TargetNativeCfg {
+            overrides: config.map_or(&none, |config| &config.native),
+            hooks: &hooks,
+        };
+        let verdicts = crate::native::verdicts_for_target(
+            &artifacts,
+            target,
+            target_loads_nifs(*target, config),
+            &cfg,
+        );
+        for (artifact, verdict) in artifacts.iter().zip(verdicts) {
+            if let Some(row) = rows.iter_mut().find(|row| row.path == artifact.rel_path) {
+                row.verdicts.insert(target.name(), verdict);
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Whether this target's runtime can load a NIF, as the configuration decides
+/// it.
+///
+/// `doctor` resolves no runtime — that is what a build does, and it may need
+/// the cache and the network — so this is the configuration's answer, reached
+/// with the two rules the build's own selection uses:
+///
+/// - a named `otp_variant` decides, through [`crate::catalog::claimed_linkage`];
+/// - a target with none whose `erts` is `catalog` gets the catalogue's
+///   documented default, and for a musl target that is
+///   [`crate::catalog::DEFAULT_MUSL_VARIANT`] — the static build, which cannot
+///   `dlopen` anything. It is the *default* for those targets, so the ordinary
+///   cross-compiling manifest is exactly the one this rule exists for.
+///
+/// Everything else loads a NIF, which is what every glibc runtime and every
+/// host installation does. The case this cannot answer is a `dir:` or
+/// `tarball:` runtime that happens to be statically linked: nothing but the
+/// emulator's own header says so, and reading it is half of a build. There the
+/// build has the last word and says it with
+/// [`crate::native::NativeError::StaticRuntime`].
+fn target_loads_nifs(target: Target, config: Option<&TargetConfig>) -> bool {
+    if let Some(variant) = config.and_then(|config| config.otp_variant.as_deref()) {
+        return crate::catalog::claimed_linkage(variant).loads_nifs();
+    }
+    // A value that is not a source is not a catalogue entry either: the row in
+    // the targets table above already says the manifest cannot be built, and
+    // assuming a runtime that loads NIFs adds nothing to it.
+    let from_catalog = matches!(
+        config.map_or_else(|| Ok(ErtsSourceSpec::Host), TargetConfig::erts_spec),
+        Ok(ErtsSourceSpec::Catalog)
+    );
+    !(from_catalog && target.libc == crate::target::Libc::Musl)
 }
 
 /// What `[tools.ginary]` said, or why it could not be read.
@@ -747,9 +983,15 @@ fn native_objects(shipment: &Path) -> Vec<NativeObject> {
         found.push(NativeObject {
             path: relative.to_owned(),
             machine: info.machine.clone(),
-            kind: info.kind,
+            // The scan's rule, not this walk's: a position-independent program
+            // is an `ET_DYN` like every shared library, and the verdict column
+            // beside this one is reached from the same answer.
+            kind: crate::native::kind_of_elf(info.kind, info.is_pie),
             needed: info.needed,
             matches_host: info.machine == host,
+            // Filled in by `fill_verdicts`, which needs the configuration this
+            // walk is not given.
+            verdicts: BTreeMap::new(),
         });
     });
     found.sort_by(|left, right| left.path.cmp(&right.path));

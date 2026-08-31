@@ -40,6 +40,7 @@ use sha2::{Digest as _, Sha256};
 use crate::diag::Diag;
 use crate::download::{self, DownloadError, Expect, Net};
 use crate::elf::{ElfError, ElfInfo};
+use crate::process::{shell_quote, shell_quote_path};
 use crate::target::{Libc, Linkage, Target};
 
 /// The only catalogue schema this ginary reads.
@@ -1003,18 +1004,24 @@ pub fn entry_dir_name(version: &str, target: &str, variant: &str) -> String {
 /// the embedded catalogue, which is empty, and without `--variant` it fetches
 /// whichever runtime the default rule picks, which may not be the one that was
 /// asked about.
+///
+/// Every value is rendered through [`crate::process::shell_quote`], so a
+/// catalogue under `~/My Documents` is one argument when the line is pasted
+/// rather than two. A remedy is a command, and a command is quoted.
 pub fn fetch_command(
     version: &str,
     target: &str,
     variant: Option<&str>,
     catalog: Option<&Path>,
 ) -> String {
+    let version = shell_quote(version);
+    let target = shell_quote(target);
     let mut line = format!("ginary otp fetch --version {version} --target {target}");
     if let Some(variant) = variant {
-        line.push_str(&format!(" --variant {variant}"));
+        line.push_str(&format!(" --variant {}", shell_quote(variant)));
     }
     if let Some(catalog) = catalog {
-        line.push_str(&format!(" --catalog {}", catalog.display()));
+        line.push_str(&format!(" --catalog {}", shell_quote_path(catalog)));
     }
     line
 }

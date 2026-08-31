@@ -29,8 +29,8 @@ use ginary::doctor::{
     self, CACHE_DIR_HINT, CacheProbe, ConfigStatus, CryptoReport, NativeObject, ProjectReport,
     TargetProbe,
 };
-use ginary::elf::ElfKind;
 use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
+use ginary::native::{self, NativeKind, Verdict};
 use ginary::otp::{OtpError, OtpInfo};
 use ginary::target::{Linkage, Target};
 use serde_json::Value;
@@ -273,9 +273,10 @@ fn a_real_elf_under_priv_is_listed_with_what_it_is() {
         vec![NativeObject {
             path: "notify/priv/lib/nif.so".to_owned(),
             machine: host.machine.clone(),
-            kind: host.kind,
+            kind: native::kind_of_elf(host.kind, host.is_pie),
             needed: host.needed.clone(),
             matches_host: true,
+            verdicts: BTreeMap::new(),
         }]
     );
 }
@@ -373,10 +374,13 @@ fn the_project_block_names_every_subject() {
         native: vec![NativeObject {
             path: "notify/priv/lib/nif.so".to_owned(),
             machine: "aarch64".to_owned(),
-            kind: ElfKind::SharedObject,
+            kind: NativeKind::SharedObject,
             needed: vec!["libc.so.6".to_owned()],
             matches_host: false,
+            verdicts: BTreeMap::new(),
         }],
+        targets: Vec::new(),
+        native_notes: Vec::new(),
     };
 
     let text = report.render();
@@ -389,6 +393,91 @@ fn the_project_block_names_every_subject() {
     assert!(
         text.contains("aarch64"),
         "the machine an object was built for is the point of the table:\n{text}"
+    );
+}
+
+#[test]
+fn the_native_table_gains_one_column_per_configured_target() {
+    // The columns are the whole point of the C4 table: `machine` says what an
+    // object *is*, and only the per-target columns say what a build for each
+    // configured target would do about it. Rendered from hand-built values,
+    // because a project that produced every one of these verdicts at once
+    // would need three runtimes and a cross toolchain.
+    let report = ProjectReport {
+        root: PathBuf::from("/w/notify"),
+        name: "notify".to_owned(),
+        version: Some("3.1.4".to_owned()),
+        shipment: Some(doctor::ShipmentReport {
+            path: PathBuf::from("/w/notify/build/erlang-shipment"),
+            age_secs: 3_600,
+        }),
+        config: ConfigStatus::Ok,
+        native: vec![
+            NativeObject {
+                path: "esqlite/priv/esqlite3_nif.so".to_owned(),
+                machine: "x86_64".to_owned(),
+                kind: NativeKind::SharedObject,
+                needed: vec!["libc.so.6".to_owned()],
+                matches_host: true,
+                verdicts: BTreeMap::from([
+                    ("linux-x86_64-gnu".to_owned(), Verdict::Ok),
+                    ("linux-aarch64-musl".to_owned(), Verdict::StaticRuntime),
+                ]),
+            },
+            NativeObject {
+                path: "tooling/priv/bin/helper".to_owned(),
+                machine: "aarch64".to_owned(),
+                kind: NativeKind::Executable,
+                needed: Vec::new(),
+                matches_host: false,
+                verdicts: BTreeMap::from([
+                    ("linux-x86_64-gnu".to_owned(), Verdict::Mismatch),
+                    ("linux-aarch64-musl".to_owned(), Verdict::Override),
+                ]),
+            },
+        ],
+        targets: vec![
+            "linux-x86_64-gnu".to_owned(),
+            "linux-aarch64-musl".to_owned(),
+        ],
+        native_notes: Vec::new(),
+    };
+
+    insta::assert_snapshot!("doctor_project_native_table", report.render());
+}
+
+#[test]
+fn each_configured_target_gets_a_verdict_for_every_object_under_priv() {
+    let host = Target::host().name();
+    let project = TempProject::new(concat!(
+        "name = \"notify\"\n",
+        "version = \"0.1.0\"\n\n",
+        "[tools.ginary]\n",
+        "targets = [\"host\", \"linux-aarch64-musl\"]\n\n",
+        "[tools.ginary.target.linux-aarch64-musl]\n",
+        "erts = \"catalog\"\n\n",
+        "[tools.ginary.target.linux-aarch64-musl.native]\n",
+        "\"notify/priv/lib/nif.so\" = \"native/aarch64/nif.so\"\n",
+    ));
+    let shipment = project.empty_shipment();
+    write(&shipment, "notify/priv/lib/nif.so", &test_binary());
+
+    let report = doctor::project_context(project.root(), SystemTime::now()).expect("a project");
+
+    assert_eq!(
+        report.targets,
+        vec![host.clone(), "linux-aarch64-musl".to_owned()],
+        "one column per target the project resolves, in the order it named them"
+    );
+    assert_eq!(report.native.len(), 1, "{:?}", report.native);
+    assert_eq!(
+        report.native[0].verdicts,
+        BTreeMap::from([
+            (host, Verdict::Ok),
+            ("linux-aarch64-musl".to_owned(), Verdict::Override),
+        ]),
+        "the object this machine built is fine here, and the cross target has \
+         a `native` entry answering for it"
     );
 }
 

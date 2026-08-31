@@ -31,7 +31,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use ginary::manifest::{Index, IndexFile, Manifest};
+use ginary::manifest::{Index, IndexFile, Manifest, NativeRef};
 use ginary::target::{Arch, Libc, Os, Target};
 use ginary::trailer::Trailer;
 
@@ -48,7 +48,7 @@ pub const EM_X86_64: u16 = 62;
 pub const EM_AARCH64: u16 = 183;
 
 /// The offset of `e_machine` in an ELF header, in both classes.
-const E_MACHINE_OFFSET: usize = 18;
+pub const E_MACHINE_OFFSET: usize = 18;
 
 /// How the payload is made to disagree with itself.
 #[derive(Default)]
@@ -76,6 +76,14 @@ pub struct RepackOptions {
     /// The digest still describes the bytes, so the length is the only column
     /// that disagrees and nothing else can account for the finding.
     pub index_size_lies: Vec<(String, u64)>,
+    /// The `native` list the manifest claims, when it is not the empty one.
+    ///
+    /// `pack` derives nothing about native code from the tree, so a manifest
+    /// that names a file the payload does not carry — or that records the
+    /// wrong machine for one it does — cannot be produced by the build. It is
+    /// exactly the lie `ginary verify` cross-checks the manifest for, so the
+    /// list is planted here.
+    pub native: Vec<NativeRef>,
     /// Entries appended after every staged file, which no index row describes.
     ///
     /// This is how an archive that `payload::pack` would refuse to write is
@@ -218,6 +226,9 @@ pub fn build(dir: &Path, options: &RepackOptions) -> Repacked {
     }
     if let Some(app) = &options.artifact.app {
         manifest.app.clone_from(app);
+    }
+    if !options.native.is_empty() {
+        manifest.native.clone_from(&options.native);
     }
 
     let mut index = Index::from_staged(&staging, &listing.files)

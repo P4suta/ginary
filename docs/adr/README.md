@@ -29,3 +29,5 @@ only partly built, the record says so under `Consequences`.
   is what makes one
 - [0013](0013-local-first-otp-catalog.md) — The OTP catalog is local first, and nothing is
   published
+- [0014](0014-native-reconciliation-order.md) — Native code is reconciled in one order, and one
+  refusal cannot be waived

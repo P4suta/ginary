@@ -159,6 +159,16 @@ pub enum Command {
         /// cache; with it, the file named here is used or the build fails.
         #[arg(long, value_name = "PATH")]
         stub: Option<PathBuf>,
+        /// Ship native code built for another target rather than refusing.
+        ///
+        /// A cross build refuses a shipment whose `priv` holds an object for
+        /// another machine, and names the `gleam.toml` keys that would replace
+        /// it. This is the third way out: the objects travel as they are and
+        /// the build says so. It does not lift the refusal a *statically
+        /// linked* runtime earns for a shared object, which no flag can make
+        /// loadable.
+        #[arg(long)]
+        allow_native_mismatch: bool,
         /// The OTP installation to bundle. Defaults to the one `erl` reports.
         #[arg(long, value_name = "PATH")]
         otp_root: Option<PathBuf>,
@@ -822,6 +832,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             strip_beams_only,
             targets,
             stub,
+            allow_native_mismatch,
             otp_root,
             skip_export,
             keep_staging,
@@ -854,6 +865,7 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 sys_config: sys_config.clone(),
                 targets: targets.clone(),
                 stub: stub.clone(),
+                allow_native_mismatch: *allow_native_mismatch,
                 explain: *explain,
                 verbose: *verbose,
             },

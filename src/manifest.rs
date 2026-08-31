@@ -80,12 +80,35 @@ pub enum NativeKind {
 }
 
 /// A native object in the artifact, for `ginary verify` to re-inspect.
+///
+/// The four fields after `kind` are what C4 added, and every one of them is
+/// what the build *ended up* shipping rather than what the shipment held: an
+/// artifact replaced by an override or a build hook records the machine of the
+/// file that replaced it, so `ginary verify` can hold the manifest to the
+/// bytes in the payload. They carry serde defaults, so an artifact built
+/// before C4 still reads back at `format_version` 1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeRef {
     /// The path relative to the extracted root, `/`-separated.
     pub path: String,
     /// What kind of object file it is.
     pub kind: NativeKind,
+    /// The machine, as [`crate::elf::ElfInfo::machine`] spells it.
+    ///
+    /// [`None`] for an object whose header would not parse, which is listed
+    /// rather than dropped: an artifact carrying one is one `ginary verify`
+    /// has something to say about.
+    #[serde(default)]
+    pub machine: Option<String>,
+    /// The target the object names, when its header names a whole one.
+    #[serde(default)]
+    pub target: Option<Target>,
+    /// Whether the build replaced the shipment's own file.
+    #[serde(default)]
+    pub replaced: bool,
+    /// What replaced it: `override`, `hook`, or [`None`] for neither.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// The C library a runtime needs, and the lowest release it runs against.

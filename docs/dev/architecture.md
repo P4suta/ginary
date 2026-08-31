@@ -22,7 +22,7 @@ and must never look at `argv`.
 ## Module map
 
 Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)*,
-*(B2)*, *(C1)* or *(C2)* exist; the rest are the plan.
+*(B2)*, *(C1)*, *(C2)* or *(C4)* exist; the rest are the plan.
 
 ```
 build side
@@ -34,7 +34,7 @@ build side
   download.rs      HTTPS fetch with checksum, retry and atomic rename
   appfile.rs       (A1a) a subset of Erlang terms, enough to read a .app file
   closure.rs       (A1b) transitive closure of `applications` -> AppSet
-  native.rs        detects ELF/Mach-O/PE under priv/, matches them to the target
+  native.rs        (C4) detects ELF/Mach-O/PE under priv/, matches them to the target
   assemble.rs      (A1c) builds the staging root
   beam.rs          (A2) the chunk table of a compiled module
   elf.rs           (A2) read-only inspection of a native binary
@@ -385,6 +385,82 @@ Stripping is idempotent, and that is not incidental: `strip` over an already-str
 `strip_files` over an already-stripped module both write the same bytes back, so
 "identical input produces identical artifact bytes" survives this phase. `tests/strip.rs` and
 `tests/stage_run.rs` each assert it, the second over a real runtime.
+
+## Native code in the shipment
+
+`native.rs` is the one phase that reads files ginary did not put in the tree and did not compile:
+the objects a Gleam dependency ships under `priv`. It runs between assembly and stripping, and it
+answers three questions in order.
+
+```
+gleam export erlang-shipment
+        |
+   native::scan_shipment            once per build, whatever the target
+        |                           <app>/priv/**, by magic: ELF | PE | Mach-O
+        |                           a file that will not parse -> Unknown + a warning
+        |                           a walk stopped by the depth bound -> the same
+        v
+   native::staged_only              per target: the objects this artifact carries
+        |                           (the closure staged them; the shipment is wider)
+        v
+   per target, with that target's ResolvedErts::nif_loading:
+   native::reconcile
+        |  first, because no rule below can change it:
+        |     !nif_loading and any SharedObject -> StaticRuntime { rows }, which the flag
+        |                                          does not lift
+        |  1  [tools.ginary.target.<t>.native] names a file  -> verify it -> Replacement
+        |  2  [tools.ginary.native.<pkg>] build is a command -> run it    -> Replacement
+        |  3  the object's own header already names <t>      -> keep
+        |  4  anything left                                  -> Mismatch { rows }
+        |                                                       or a warning under
+        |                                                       --allow-native-mismatch
+        v
+   native::apply                    the replacement's bytes over lib/<app>/priv/...,
+        |                           keeping the staged file's own mode
+        v
+   strip -> refresh -> manifest.native, read back off the staged tree
+```
+
+Six decisions are this module's own, and [ADR 0014](../adr/0014-native-reconciliation-order.md)
+records why.
+
+**The magic decides, and only `priv` is walked.** A `priv/lib/wrapper.so` that is really a shell
+script is not native code and a program under `priv/bin` with no extension is; an ELF under `ebin`
+is whatever a build system left beside the compiler's output and nothing loads it. ELF goes
+through `elf.rs`, because a Linux object's *target* is its `PT_INTERP` and only `ElfInfo` carries
+that; PE and Mach-O go through the `object` crate's generic parse, which is where their machine
+and their `Dynamic`/`Executable` kind come from.
+
+**An override answers before a hook runs.** Both hand the work back to the project — ginary has no
+cross toolchain and never will — and they are two rules because they answer different situations:
+a vendored file is a path and a build is a command. One package's hook runs once however many of
+its objects need answering, and not at all for an object an override already accounted for.
+
+**A replacement whose C library is not written down is accepted with a note.** The machine and the
+container format have to be the target's; the libc is compared only when the file names one, since
+a Linux object with no `PT_INTERP` is exactly what a musl NIF built `-static` looks like.
+
+**One refusal cannot be waived.** `--allow-native-mismatch` turns the mismatch table into a
+warning and ships the objects as they are. It does not lift `StaticRuntime`: a statically linked
+emulator has no dynamic loader in it, so a `.so` beside it can never be opened, and that check is
+made *after* the reconciliation because a NIF an override answered for is still a NIF.
+
+**A program is told from a library by `DF_1_PIE`.** `e_type` cannot do it — every executable a
+modern toolchain links is an `ET_DYN` — and a `PT_INTERP` cannot either, because `libc.so.6` has
+one. Getting this wrong in the permissive direction ships a broken artifact; getting it wrong in
+the strict direction refuses every project with a port program in it, for a target whose only
+published runtime is the static one. `elf.rs` reads the flag and `native.rs` classifies by it.
+
+**A target answers only for what its artifact carries.** `native::staged_only` narrows the scan to
+the objects the staged tree holds, because the shipment is every application `gleam` exported and
+an artifact is the closure of one. The scan's warnings are printed before the narrowing, so
+nothing the walk found goes unmentioned.
+
+Two consequences reach other modules. `strip.rs` already skips every file whose machine is not
+this host's — a cross-architecture replacement is not stripped by host binutils and the strip
+report says so — so a replacement that lands before stripping is handled by the rule that was
+already there. And `manifest.native` is read back off the *staged tree* after the replacements
+were applied, so `ginary verify` can hold every row to the object the payload really carries.
 
 ## The size and dependency report
 

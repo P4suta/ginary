@@ -54,7 +54,11 @@ expression: json
   "native": [
     {
       "path": "lib/crypto-5.9.2/priv/lib/crypto.so",
-      "kind": "elf"
+      "kind": "elf",
+      "machine": "x86_64",
+      "target": "linux-x86_64-gnu",
+      "replaced": false,
+      "source": null
     }
   ],
   "created_at": "2026-08-31T00:00:00Z",

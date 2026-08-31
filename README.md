@@ -296,6 +296,116 @@ target, the linkage, the libc — are checked against the extracted runtime's ow
 anything is packaged: an entry that says `linux-aarch64-musl` and unpacks to an x86-64 emulator
 stops the build naming both sides. A catalog is an index, never evidence.
 
+### Native code: NIFs and port programs
+
+A Gleam application that depends on a NIF ships the compiled object inside its `priv` directory,
+and that object was built for the machine the developer is standing on. A cross build has to
+notice: an artifact for `linux-aarch64-musl` carrying an x86-64 glibc `.so` is one the loader
+refuses at run time, so ginary refuses it at build time instead.
+
+**What counts as native code is decided by the magic bytes, never by the extension.** Every file
+under a shipment application's `priv` is read: ELF, PE and Mach-O headers are objects, a
+`priv/lib/wrapper.so` that is really a shell script is not, and a program under `priv/bin` with no
+extension at all is. A file that begins like an object and will not parse is listed with a warning
+rather than failing the scan.
+
+What a build then has to *answer for* is narrower: the objects that particular artifact carries.
+A shipment holds every application `gleam` exported, an artifact holds the dependency closure of
+the one being packaged, and an object in an application nothing depends on never travels — so no
+build is refused over one. `ginary doctor` lists them all either way.
+
+For each object and each target, in this order:
+
+1. an entry in `[tools.ginary.target.<name>.native]` naming a replacement file;
+2. a `[tools.ginary.native.<package>] build` hook, run for this target;
+3. the object's own header — the machine, and the C library its interpreter names;
+4. otherwise, a mismatch, which stops the build.
+
+```toml
+[tools.ginary]
+targets = ["host", "linux-aarch64-musl"]
+
+# Built once per target that needs it. `{target}` and `{out_dir}` are
+# substituted; everything else is the project's own command line.
+[tools.ginary.native.esqlite]
+build = "sh scripts/build_nif.sh {target} {out_dir}"
+
+[tools.ginary.target.linux-aarch64-musl]
+erts = "catalog"
+
+# A file vendored into the repository, relative to the project root. An
+# override answers before a hook runs, so a package can have both.
+[tools.ginary.target.linux-aarch64-musl.native]
+"esqlite/priv/esqlite3_nif.so" = "vendor/esqlite3_nif-aarch64-musl.so"
+```
+
+The key on the left is the object's path **relative to the shipment** —
+`<package>/priv/<file>`, which is what the refusal prints and what `ginary doctor` lists. A
+replacement is read and checked before it is used: its machine and its format have to be the
+target's, and the C library is compared only when the file names one. A statically linked object
+names none — that is what a musl NIF built `-static` is — so it is accepted and the build says
+which file was taken on that basis.
+
+**A build hook is a command line, not a program.** It runs through `/bin/sh -c` in the project
+root under a ten-minute budget, with `{target}` and `{out_dir}` substituted — each as exactly one
+shell word, so a project under `My Documents` works and `"{out_dir}"` would be quoting an
+already-quoted word — and these variables set:
+
+| variable | value |
+|---|---|
+| `GINARY_TARGET` | the canonical target name, `linux-aarch64-musl` |
+| `GINARY_TARGET_TRIPLE` | the Rust triple, `aarch64-unknown-linux-musl` |
+| `OUT_DIR` | where the hook writes; it already exists |
+| `ERTS_INCLUDE_DIR` | `<runtime>/erts-<vsn>/include`, for `erl_nif.h` |
+| `ERL_INTERFACE_INCLUDE_DIR` | `<runtime>/lib/erl_interface-*/include`, **unset** when the runtime ships none |
+| `OTP_VERSION` | the version of the runtime being bundled |
+
+`OUT_DIR` is `<build directory>/native/<target>/<package>/`, one per target, so a hook that
+decides its output is up to date and writes nothing cannot have the previous target's object
+accepted in its place.
+
+The shell is `/bin/sh` on every host, including Windows, because the quoting above is a POSIX
+shell's: a line quoted for one shell and read by another is a line whose quote characters become
+part of a path. A machine with no `/bin/sh` gets an error naming it rather than a command line
+`cmd` would read differently.
+
+The hook is expected to write the object at `$OUT_DIR/<the artifact's shipment path>` —
+`$OUT_DIR/esqlite/priv/esqlite3_nif.so` for the example above. A hook that exits non-zero fails
+the build with everything it wrote to standard error; one that succeeds and writes nothing there
+fails it too, because an artifact that quietly kept the host's object is the failure this whole
+section exists to prevent. One package's hook runs once however many objects it accounts for, and
+it does not run at all for an object an override already answered.
+
+**Two refusals, and only one of them can be waived.**
+
+`--allow-native-mismatch` is the third way out of a mismatch: the objects travel as they are, and
+the build prints the same table as a warning instead of stopping. It is a flag and not a
+`gleam.toml` key on purpose — a project that recorded "ship it anyway" in its manifest would carry
+that decision into every later build and nobody would see it again.
+
+The other refusal is a *statically linked runtime* — `otp_variant = "static"`, which is the
+default for musl targets in the catalog — carrying a shared object. A static emulator has no
+dynamic loader in it, so `erlang:load_nif/2` can never open the file however well its architecture
+agrees. `--allow-native-mismatch` does not lift that one: the remedy is
+`[tools.ginary.target."<name>"] otp_variant = "dynamic"` or a gnu target, and both are in the
+message. A port *program* under `priv/bin` is run as a child process rather than loaded, so a
+static runtime is no trouble for one — and a program is told from a library by `DF_1_PIE` rather
+than by `e_type`, because every executable a modern toolchain links is an `ET_DYN` like any shared
+object.
+
+`ginary doctor`, inside a project, prints a column per configured target beside every object under
+`priv` — `ok`, `override`, `hook`, `MISMATCH` or `static-runtime` — so the answer a build gives
+with an error is one you can read before starting it. It resolves no runtime to do it: a named
+`otp_variant` decides, a musl target reading its runtime from the catalog gets the catalog's own
+default — the static build, which is why the ordinary cross-compiling manifest reports
+`static-runtime` rather than `ok` — and everything else is assumed to load a NIF. A `dir:` runtime
+that happens to be static is the one case only the build can catch. A shipment `doctor` could not
+walk is a line under the table rather than a column of dashes. What the artifact ended up
+carrying is recorded in its manifest: per object, the path inside the artifact, the machine, the
+target, and whether it was replaced and by which of the two. `ginary verify` reads those rows
+back against the payload and reports a manifest that names a file the artifact does not carry, or
+that records a machine the object does not have.
+
 ### The runtime settings
 
 ```toml
@@ -443,8 +553,11 @@ forwarding, and the application receives its arguments exactly as typed.
   first run; ginary does not link the emulator into the executable.
 - Hot code upgrades are not supported. `releases/` is not shipped and `release_handler` is not
   available.
-- Native code (NIFs, port programs) must match the target being packaged. `ginary verify` says
-  when it does not, but the build does not yet refuse it.
+- **Native code is matched, never rebuilt by ginary itself.** A cross build refuses an object
+  under `priv` that is not for the target and names the two `gleam.toml` keys that answer for it,
+  but producing the object is the project's own business: an override points at a file, a hook
+  runs a command, and there is no cross toolchain inside ginary. See "Native code: NIFs and port
+  programs".
 - Artifacts are not small. A trimmed runtime plus a small application is roughly 7.5 MB.
 
 ## Documentation

@@ -1,0 +1,10 @@
+---
+source: tests/native.rs
+expression: error.to_string()
+---
+native code in the shipment does not match target linux-aarch64-musl
+package  artifact                      object
+bcrypt   bcrypt/priv/bcrypt_nif.so     ELF x86_64 glibc (linux-x86_64-gnu)
+esqlite  esqlite/priv/esqlite3_nif.so  ELF x86_64 glibc (linux-x86_64-gnu)
+fix: [tools.ginary.target."linux-aarch64-musl".native] "bcrypt/priv/bcrypt_nif.so" = "<a file for linux-aarch64-musl>", or [tools.ginary.native.bcrypt] build = "<a command>", or --allow-native-mismatch
+fix: [tools.ginary.target."linux-aarch64-musl".native] "esqlite/priv/esqlite3_nif.so" = "<a file for linux-aarch64-musl>", or [tools.ginary.native.esqlite] build = "<a command>", or --allow-native-mismatch

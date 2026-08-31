@@ -1,0 +1,8 @@
+---
+source: tests/native.rs
+expression: done.warnings[0].clone()
+---
+native code in the shipment does not match target linux-aarch64-musl, and --allow-native-mismatch was given: the artifact carries it as it is
+package  artifact                      object
+bcrypt   bcrypt/priv/bcrypt_nif.so     ELF x86_64 glibc (linux-x86_64-gnu)
+esqlite  esqlite/priv/esqlite3_nif.so  ELF x86_64 glibc (linux-x86_64-gnu)

@@ -1634,6 +1634,37 @@ fn build_help_lists_the_three_runtime_flags() {
     }
 }
 
+#[test]
+fn build_help_names_the_flag_that_ships_native_code_anyway() {
+    let assert = ginary().args(["build", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains("--allow-native-mismatch"),
+        "the refusal names this flag as its own remedy, so `build --help` has \
+         to list it:\n{stdout}"
+    );
+}
+
+#[test]
+fn allowing_a_native_mismatch_is_a_flag_and_not_a_usage_error() {
+    // Nothing is built here: the project is not one, so the run fails. What is
+    // asserted is *how* — clap accepting the flag and the build then refusing
+    // for its own reason, rather than clap refusing an argument it has never
+    // heard of.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let assert = ginary_in(dir.path())
+        .args(["build", "--allow-native-mismatch"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "`--allow-native-mismatch` is a flag `ginary build` has:\n{stderr}"
+    );
+}
+
 // ------------------------------- `ginary build` and `ginary inspect` (A4) --
 
 /// A `ginary` run from a directory the test owns, so no ambient `gleam.toml`

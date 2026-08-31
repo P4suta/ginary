@@ -27,7 +27,8 @@ none of them has to be a real project on disk.
 | `bad_target_key.toml` | a key a sub-table does not have, which the error must name beside the table |
 | `bad_erts.toml` | an `erts` that is none of the five source spellings |
 | `bad_otp_variant.toml` | an `otp_variant` that is neither `static` nor `dynamic` |
+| `native.toml` | the C4 keys: two `[tools.ginary.native.<package>]` build hooks beside a target's own `native` override map |
 
-Four of the twenty are valid — `defaults.toml`, `full.toml`, `runtime.toml` and `targets.toml` —
-and the other sixteen are invalid on purpose. `tests/config.rs` asserts the exact error variant of
-each of the sixteen, so editing one means editing its assertion with it.
+Five of the twenty-one are valid — `defaults.toml`, `full.toml`, `runtime.toml`, `targets.toml`
+and `native.toml` — and the other sixteen are invalid on purpose. `tests/config.rs` asserts the
+exact error variant of each of the sixteen, so editing one means editing its assertion with it.

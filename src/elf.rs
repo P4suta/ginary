@@ -53,9 +53,10 @@ pub enum ElfKind {
     Executable,
     /// `ET_DYN`, a shared object.
     ///
-    /// A position-independent *executable* is also an `ET_DYN`, which the
-    /// header does not distinguish and this enum therefore does not either;
-    /// [`ElfInfo::is_pie`] is what separates the two.
+    /// A position-independent *executable* is also an `ET_DYN`, which
+    /// `e_type` does not distinguish and this enum therefore does not either;
+    /// [`ElfInfo::is_pie`], read from `DT_FLAGS_1`, is what separates the
+    /// two, and `src/native.rs` classifies a file under `priv` by it.
     SharedObject,
     /// `ET_CORE`, a core dump.
     Core,
@@ -101,6 +102,14 @@ pub struct ElfInfo {
     /// numerically, component by component, so `2.9` is below `2.38`.
     pub glibc_max: Option<String>,
     /// Whether the file is a position-independent executable.
+    ///
+    /// `ET_DYN` with `DF_1_PIE` in its `DT_FLAGS_1`, which is the only field
+    /// that separates a program a modern linker made position-independent
+    /// from a shared library: both are `ET_DYN`, and a `PT_INTERP` does not
+    /// decide it either, because `libc.so.6` has one. `false`, therefore, for
+    /// a program linked before binutils 2.26 started setting the flag — a
+    /// trade this crate takes deliberately, since calling a C library a
+    /// program is the mistake that costs something.
     pub is_pie: bool,
     /// Whether the file has no `.symtab`, which is what `strip` removes.
     pub stripped: bool,
@@ -271,7 +280,12 @@ where
         .iter()
         .any(|section| section.sh_type(endian) == object::elf::SHT_SYMTAB);
     let kind = ElfKind::of(header.e_type(endian));
-    let is_pie = kind == ElfKind::SharedObject && (interp.is_some() || flags_1 & PIE_FLAG != 0);
+    // `DF_1_PIE` and nothing else. A `PT_INTERP` looks like the same answer
+    // and is not one: glibc's own `libc.so.6` carries an interpreter and does
+    // not carry this flag, so an interpreter would call the C library a
+    // program. Every toolchain since binutils 2.26 sets the flag on a real
+    // one.
+    let is_pie = kind == ElfKind::SharedObject && flags_1 & PIE_FLAG != 0;
 
     Ok(ElfInfo {
         class,

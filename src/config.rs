@@ -199,6 +199,22 @@ impl TargetConfig {
     }
 }
 
+/// The build hook of one package, `[tools.ginary.native.<package>]`.
+///
+/// Keyed by *package* rather than by target, because a hook is told which
+/// target it is building for: a project with one script and three targets
+/// writes the table once. `build` is a command line, run through `sh -c` in
+/// the project root with [`crate::native::HOOK_TARGET_TOKEN`] and
+/// [`crate::native::HOOK_OUT_DIR_TOKEN`] substituted; see
+/// [`crate::native::run_hook`] for the whole contract.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg(feature = "cli")]
+pub struct NativeConfig {
+    /// The command that builds this package's native code for one target.
+    pub build: Option<String>,
+}
+
 /// The `[tools.ginary]` table of a `gleam.toml`.
 ///
 /// Every field is optional and a missing table is [`ToolsConfig::default`],
@@ -246,6 +262,14 @@ pub struct ToolsConfig {
     /// one name be both an array of strings and a table: `targets` is the list
     /// of what to build, `[tools.ginary.target.<name>]` is how to build one.
     pub target: BTreeMap<String, TargetConfig>,
+    /// The per-package build hooks, `[tools.ginary.native.<package>]`.
+    ///
+    /// Read back through [`ToolsConfig::native_hooks`], which is the shape
+    /// [`crate::native::TargetNativeCfg`] is written in terms of. A package
+    /// with a hook *and* an override in a target's `native` map is answered by
+    /// the override, which is what makes vendoring one file for one target
+    /// possible without deleting the hook that builds the rest.
+    pub native: BTreeMap<String, NativeConfig>,
 }
 
 #[cfg(feature = "cli")]
@@ -277,6 +301,7 @@ impl Default for ToolsConfig {
                 .map(|name| (*name).to_owned())
                 .collect(),
             target: BTreeMap::new(),
+            native: BTreeMap::new(),
         }
     }
 }
@@ -909,6 +934,8 @@ pub struct BuildFlags {
     pub stub: Option<PathBuf>,
     /// `--explain`.
     pub explain: bool,
+    /// `--allow-native-mismatch`.
+    pub allow_native_mismatch: bool,
     /// `-v`, counted, so that `-vv` stays open.
     pub verbose: u8,
 }
@@ -971,6 +998,15 @@ pub struct BuildOptions {
     /// instruction, so a build that cannot use the file it names refuses
     /// rather than looking elsewhere.
     pub stub: Option<PathBuf>,
+    /// The build hooks, `[tools.ginary.native.<package>] build`, by package.
+    pub native_hooks: BTreeMap<String, String>,
+    /// Whether native code for another target is shipped rather than refused.
+    ///
+    /// `--allow-native-mismatch`, and only the flag: there is no key for it,
+    /// because a project that recorded "ship it anyway" in its manifest would
+    /// carry the decision into every later build and nobody would see it
+    /// again.
+    pub allow_native_mismatch: bool,
     /// Whether to print the closure and staging accounts before the report.
     pub explain: bool,
     /// How much the build says about itself on standard error.
@@ -1147,10 +1183,32 @@ impl BuildOptions {
             targets: crate::target::resolve_targets(&flags.targets, &config.tools.targets)?,
             named_targets: crate::target::names_a_target(&flags.targets, &config.tools.targets),
             target_config: config.tools.target.clone(),
+            native_hooks: config.tools.native_hooks(),
+            allow_native_mismatch: flags.allow_native_mismatch,
             stub: flags.stub.clone(),
             explain: flags.explain,
             verbose: flags.verbose,
         })
+    }
+}
+
+#[cfg(feature = "cli")]
+impl ToolsConfig {
+    /// The build hooks, `[tools.ginary.native.<package>] build`, by package.
+    ///
+    /// One map rather than the sub-tables themselves, because that is what
+    /// [`crate::native::TargetNativeCfg`] is written in terms of: a package
+    /// name against the command that builds its native code.
+    pub fn native_hooks(&self) -> BTreeMap<String, String> {
+        self.native
+            .iter()
+            .filter_map(|(package, config)| {
+                config
+                    .build
+                    .as_ref()
+                    .map(|command| (package.clone(), command.clone()))
+            })
+            .collect()
     }
 }
 

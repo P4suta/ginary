@@ -43,7 +43,8 @@ use crate::download::Net;
 use crate::error::LauncherError;
 use crate::erts_source::{ErtsSourceSpec, SourceContext};
 use crate::gleam::{self, GleamError, ProjectDir};
-use crate::manifest::{AppRef, LaunchSpec, Manifest, ManifestError, OtpProvenance};
+use crate::manifest::{AppRef, LaunchSpec, Manifest, ManifestError, NativeRef, OtpProvenance};
+use crate::native::{self, NativeArtifact, NativeError, ReconcileCtx, TargetNativeCfg};
 use crate::otp::OtpError;
 use crate::payload::PayloadError;
 use crate::report::{ReportError, SizeReport};
@@ -422,8 +423,17 @@ pub fn build_with_stub(
         gleam::export_shipment(&project, diag)?
     };
 
+    // Once for the whole build, however many targets it produces: the
+    // shipment does not change between them, and reading every object under
+    // `priv` three times would say the same thing three times.
+    let natives = {
+        let _phase = diag.phase("native-scan");
+        native::scan_shipment(&shipment)?
+    };
+    diag.kv("native", &[("objects", &natives.len().to_string())]);
+
     let work = work_dir(&opts.root, std::process::id());
-    let outcome = build_each_target(opts, &stubs, &shipment, &work, diag);
+    let outcome = build_each_target(opts, &stubs, &shipment, &natives, &work, diag);
 
     if opts.keep_staging {
         outcome.map(|mut report| {
@@ -770,12 +780,19 @@ fn build_each_target(
     opts: &BuildOptions,
     stubs: &[TargetStub],
     shipment: &Path,
+    natives: &[NativeArtifact],
     work: &Path,
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
     let mut whole: Option<BuildReport> = None;
     let mut rows: Vec<TargetBuild> = Vec::with_capacity(stubs.len());
-    let mut warnings: Vec<String> = Vec::new();
+    // The scan's own warnings first, and unattributed: a file under `priv`
+    // that begins like an object and will not parse is a fact about the
+    // shipment, which every target of this build shares.
+    let mut warnings: Vec<String> = natives
+        .iter()
+        .filter_map(|artifact| artifact.warning.clone())
+        .collect();
     let attributed = stubs.len() > 1;
     let sources = runtime_sources(opts, stubs)?;
 
@@ -828,6 +845,7 @@ fn build_each_target(
             target: *target,
             erts: &erts,
             set: &set,
+            natives,
         };
         let mut report = assemble_and_write(opts, &job, &entry.path, entry.len, work, diag)?;
         // The runtime's own warnings are this target's warnings. They go in
@@ -874,6 +892,8 @@ struct TargetJob<'a> {
     erts: &'a crate::erts_source::ResolvedErts,
     /// The applications, resolved against [`TargetJob::erts`]'s library.
     set: &'a AppSet,
+    /// Every native object the shipment holds, scanned once for the build.
+    natives: &'a [NativeArtifact],
 }
 
 /// Stages, strips, measures, packs and writes one target's artifact.
@@ -889,7 +909,12 @@ fn assemble_and_write(
     work: &Path,
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
-    let TargetJob { target, erts, set } = *job;
+    let TargetJob {
+        target,
+        erts,
+        set,
+        natives,
+    } = *job;
     let otp = &erts.otp;
     let out = opts.artifact_path(target);
     let root = work.join(WORK_STAGE_NAME);
@@ -910,7 +935,56 @@ fn assemble_and_write(
     // Before stripping and before the tree is measured: the two files are part
     // of the artifact, so they belong in the size report and in the listing the
     // payload is packed from.
-    let warnings = stage_runtime_files(opts, &mut staged, diag)?;
+    let mut warnings = stage_runtime_files(opts, &mut staged, diag)?;
+
+    // What this artifact carries, which is the closure and not the whole
+    // shipment: an object in an application nothing depends on never travels,
+    // so it is not this target's to answer for. See
+    // [`crate::native::staged_only`].
+    let natives = native::staged_only(natives, staged.root());
+    let natives = natives.as_slice();
+
+    // After staging and before stripping: `apply` rewrites files in the staged
+    // tree, and a replacement that arrived after `strip` had run would be the
+    // one object in the artifact nobody stripped. A cross-architecture
+    // replacement is not stripped either way — `strip` skips every file whose
+    // machine is not this host's, and says so in its report.
+    let replaced = {
+        let _phase = diag.phase("native");
+        let overrides = opts
+            .target_config
+            .get(&target.name())
+            .map(|config| &config.native);
+        let empty = BTreeMap::new();
+        let cfg = TargetNativeCfg {
+            overrides: overrides.unwrap_or(&empty),
+            hooks: &opts.native_hooks,
+        };
+        let done = native::reconcile(
+            natives,
+            &ReconcileCtx {
+                target: &target,
+                erts_nif_loading: erts.nif_loading,
+                cfg: &cfg,
+                project_root: &opts.root,
+                work_dir: work,
+                erts_root: &otp.root,
+                erts_version: &otp.erts_vsn,
+                otp_version: &otp.otp_version,
+                allow_mismatch: opts.allow_native_mismatch,
+            },
+        )?;
+        diag.kv(
+            "native",
+            &[
+                ("target", &target.name()),
+                ("replaced", &done.replacements.len().to_string()),
+            ],
+        );
+        native::apply(&done.replacements, staged.root())?;
+        warnings.extend(done.warnings);
+        done.replacements
+    };
 
     let stripper = beam_stripper(erts)?;
     let strip_report = {
@@ -923,7 +997,13 @@ fn assemble_and_write(
     let size_report = crate::report::measure(&staged, &strip_report, staged.root())?;
     let staged = staged.refresh()?;
 
-    let manifest = manifest_for(opts, target, erts, set)?;
+    let manifest = manifest_for(
+        opts,
+        target,
+        erts,
+        set,
+        native_manifest_rows(natives, &replaced, staged.root())?,
+    )?;
     let (payload_len, sha256) = {
         let _phase = diag.phase("pack");
         write_artifact(opts, &out, stub, stub_len, staged.root(), &manifest)?
@@ -967,6 +1047,70 @@ fn assemble_and_write(
         warnings,
         explain,
     })
+}
+
+/// The `native` list one artifact's manifest carries.
+///
+/// Read back off the *staged tree*, after the replacements have been applied
+/// and the tree has been stripped, because the manifest is a record of what
+/// the artifact holds rather than of what the shipment did: an object an
+/// override replaced records the machine of the file that replaced it, and
+/// `ginary verify` holds the manifest to exactly that.
+///
+/// The list handed in is already the staged one — [`crate::native::staged_only`]
+/// narrowed it before the reconciliation — and the existence check below is
+/// what makes that a property of this function rather than of its caller: a
+/// manifest listing a file the payload does not carry is the finding
+/// [`crate::verify::Issue::NativeRowMissing`] exists for.
+///
+/// # Errors
+///
+/// [`BundleError::Native`] when a staged object cannot be read.
+fn native_manifest_rows(
+    natives: &[NativeArtifact],
+    replaced: &[crate::native::Replacement],
+    root: &Path,
+) -> Result<Vec<NativeRef>, BundleError> {
+    let mut rows = Vec::new();
+    for artifact in natives {
+        let relative = artifact.staged_path();
+        let path = root.join(&relative);
+        if !path.is_file() {
+            continue;
+        }
+        let Some(description) = native::describe_object(&path)? else {
+            continue;
+        };
+        let source = replaced
+            .iter()
+            .find(|replacement| replacement.artifact_rel_path == artifact.rel_path)
+            .map(|replacement| replacement.source.label().to_owned());
+        rows.push(NativeRef {
+            path: relative,
+            kind: manifest_native_kind(description.format),
+            machine: description
+                .facts
+                .as_ref()
+                .map(|facts| facts.machine.clone()),
+            target: description.facts.as_ref().and_then(|facts| facts.target),
+            replaced: source.is_some(),
+            source,
+        });
+    }
+    Ok(rows)
+}
+
+/// The manifest's word for one container format.
+///
+/// Two enumerations rather than one because they answer different questions:
+/// [`crate::native::ObjectFormat`] is what a build reads, and
+/// [`crate::manifest::NativeKind`] is a wire value `docs/format.md` fixes.
+const fn manifest_native_kind(format: crate::native::ObjectFormat) -> crate::manifest::NativeKind {
+    match format {
+        crate::native::ObjectFormat::Elf => crate::manifest::NativeKind::Elf,
+        crate::native::ObjectFormat::Pe => crate::manifest::NativeKind::Pe,
+        crate::native::ObjectFormat::MachO => crate::manifest::NativeKind::Macho,
+    }
 }
 
 /// Writes `<out>-<target>.json`, the manifest a suffixed build copies out.
@@ -1148,6 +1292,7 @@ fn manifest_for(
     target: Target,
     erts: &crate::erts_source::ResolvedErts,
     set: &AppSet,
+    native: Vec<NativeRef>,
 ) -> Result<Manifest, BundleError> {
     let otp = &erts.otp;
     let otp_applications: Vec<AppRef> = set
@@ -1219,10 +1364,9 @@ fn manifest_for(
             heart: opts.heart,
             env: opts.env.clone(),
         },
-        // Nothing is recorded yet: `native.rs` is Phase C, and an empty list
-        // is what `docs/format.md` says an artifact with no declared native
-        // objects carries.
-        native: Vec::new(),
+        // What the artifact ended up carrying, read back off the staged tree
+        // after every replacement was applied; see [`native_manifest_rows`].
+        native,
         created_at,
         ginary_version: env!("CARGO_PKG_VERSION").to_owned(),
         extra: BTreeMap::new(),
@@ -1409,6 +1553,12 @@ pub enum BundleError {
     /// The size report could not be measured.
     #[error("cannot measure the staged tree")]
     Report(#[from] ReportError),
+    /// The shipment's native code could not be reconciled with the target.
+    ///
+    /// The headline says which half of the build refused; the cause is the
+    /// table naming every object and the `gleam.toml` keys that answer for it.
+    #[error("cannot ship the native code this shipment carries")]
+    Native(#[from] NativeError),
     /// The stub is itself a packaged application.
     #[error(
         "{path} is a packaged application: a bundled executable cannot build; install plain \

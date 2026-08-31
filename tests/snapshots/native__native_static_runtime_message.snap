@@ -1,0 +1,8 @@
+---
+source: tests/native.rs
+expression: error.to_string()
+---
+the runtime bundled for linux-aarch64-musl is statically linked and cannot load a shared object
+package  artifact
+esqlite  esqlite/priv/esqlite3_nif.so
+fix: [tools.ginary.target."linux-aarch64-musl"] otp_variant = "dynamic", or build for a gnu target; --allow-native-mismatch does not lift this one, because a static emulator has no dynamic loader to call

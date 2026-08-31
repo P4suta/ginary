@@ -33,7 +33,7 @@ use ginary::assemble::{Category, StageListing, StagedApp, StagedFile, StagedSour
 use ginary::manifest::{
     AppRef, LaunchSpec, LibcRequirement, Manifest, NativeKind, NativeRef, OtpProvenance,
 };
-use ginary::target::Target;
+use ginary::target::{Arch, Libc, Os, Target};
 
 use sha2::{Digest, Sha256};
 
@@ -481,6 +481,10 @@ pub fn sample_manifest() -> Manifest {
         native: vec![NativeRef {
             path: "lib/crypto-5.9.2/priv/lib/crypto.so".to_owned(),
             kind: NativeKind::Elf,
+            machine: Some("x86_64".to_owned()),
+            target: Some(Target::new(Os::Linux, Arch::X86_64, Libc::Gnu)),
+            replaced: false,
+            source: None,
         }],
         created_at: "2026-08-31T00:00:00Z".to_owned(),
         ginary_version: "0.1.0".to_owned(),

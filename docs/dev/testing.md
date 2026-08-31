@@ -8,7 +8,7 @@
 | `src/target.rs` unit tests | target names, parsing, round trips, the seven supported targets |
 | `src/cache_dir.rs` unit tests | precedence, empty values, relative `XDG_CACHE_HOME`, no variable set |
 | `src/doctor.rs` unit tests | version parsers, the probe list, tool reports, report rendering |
-| `src/process.rs` unit tests | the `PATH` search, a bounded child, the timeout, a chatty pipe, a grandchild holding the pipes, child reaping |
+| `src/process.rs` unit tests | the `PATH` search, a bounded child, the timeout, a chatty pipe, a grandchild holding the pipes, child reaping, and `shell_quote` — the words it leaves alone, the ones it wraps, the single quote it closes and reopens, and a `/bin/sh` that reads eight of them back unchanged |
 | `src/appfile.rs` unit tests | the internals no integration test can reach: atom quoting, escaping, float rendering, the nesting bound, the warning paths |
 | `src/cli.rs` unit tests | clap definition validity, parsing, JSON and text command output |
 | `tests/smoke_cli.rs` | the real binary: `--help`, `version`, `version --json`, no-argument exit 2, `doctor`, `doctor --json` |
@@ -37,16 +37,16 @@
 | `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts, the runtime settings, pruning on launch and the fault points |
 | `tests/cache_lock.rs` | the two locks against util-linux `flock(1)`: a shared lock does not exclude a second shared lock and does exclude an exclusive one, `try_exclusive` answers `None` for an entry somebody holds, and the descriptor a `SharedLock` carries is not close-on-exec |
 | `tests/artifact_real.rs` | toolchain-gated: one real artifact, assembled by hand out of the fixture and run with a cleared environment |
-| `tests/config.rs` | `[tools.ginary]`: the defaults, every key, the five rules serde cannot state, the merge of the CLI flags over the table, and the four shapes a `--out` can take |
+| `tests/config.rs` | `[tools.ginary]`: the defaults, every key, the five rules serde cannot state, the merge of the CLI flags over the table, the four shapes a `--out` can take, and the C4 native settings — a `[tools.ginary.native.<package>]` table read back against its package, and a target's own `native` map beside its hooks |
 | `tests/gleam.rs` | the upward search for `gleam.toml`, what `--skip-export` reuses and what it says when there is nothing to reuse, the version line, and two gated runs of a real `gleam` |
 | `tests/bundle.rs` | the parts of the build a machine with no toolchain can still hold: the refusal of a stub that already carries a trailer — through `check_stub` and through `build_with_stub`, which pins that the refusal comes *before* the export — the work directory's name, and the report's two rendered forms |
 | `tests/inspect.rs` | the text report and the launch plan over a hand-built `ArtifactInfo`, and a `SyntheticArtifact` opened, verified, and damaged in the two ways that matter |
 | `tests/e2e_hello.rs` | toolchain-gated: `ginary build` in a copy of the `hello_ffi` fixture, and everything that follows — running the artifact with no Erlang on the machine, the warm cache, byte-identical rebuilds under `SOURCE_DATE_EPOCH`, `--report json` against the artifact's own size on disk, `--explain`, `-v` beside `GINARY_TRACE`, `inspect --verify`, `GINARY_CMD`, and the work directory |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
-| `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, and a gated run over a real `ginary build` |
+| `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, the two ways `manifest.native` can lie about the artifact it describes — a row naming a file the index does not hold and a row recording a machine the object does not have — and a gated run over a real `ginary build` |
 | `tests/sbom.rs` | the SPDX 2.3 document: the namespace derived from the payload digest, the whole document as a snapshot, the fields SPDX requires, the two relationship kinds, hex against `NOASSERTION`, a Gleam `manifest.toml` read, one refused and one absent, determinism over two runs, the command's `--out`, and two gated builds pinning `ginary build --sbom` and `--sbom-out` down to the report's last line |
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
-| `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing |
+| `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing; C4 adds the per-target columns of the native table — the rendered table over one verdict of each kind, and the verdicts a project's own configuration reaches over an object under `priv` |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
 | `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator |
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
@@ -59,6 +59,8 @@
 | `tests/otp_cli.rs` | `ginary otp`: the list table and its `--target` and `--json` forms, an empty catalog explaining itself, `path` printing one line and never fetching, `fetch` refusing offline and naming what the catalog does hold, `update` copying bytes only after validating them, `GINARY_CATALOG`, and `repack --help` |
 | `tests/e2e_cross.rs` | four-way gated: a real cross build out of the committed catalog for `linux-x86_64-musl`, `linux-aarch64-musl` and `linux-x86_64-gnu`, each artifact run in a container with no Erlang and no network, the aarch64 row behind a binfmt probe and the glibc row on the oldest Debian its own catalog entry allows |
 | `tests/smoke_matrix.rs` | the C3 scaffolding held against the repository: the smoke-matrix script committed, executable, probing before it installs a binfmt handler and printing a PASS/FAIL table; the two mise tasks; `git check-ignore` proving the catalog committed and the tarballs not; and the four documents — the ADR and its index entry, the catalog schema in `docs/format.md`, the README's quickstart and caveats, and this table |
+| `tests/native.rs` | the native half of a cross build, over fabricated objects: the scan — every object under `priv` in path order, the magic deciding rather than the extension, an ELF under `ebin` left alone, the format, machine and target of an ELF, a PE and a Mach-O, a library told from a program, the four files that begin like an object and are not one (a truncated ELF, a truncated Mach-O, a DOS `MZ`, an object past the size bound) and the directory a walk stopped at — and the reconciliation: an object already for the target kept, an override applied, verified, refused for the wrong machine and refused when it is not there, a static override accepted with a note, a hook's environment and working directory, a hook that writes nothing, a hook that fails, a hook that builds for the wrong machine, a hook that writes once and cannot answer for a second target, an override winning before a hook runs, the mismatch table and the same rows as an `--allow-native-mismatch` warning, the static-runtime refusal that the flag does not lift, `apply` over a staged tree, and the verdict of each artifact |
+| `tests/e2e_native.rs` | four-way gated: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -143,11 +145,11 @@ compiled by nothing until `stubs:build` failed on a developer's machine.
 
 **How a test target chooses.** A file whose every claim is about a module the `cli` feature
 carries opens with `#![cfg(feature = "cli")]` under its module documentation, so a stub-flavor
-run compiles it to an empty test binary rather than to an error. Twenty-three of the integration
+run compiles it to an empty test binary rather than to an error. Twenty-five of the integration
 targets are in that group. What is left runs in both flavors: `tests/launcher.rs`,
 `tests/launch.rs`, `tests/cache.rs`, `tests/cache_lock.rs`, `tests/payload.rs`,
 `tests/manifest.rs`, `tests/trailer.rs`, `tests/target.rs`, `tests/diag.rs`, `tests/formal.rs`,
-`tests/stubid.rs`, `tests/stub_flavor.rs` and 29 of the 45 modules of `tests/regressions.rs`,
+`tests/stubid.rs`, `tests/stub_flavor.rs` and 15 of the 68 modules of `tests/regressions.rs`,
 which are gated one `mod` line at a time.
 
 That set is not an accident: it is exactly the modules a stub carries. `SyntheticArtifact` is
@@ -400,6 +402,31 @@ that a warm cache is used rather than re-fetched. The runtime inside every one o
 `FakeOtp`, whose `beam.smp` is a shell script, which is exactly the shape the *unseamed*
 inspection refuses and is why the catalogue tests drive `resolve_in_with` and `repack_with` with
 the ELF reader injected.
+
+`tests/common/native.rs` is what C4 added, and it is the fixture half of a milestone that has no
+cross toolchain to build a real fixture with. Three kinds of object, by the same rule the earlier
+helpers follow: `elf_bytes` writes a whole ELF64 by hand — the class, the endianness, `e_type`,
+`e_machine` and, when one is asked for, a single `PT_INTERP` program header pointing at the
+string behind it. That is the one shape no rewriting of a host binary can produce, and it is two
+shapes rather than one: an object whose interpreter names *musl* on a machine with no musl
+toolchain, and an object with no interpreter at all, which is what a musl NIF built `-static` is
+and the case `reconcile` accepts with a note rather than a guess. It is also a hundred and fifty
+bytes where a copy of this test run's own binary is thirteen megabytes on a disk the whole suite
+shares; `repack::patch_elf_machine` keeps the other technique, because its claims are about a
+file a linker actually wrote and these are about header fields. `pe_bytes` builds on
+`stubfile::pe_bytes` and rewrites the COFF `Characteristics` field, because the only thing that
+tells a `.dll` from a `.exe` is one bit and a test that could not set it could not tell a library
+from a program. `macho_bytes` is written by hand, the way the PE helper is: eight fields, no load
+commands, `ncmds` zero — a whole if empty object — and `macho_magic_only` is the four bytes that
+are *not* one, which is the `Unknown` row and the warning beside it. `dos_stub` is the other
+half of that pair for PE: the `MZ` magic with no `PE\0\0` signature where its DOS header points,
+which is a file that begins like an object and is not one. `plant` and `plant_executable` write a
+fixture into a tree the test owns.
+
+One shape the file cannot fabricate is a position-independent *program*, because `DF_1_PIE` lives
+in a `DT_FLAGS_1` entry of a real dynamic section. The tests that need one use
+`repack::test_binary` — this test run's own binary, which `cargo` links `-pie` — and that is the
+better fixture for the claim anyway: the classification rule is about what real linkers emit.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -866,6 +893,10 @@ committed and reviewed like any other assertion. Twelve exist:
 | `manifest__canonical_manifest_json.snap` | the wire field order of `ginary.json`, which is the struct's declaration order and not the alphabetical order `serde_json::Value` imposes |
 | `bundle__build_report_targets_table.snap` | the six-column table a build of more than one target prints instead of one `artifact:` line |
 | `doctor__doctor_targets_table.snap` | the targets table `doctor` prints, with one resolvable row and one that says which milestone it arrives with |
+| `doctor__doctor_project_native_table.snap` | the project's native table with one column per configured target, one verdict of each kind |
+| `native__native_mismatch_message.snap` | the refusal a cross build over foreign native code prints: the table, and one `fix:` line per row naming both `gleam.toml` keys and the flag |
+| `native__native_mismatch_warning.snap` | the same rows, as the warning `--allow-native-mismatch` earns instead |
+| `native__native_static_runtime_message.snap` | the refusal a static runtime earns for a shared object it could never load, and the setting that fixes it |
 
 A snapshot is a contract, not a recording. `cargo insta review` is for reviewing a *deliberate*
 change to output; accepting a snapshot to make a red test pass is the same defect as weakening an

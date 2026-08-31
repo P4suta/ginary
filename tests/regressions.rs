@@ -169,3 +169,30 @@ mod c3_the_not_cached_remedy_dropped_the_flags_it_was_given;
 #[cfg(feature = "cli")]
 #[path = "regressions/c3_the_otp_cache_was_filled_without_a_lock.rs"]
 mod c3_the_otp_cache_was_filled_without_a_lock;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_catalog_path_with_a_space_was_not_quoted.rs"]
+mod c4_a_catalog_path_with_a_space_was_not_quoted;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_hook_ran_before_a_refusal_it_could_not_lift.rs"]
+mod c4_a_hook_ran_before_a_refusal_it_could_not_lift;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_hook_token_was_pasted_unquoted.rs"]
+mod c4_a_hook_token_was_pasted_unquoted;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_position_independent_program_was_a_shared_object.rs"]
+mod c4_a_position_independent_program_was_a_shared_object;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_shipment_app_outside_the_closure_stopped_the_build.rs"]
+mod c4_a_shipment_app_outside_the_closure_stopped_the_build;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_shipment_doctor_could_not_scan_said_nothing.rs"]
+mod c4_a_shipment_doctor_could_not_scan_said_nothing;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_a_static_musl_runtime_was_reported_ok.rs"]
+mod c4_a_static_musl_runtime_was_reported_ok;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_the_hook_shell_was_cmd_on_a_windows_host.rs"]
+mod c4_the_hook_shell_was_cmd_on_a_windows_host;
+#[cfg(feature = "cli")]
+#[path = "regressions/c4_the_kind_column_disagreed_with_the_verdict.rs"]
+mod c4_the_kind_column_disagreed_with_the_verdict;

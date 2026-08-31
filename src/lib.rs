@@ -99,6 +99,12 @@
 //! - [`stub`] — where the stub for a target comes from, and the gates it has
 //!   to pass before a payload is appended to it.
 //!
+//! Milestone C4 adds the module that decides whether the native code in a
+//! shipment can travel to the target being built for:
+//!
+//! - [`native`] — the objects under `priv`, the overrides and build hooks that
+//!   replace them, and the two refusals a cross build owes its user.
+//!
 //! Milestone C3 adds the two modules a cross-target build gets its runtime
 //! from, and the local pipeline that fills them:
 //!
@@ -150,6 +156,8 @@ pub mod inspect;
 pub mod launch;
 pub mod launcher;
 pub mod manifest;
+#[cfg(feature = "cli")]
+pub mod native;
 #[cfg(feature = "cli")]
 pub mod otp;
 pub mod payload;

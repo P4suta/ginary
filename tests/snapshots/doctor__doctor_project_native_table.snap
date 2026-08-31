@@ -1,0 +1,11 @@
+---
+source: tests/doctor.rs
+expression: report.render()
+---
+project: notify 3.1.4 (/w/notify)
+shipment: /w/notify/build/erlang-shipment (3600 seconds old)
+[tools.ginary]: read
+
+path                          machine  kind           host  needed     linux-x86_64-gnu  linux-aarch64-musl
+esqlite/priv/esqlite3_nif.so  x86_64   shared object  yes   libc.so.6  ok                static-runtime
+tooling/priv/bin/helper       aarch64  executable     no    -          MISMATCH          override

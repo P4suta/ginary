@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The C4 key: one build hook per package that ships native code. The table is
+# keyed by *package* rather than by target, because a hook is told which target
+# it is building for and a project that has one hook for two targets would
+# otherwise have to write it twice.
+#
+# `{target}` and `{out_dir}` are the two tokens ginary substitutes; everything
+# else in the command line is the project's own.
+
+name = "hooked_app"
+version = "2.0.0"
+target = "erlang"
+
+[dependencies]
+
+[tools.ginary]
+targets = ["linux-aarch64-musl"]
+
+[tools.ginary.native.esqlite]
+build = "sh scripts/build_nif.sh {target} {out_dir}"
+
+[tools.ginary.native.bcrypt]
+build = "make -C c_src TARGET={target} OUT={out_dir}"
+
+[tools.ginary.target.linux-aarch64-musl]
+erts = "catalog"
+
+[tools.ginary.target.linux-aarch64-musl.native]
+"esqlite/priv/esqlite3_nif.so" = "vendor/esqlite3_nif-aarch64-musl.so"

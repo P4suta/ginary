@@ -302,6 +302,27 @@ pub enum Issue {
         /// What the entry is instead.
         kind: String,
     },
+    /// `manifest.native` names a file the index does not hold.
+    ///
+    /// The manifest's list is what a reader is handed when they ask what
+    /// native code an artifact carries, and a row naming nothing is either a
+    /// build that listed a file it did not pack or a manifest somebody
+    /// rewrote. Either way the answer to the question is wrong.
+    #[error("{path}: the manifest lists it as native code, and the index has no such file")]
+    NativeRowMissing {
+        /// The path the manifest's row named.
+        path: String,
+    },
+    /// A `manifest.native` row records a machine the object does not have.
+    #[error("{path}: the manifest records machine {recorded}, and the object is {actual}")]
+    NativeMachineLie {
+        /// The object's path inside the artifact.
+        path: String,
+        /// The machine the manifest's row recorded.
+        recorded: String,
+        /// The machine the object in the payload really has.
+        actual: String,
+    },
 }
 
 impl Issue {
@@ -318,6 +339,8 @@ impl Issue {
             | Self::UnsafePath { path }
             | Self::ReservedEntry { path, .. }
             | Self::UnsupportedEntry { path, .. }
+            | Self::NativeRowMissing { path }
+            | Self::NativeMachineLie { path, .. }
             | Self::UnreadableObject { path, .. } => path,
         }
     }
@@ -343,6 +366,8 @@ impl Issue {
             Self::UnsafePath { .. } => 8,
             Self::ReservedEntry { .. } => 9,
             Self::UnsupportedEntry { .. } => 10,
+            Self::NativeRowMissing { .. } => 11,
+            Self::NativeMachineLie { .. } => 12,
         }
     }
 }
@@ -579,6 +604,7 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
     }
 
     objects.sort_by(|left, right| left.path.cmp(&right.path));
+    issues.extend(native_issues(&info, &objects));
     for object in &objects {
         issues.extend(object.issues.iter().cloned());
     }
@@ -598,6 +624,46 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         objects,
         issues,
     })
+}
+
+/// Every way `manifest.native` disagrees with the artifact it describes.
+///
+/// The manifest's list is what a reader is handed when they ask what native
+/// code an artifact carries, and nothing else in the archive is derived from
+/// it: the index is computed from the tree the packer walked and the objects
+/// are read out of the payload, so a row that names a file nobody packed, or
+/// that records a machine the object does not have, is a claim only this
+/// cross-check can deny. Both are the same class of defect — a manifest
+/// somebody rewrote, or a build that listed what it did not ship — and neither
+/// is visible from the digest, which describes the bytes and not what they were
+/// said to be.
+///
+/// A row whose object is not an ELF is checked for its *presence* only: the
+/// machine of a PE or a Mach-O is not read here, so there is nothing to hold
+/// the manifest to.
+fn native_issues(info: &ArtifactInfo, objects: &[ObjectInfo]) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for row in &info.manifest.native {
+        if !info.index.files.iter().any(|file| file.path == row.path) {
+            issues.push(Issue::NativeRowMissing {
+                path: row.path.clone(),
+            });
+            continue;
+        }
+        let Some(recorded) = row.machine.as_deref() else {
+            continue;
+        };
+        if let Some(object) = objects.iter().find(|object| object.path == row.path)
+            && object.machine != recorded
+        {
+            issues.push(Issue::NativeMachineLie {
+                path: row.path.clone(),
+                recorded: recorded.to_owned(),
+                actual: object.machine.clone(),
+            });
+        }
+    }
+    issues
 }
 
 /// Every way one payload entry disagrees with the index row that names it.
@@ -957,6 +1023,14 @@ mod tests {
                 path: path.to_owned(),
                 kind: "symlink".to_owned(),
             },
+            Issue::NativeRowMissing {
+                path: path.to_owned(),
+            },
+            Issue::NativeMachineLie {
+                path: path.to_owned(),
+                recorded: "x86_64".to_owned(),
+                actual: "aarch64".to_owned(),
+            },
         ];
         for issue in &issues {
             match issue {
@@ -970,11 +1044,13 @@ mod tests {
                 | Issue::IndexMissing { .. }
                 | Issue::UnsafePath { .. }
                 | Issue::ReservedEntry { .. }
-                | Issue::UnsupportedEntry { .. } => {}
+                | Issue::UnsupportedEntry { .. }
+                | Issue::NativeRowMissing { .. }
+                | Issue::NativeMachineLie { .. } => {}
             }
         }
         let ranks: Vec<u8> = issues.iter().map(Issue::rank).collect();
-        let places: Vec<u8> = (0..u8::try_from(issues.len()).expect("eleven variants")).collect();
+        let places: Vec<u8> = (0..u8::try_from(issues.len()).expect("thirteen variants")).collect();
         assert_eq!(
             ranks, places,
             "`rank` is the declaration order, one place each"
@@ -1008,13 +1084,13 @@ mod tests {
         // second: only a comparison that reads the path first orders these.
         let mut issues: Vec<Issue> = vec![
             every_issue("b").swap_remove(0),
-            every_issue("a").pop().expect("nine variants"),
+            every_issue("a").pop().expect("thirteen variants"),
         ];
 
         issues.sort_by(issue_order);
 
         assert_eq!(issues[0].path(), "a");
-        assert!(matches!(issues[0], Issue::UnsupportedEntry { .. }));
+        assert!(matches!(issues[0], Issue::NativeMachineLie { .. }));
         assert_eq!(issues[1].path(), "b");
     }
 

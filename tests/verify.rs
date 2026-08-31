@@ -32,6 +32,7 @@ mod common;
 use std::path::Path;
 
 use assert_cmd::Command;
+use ginary::manifest::{NativeKind, NativeRef};
 use ginary::verify::{
     self, Issue, LOADER_PREFIX, NEEDED_ALLOWLIST, ObjectInfo, VERIFY_FORMAT_VERSION, VerifyOptions,
     VerifyReport,
@@ -272,6 +273,82 @@ fn an_object_built_for_another_machine_is_a_mismatch() {
     );
     assert_eq!(report.objects.len(), 1);
     assert_eq!(report.objects[0].issues, report.issues);
+}
+
+#[test]
+fn a_manifest_row_naming_native_code_the_artifact_does_not_carry_is_an_issue() {
+    // `manifest.native` is what a reader is handed when they ask what native
+    // code an artifact holds. A row naming nothing is a build that listed a
+    // file it did not pack, or a manifest somebody rewrote afterwards; either
+    // way the answer to the question is wrong, and only the index can say so.
+    let dir = tempdir();
+    let artifact = repack::build(
+        dir.path(),
+        &RepackOptions {
+            artifact: repack::with_native_object(),
+            native: vec![
+                NativeRef {
+                    path: NATIVE_PATH.to_owned(),
+                    kind: NativeKind::Elf,
+                    machine: Some(ginary::target::Target::host().arch.as_str().to_owned()),
+                    target: Some(ginary::target::Target::host()),
+                    replaced: false,
+                    source: None,
+                },
+                NativeRef {
+                    path: "lib/hello/priv/lib/ghost.so".to_owned(),
+                    kind: NativeKind::Elf,
+                    machine: Some("aarch64".to_owned()),
+                    target: None,
+                    replaced: true,
+                    source: Some("override".to_owned()),
+                },
+            ],
+            ..RepackOptions::default()
+        },
+    );
+
+    let report = verify::verify(artifact.path()).expect("the artifact opens");
+
+    assert_eq!(
+        report.issues,
+        vec![Issue::NativeRowMissing {
+            path: "lib/hello/priv/lib/ghost.so".to_owned(),
+        }],
+        "the row that names a real file raises nothing"
+    );
+}
+
+#[test]
+fn a_manifest_row_that_lies_about_an_objects_machine_is_an_issue() {
+    let dir = tempdir();
+    let artifact = repack::build(
+        dir.path(),
+        &RepackOptions {
+            artifact: repack::with_native_object(),
+            native: vec![NativeRef {
+                path: NATIVE_PATH.to_owned(),
+                kind: NativeKind::Elf,
+                machine: Some("s390x".to_owned()),
+                target: None,
+                replaced: false,
+                source: None,
+            }],
+            ..RepackOptions::default()
+        },
+    );
+
+    let report = verify::verify(artifact.path()).expect("the artifact opens");
+
+    assert_eq!(
+        report.issues,
+        vec![Issue::NativeMachineLie {
+            path: NATIVE_PATH.to_owned(),
+            recorded: "s390x".to_owned(),
+            actual: ginary::target::Target::host().arch.as_str().to_owned(),
+        }],
+        "the manifest is held to the bytes the payload really carries"
+    );
 }
 
 #[test]

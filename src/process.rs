@@ -15,6 +15,7 @@
 //!
 //! Nothing in this module runs on the launcher path.
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -187,12 +188,37 @@ pub fn run_in_dir_with_timeout(
     dir: Option<&Path>,
     timeout: Duration,
 ) -> Result<ProcessOutput, ProcessError> {
+    run_env_in_dir_with_timeout(program, args, &[], dir, timeout)
+}
+
+/// [`run_in_dir_with_timeout`], with variables added to the environment.
+///
+/// `env` is *added to* what this process already has rather than replacing it,
+/// because the one caller is `native::run_hook` and a build hook is a
+/// developer's own command line: it needs the `PATH` that finds its compiler
+/// and the `HOME` that finds its toolchain, and the variables named here are
+/// the contract ginary adds on top. A name given twice takes the last value,
+/// which is `Command`'s own rule.
+///
+/// # Errors
+///
+/// As [`run_with_timeout`].
+pub fn run_env_in_dir_with_timeout(
+    program: &Path,
+    args: &[&str],
+    env: &[(&str, OsString)],
+    dir: Option<&Path>,
+    timeout: Duration,
+) -> Result<ProcessOutput, ProcessError> {
     let mut command = Command::new(program);
     command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in env {
+        command.env(name, value);
+    }
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
@@ -298,6 +324,64 @@ fn unpoison<T>(result: std::sync::LockResult<T>) -> T {
     result.unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The characters a POSIX shell reads as themselves, so a word made only of
+/// them needs no quoting.
+///
+/// Deliberately short: everything a version, a target, a variant or an
+/// ordinary path is made of, and nothing whose meaning depends on where in the
+/// word it sits. `~` is absent because a leading one is expanded, `=` and `:`
+/// are here because they appear inside paths and options and neither is
+/// special to `sh` in a word.
+const SHELL_SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/=:,+@%";
+
+/// Renders one word so that a POSIX shell reads it back as this exact string.
+///
+/// Every command ginary *suggests* is a command a user pastes into a shell,
+/// and a path is not a word: `~/My Documents/catalog.json` pasted bare is two
+/// arguments and `$(id)` is a command substitution. A remedy that has to be
+/// repaired before it runs is not a remedy, which is what
+/// `catalog::fetch_command` found — see
+/// `tests/regressions/c4_a_catalog_path_with_a_space_was_not_quoted.rs`.
+///
+/// A word of nothing but unremarkable characters — letters, digits and
+/// `._-/=:,+@%` — is returned as it stands, because quoting `29.0.5` would
+/// only make the line harder to read. Anything
+/// else is wrapped in single quotes, inside which a shell expands nothing at
+/// all; the one character that cannot appear there is the single quote itself,
+/// which is written as `'\''` — close, escape one, reopen. An empty word
+/// quotes to `''`, which is how a shell is told about an argument that is
+/// there and empty.
+///
+/// This renders for `/bin/sh`. It is not an escaper for `cmd.exe`, and nothing
+/// here builds a command line for one.
+#[must_use]
+pub fn shell_quote(word: &str) -> Cow<'_, str> {
+    if !word.is_empty() && word.chars().all(|c| SHELL_SAFE.contains(c)) {
+        return Cow::Borrowed(word);
+    }
+    let mut quoted = String::with_capacity(word.len() + 2);
+    quoted.push('\'');
+    for c in word.chars() {
+        if c == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(c);
+        }
+    }
+    quoted.push('\'');
+    Cow::Owned(quoted)
+}
+
+/// [`shell_quote`] over a path, which is what most suggested commands carry.
+///
+/// A path that is not UTF-8 is rendered lossily, the same way every message in
+/// this crate renders one: the remedy is already about a path the user can see
+/// and a replacement character is more use than no line at all.
+#[must_use]
+pub fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy()).into_owned()
+}
+
 /// A child process that is killed and reaped when it goes out of scope.
 ///
 /// The obligation belongs to the value rather than to each `return`, so a new
@@ -399,6 +483,91 @@ mod tests {
 
     /// A bound long enough for a healthy child and short enough for a test.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn an_ordinary_word_is_left_alone() {
+        for word in [
+            "29.0.5",
+            "linux-x86_64-musl",
+            "/home/u/dist/otp/catalog.json",
+            "static",
+        ] {
+            assert_eq!(shell_quote(word), word, "{word} needs no quoting");
+            assert!(
+                matches!(shell_quote(word), Cow::Borrowed(_)),
+                "and is not copied"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_with_a_space_becomes_one_argument() {
+        assert_eq!(
+            shell_quote("/home/u/My Documents/catalog.json"),
+            "'/home/u/My Documents/catalog.json'"
+        );
+    }
+
+    #[test]
+    fn the_characters_a_shell_would_act_on_are_quoted_rather_than_dropped() {
+        for word in [
+            "a$(id)b", "a;b", "a|b", "a&b", "a>b", "a*b", "~/x", "a\\b", "a\nb", "a\"b",
+        ] {
+            let quoted = shell_quote(word);
+            assert!(
+                quoted.starts_with('\'') && quoted.ends_with('\''),
+                "{word} is quoted"
+            );
+            assert!(
+                quoted.contains(word),
+                "and its bytes survive verbatim: {quoted}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_quote_closes_escapes_and_reopens() {
+        assert_eq!(shell_quote("it's"), r#"'it'\''s'"#);
+    }
+
+    #[test]
+    fn an_empty_word_quotes_to_a_pair_of_quotes() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_reads_back_exactly_what_was_quoted() {
+        for word in [
+            "plain",
+            "two words",
+            "it's",
+            "a$(echo no)b",
+            "a;b",
+            "",
+            "~/x",
+            "a\\b",
+        ] {
+            let output = Command::new("/bin/sh")
+                .args(["-c", &format!("printf %s {}", shell_quote(word))])
+                .output()
+                .expect("a shell");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                word,
+                "a shell reads `{word}` back unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_quotes_the_way_a_word_does() {
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/my catalogs/c.json")),
+            "'/tmp/my catalogs/c.json'"
+        );
+        assert_eq!(shell_quote_path(Path::new("/tmp/c.json")), "/tmp/c.json");
+    }
 
     #[test]
     fn an_absent_path_variable_finds_nothing() {

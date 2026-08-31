@@ -1198,6 +1198,57 @@ fn target(name: &str) -> Target {
         .unwrap_or_else(|error| panic!("`{name}` must be a target: {error}"))
 }
 
+// ------------------------------------------------- the native settings --
+
+#[test]
+fn a_native_build_hook_table_does_not_make_a_manifest_unreadable() {
+    let config = ProjectConfig::from_toml(&config_fixture("native.toml"), Path::new(MANIFEST));
+
+    assert!(
+        config.is_ok(),
+        "`[tools.ginary.native.<package>]` is a table this build reads: {config:?}"
+    );
+}
+
+#[test]
+fn every_native_build_hook_is_read_back_against_its_package() {
+    let config = parse("native.toml");
+
+    assert_eq!(
+        config.tools.native_hooks(),
+        BTreeMap::from([
+            (
+                "bcrypt".to_owned(),
+                "make -C c_src TARGET={target} OUT={out_dir}".to_owned()
+            ),
+            (
+                "esqlite".to_owned(),
+                "sh scripts/build_nif.sh {target} {out_dir}".to_owned()
+            ),
+        ]),
+        "the command travels verbatim; the tokens are substituted when it runs"
+    );
+}
+
+#[test]
+fn a_targets_own_native_map_is_read_beside_its_hooks() {
+    let config = parse("native.toml");
+    let target = config
+        .tools
+        .target
+        .get("linux-aarch64-musl")
+        .expect("the sub-table is read");
+
+    assert_eq!(
+        target
+            .native
+            .get("esqlite/priv/esqlite3_nif.so")
+            .map(String::as_str),
+        Some("vendor/esqlite3_nif-aarch64-musl.so"),
+        "an override and a hook can name the same package: the override wins"
+    );
+}
+
 #[test]
 fn a_sub_table_is_read_key_by_key() {
     let config = parse("targets.toml");

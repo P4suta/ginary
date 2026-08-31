@@ -231,7 +231,7 @@ treats as incomplete and removes.
 | `otp_applications` | array of `{name, vsn}` | the applications from the OTP library |
 | `gleam_applications` | array of string | the applications from the shipment |
 | `launch` | object | below |
-| `native` | array of `{path, kind}` | `kind` is `elf`, `macho` or `pe` |
+| `native` | array of objects | below; `[]` for an artifact carrying no native code |
 | `created_at` | string | RFC 3339 in UTC, `SOURCE_DATE_EPOCH` honoured |
 | `ginary_version` | string | the ginary that built the artifact |
 
@@ -250,6 +250,26 @@ says `aarch64` and whose emulator is an x86-64 binary is caught at build time. `
 `static` when the emulator has no `PT_INTERP`, and `nif_loading` is `false` exactly then, because
 a statically linked emulator has no dynamic loader to call. `libc` is null on a platform with one
 system C runtime, and `min` is null for musl, which carries no symbol versions to derive one from.
+
+`native`, one entry per object the artifact carries:
+
+| key | type | notes |
+|-----|------|-------|
+| `path` | string | root-relative, `/`-separated: `lib/<app>/priv/lib/nif.so` |
+| `kind` | string | the container format: `elf`, `macho` or `pe` |
+| `machine` | string or null | `x86_64`, `aarch64`; null for a header nobody could read |
+| `target` | string or null | the canonical target the object names, when it names a whole one |
+| `replaced` | bool | whether the build put another file here |
+| `source` | string or null | `override` or `hook` when it did, null when it did not |
+
+The last four are additive and carry serde defaults, so an artifact built before C4 still reads
+back at `format_version` 1 as `{machine: null, target: null, replaced: false, source: null}`. Every
+one of them describes the file *in the payload* rather than the one the shipment held: an object a
+`[tools.ginary.target.<name>.native]` entry replaced records the machine of the replacement, which
+is what makes the list checkable. `target` is null for a Linux object with no `PT_INTERP` — it
+names a machine and no C library, which is what a static NIF is — and `ginary verify` reports a
+row that names a file the index does not hold, or that records a machine the streamed object does
+not have.
 
 `launch`:
 
