@@ -34,7 +34,13 @@ expression: json
     "eval": "'hello@@main':run('hello')",
     "erl_flags": [
       "+B"
-    ]
+    ],
+    "args_file": null,
+    "config": null,
+    "distribution": false,
+    "filename_encoding": "utf8",
+    "heart": false,
+    "env": {}
   },
   "native": [
     {

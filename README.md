@@ -69,7 +69,16 @@ strip_beams = true             # strip the .beam modules
 compression_level = 19         # zstd, 1 to 22
 otp_applications = ["sasl"]    # extra applications: bundled, not started
 erts_extra_bins = ["heart"]    # extra programs from the runtime's bin
-erl_flags = ["+fnu"]           # emulator flags placed before -eval
+erl_flags = ["+SDio", "4"]     # emulator flags placed before -eval
+
+vm_args = "config/vm.args"     # an erl -args_file, copied into the artifact
+sys_config = "config/sys.config"  # a sys.config, copied into the artifact
+distribution = false           # bundle epmd and start the runtime distributed
+filename_encoding = "utf8"     # utf8 | latin1 | auto -> +fnu | +fnl | +fna
+heart = false                  # bundle heart and start the runtime under it
+
+[tools.ginary.env]             # variables set only when the caller has not
+LOG_LEVEL = "info"
 ```
 
 A key ginary does not know is an error naming the key and the file: a setting the user believes
@@ -81,7 +90,71 @@ it, so a name holding a path separator or `..` is refused rather than followed.
 
 Every command-line flag wins over the table, and the table wins over the defaults. The two list
 settings merge rather than replace: `--extra-otp-app` is appended to `otp_applications` and
-`--extra-bin` to `erts_extra_bins`, deduplicated. Run `ginary build --help` for the full list.
+`--extra-bin` to `erts_extra_bins`, deduplicated. `--distribution`, `--vm-args` and
+`--sys-config` override the three runtime settings of the same name; a flag naming a file is
+relative to the working directory, while a value in the table is relative to the project. Run
+`ginary build --help` for the full list.
+
+### The runtime settings
+
+```toml
+# gleam.toml
+name = "worker"
+
+[tools.ginary]
+vm_args = "config/vm.args"
+sys_config = "config/sys.config"
+distribution = true
+heart = true
+
+[tools.ginary.env]
+LOG_LEVEL = "info"
+```
+
+```text
+# config/vm.args — flags the launcher does not own
+-sname worker
+-setcookie "a shared secret"
++S 4:4
+```
+
+```erlang
+%% config/sys.config — one term, and it is a list
+[{kernel, [{logger_level, notice}]}].
+```
+
+Building that project stages the args file at `releases/vm.args` and the configuration at
+`releases/sys.config`, bundles `epmd` (for `distribution`) and `heart`, and produces an artifact
+that starts its runtime with, in order:
+
+```text
+-args_file <root>/releases/vm.args
+-boot <root>/bin/no_dot_erlang -noshell +B +fnu
+-config <root>/releases/sys
+-heart
+-pa ... <erl_flags> <GINARY_ERL_FLAGS> -eval ... -extra <your arguments>
+```
+
+Four things about that vector are worth knowing.
+
+- **The args file comes first, so ginary's own flags win.** `erl` takes the last value of a
+  repeated flag. Everything in `vm.args` is a *default* the launcher's own flags override, which
+  is why the file may not hold `-args_file`, `-boot`, `-extra`, `-noinput`, `-noshell`, `-pa` or
+  `-pz`: the build refuses those by name, with the line they are on.
+- **`-config` carries no extension.** `erl` appends `.config` itself. The file is staged as
+  `releases/sys.config` and the argument names `releases/sys`. A `sys.config` that is not exactly
+  one top-level term, and that term a list, fails the build with a `file:line:column`.
+- **`distribution` removes `-start_epmd false` and bundles the daemon.** Without a `-name` or an
+  `-sname` — in `erl_flags` or in the args file — the build warns: a distributed runtime with no
+  node name is a runtime nothing can reach.
+- **`env` is applied only when the caller has not set the variable**, and only after the launcher
+  scrubs `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`, `ERL_ROOTDIR`, `ERL_EPMD_PORT` and
+  the `ERL_OTP*_FLAGS` family. A name in that scrub, an `ERL_`-prefixed name, and `ROOTDIR`,
+  `BINDIR`, `EMU`, `PROGNAME` or `HOME` are all refused at build time. With `heart`, the launcher
+  also sets `HEART_COMMAND` to the artifact's own path and the arguments it was given — unless
+  the caller exported one, which is a supervision policy ginary does not know better than.
+  `heart` hands that value to `/bin/sh -c`, so any element that a shell would split or expand is
+  single-quoted; an ordinary path and ordinary arguments come through as they are.
 
 ## Exit codes
 
@@ -105,13 +178,17 @@ usage error.
 |---|---|---|
 | `GINARY_CACHE_DIR` | the artifact | Use this directory as the cache root, verbatim. The escape hatch for a read-only or `noexec` home directory. |
 | `GINARY_ERL_FLAGS` | the artifact | Extra emulator flags for one run, split on whitespace and placed before `-eval`. |
-| `GINARY_CMD` | the artifact | Maintenance, kept out of `argv`: `directory` prints the cache entry and creates nothing, `extract-only` extracts and prints it, `inspect` prints the manifest and geometry as JSON. |
+| `GINARY_CMD` | the artifact | Maintenance, kept out of `argv`, one of five values: `directory` prints the cache entry and creates nothing, `extract-only` extracts and prints it, `inspect` prints the manifest and geometry as JSON, `selftest` extracts, preflights and starts the runtime on a no-op `halt`, reporting each step `PASS` or `FAIL`, and `uninstall` removes every cache entry of this application that nobody is running out of, reporting what it kept and why. It removes only what the cache wrote, so an `erl_crash.dump` beside the entries survives it. |
 | `GINARY_DEBUG=1` | both | One human-readable line per phase on standard error. |
 | `GINARY_TRACE=<file>` | both | One JSON object per phase, appended to the file. |
 | `GINARY_SUPERVISE=1` | the artifact | Spawn and wait instead of `execve`; a child killed by a signal exits `128 + signo`. |
+| `GINARY_PRUNE_DAYS` | the artifact | How many days an unused cache entry of this application may live. Defaults to 14; `0` turns pruning off. A value that is not a count of days falls back to the default rather than failing a launch. |
 | `SOURCE_DATE_EPOCH` | `ginary build` | Pins the manifest's `created_at`, so two builds of one project produce byte-identical artifacts. |
 
-`GINARY_PRUNE_DAYS`, `GINARY_OFFLINE` and `ginary cache prune` are planned rather than
+Every run prunes its own application's stale entries as it starts, best effort and never fatal;
+`ginary cache prune [--days N] [--all] [--app NAME]` does the same on demand over the whole
+cache. An entry a process is running out of is never removed, whatever its age — see
+[ADR 0010](docs/adr/0010-cache-locking-and-pruning.md). `GINARY_OFFLINE` is planned rather than
 implemented; see [docs/dev/debugging.md](docs/dev/debugging.md) for the whole table.
 
 ## How it works
@@ -155,13 +232,11 @@ forwarding, and the application receives its arguments exactly as typed.
   leaving the user's loader to.
 - Erlang target only. The Gleam JavaScript target is out of scope.
 - The BEAM is bundled, not embedded. The runtime is extracted to a per-user cache directory on
-  first run; ginary does not link the emulator into the executable. The cache is never pruned
-  yet.
+  first run; ginary does not link the emulator into the executable.
 - Hot code upgrades are not supported. `releases/` is not shipped and `release_handler` is not
   available.
 - Native code (NIFs, port programs) must match the target being packaged, and nothing is
   recorded about it in the manifest yet.
-- Runtime configuration — `vm_args`, `sys_config`, distribution and `epmd` — is Phase B.
 - Artifacts are not small. A trimmed runtime plus a small application is roughly 7.5 MB.
 
 ## Documentation

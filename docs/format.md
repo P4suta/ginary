@@ -173,7 +173,13 @@ treats as incomplete and removes.
     "boot": "bin/no_dot_erlang",
     "pa": ["lib/my_gleam_app/ebin", "lib/gleam_stdlib/ebin"],
     "eval": "'my_gleam_app@@main':run('my_gleam_app')",
-    "erl_flags": []
+    "erl_flags": [],
+    "args_file": null,
+    "config": null,
+    "distribution": false,
+    "filename_encoding": "utf8",
+    "heart": false,
+    "env": {}
   },
   "native": [],
   "created_at": "2026-08-30T00:00:00Z",
@@ -187,7 +193,8 @@ treats as incomplete and removes.
 - Every path is relative to the extracted root and uses `/` as separator on every platform. The
   launcher joins them with the native separator. `LaunchSpec::validate` refuses an empty value,
   an absolute one, a backslash, and any `.`, `..` or empty component, in `program`, `bindir`,
-  `boot` and every element of `pa`; `program` must additionally be a single component.
+  `boot`, every element of `pa`, and `args_file` and `config` when they are present; `program`
+  must additionally be a single component.
 - `otp_release` is a number, the same `u32` `OtpInfo` and `ginary.stage.json` carry.
 - `created_at` honours `SOURCE_DATE_EPOCH` so that builds are reproducible. A value that is not a
   count of seconds is an error rather than a silent fall back to the clock; an empty value is an
@@ -228,10 +235,57 @@ treats as incomplete and removes.
 | `pa` | array of string | one root-relative directory per `-pa` |
 | `eval` | string | the expression `-eval` is given |
 | `erl_flags` | array of string | extra flags, before `-extra` |
+| `args_file` | string or null | an `-args_file`, root-relative; absent is `null` |
+| `config` | string or null | a `-config`, root-relative and **without** `.config` |
+| `distribution` | bool | `true` drops `-start_epmd false` and bundles `epmd` |
+| `filename_encoding` | string | `utf8`, `latin1` or `auto`; `+fnu`, `+fnl`, `+fna` |
+| `heart` | bool | `true` passes `-heart` and sets `HEART_COMMAND` |
+| `env` | object of string | variables the launcher sets, each only when unset |
+
+The last six are **additive**: every one of them has a serde default, so a manifest written
+before they existed still parses and takes `null`, `false`, `"utf8"` and `{}`. That is what keeps
+`format_version` at 1 — see [Versioning](#versioning).
 
 The keys are serialised in the order of this table, which is the order the Rust struct declares
 them: `serde_json` preserves declaration order for a struct, and `tests/manifest.rs` pins it with
 a snapshot. Reading does not depend on the order.
+
+### The argument vector the launcher builds
+
+The fields above are read in exactly this order, and the order is the contract. Optional lines
+are absent when the field is `null` or `false`.
+
+```text
+[-args_file <root>/<launch.args_file>]
+-boot <root>/<launch.boot>
+-noshell
++B
++fnu | +fnl | +fna                     from launch.filename_encoding
+[-start_epmd false]                    absent when launch.distribution
+[-config <root>/<launch.config>]
+[-heart]                               when launch.heart
+-pa <root>/<launch.pa[0]> ... -pa <root>/<launch.pa[n]>
+<launch.erl_flags ...>
+<GINARY_ERL_FLAGS, split on ASCII whitespace>
+-eval <launch.eval>
+-extra
+<the user's arguments, byte for byte>
+```
+
+`-args_file` comes **first**, before anything ginary passes. `erl` takes the last value of a
+repeated flag, so a user file placed after `-noshell` could switch the shell back on; placed
+before it, everything the file names is a *default* that ginary's own flags override. An args
+file is linted at build time and may not hold `-args_file`, `-boot`, `-extra`, `-noinput`,
+`-noshell`, `-pa` or `-pz`.
+
+`config` carries no extension because `erl -config` appends `.config` itself; the file is staged
+as `releases/sys.config` and the manifest names `releases/sys`.
+
+The environment the launcher sets gains two entries beyond `ROOTDIR`, `BINDIR`, `EMU`,
+`PROGNAME`, `HOME` and `ERL_CRASH_DUMP`: every pair of `launch.env`, each only when the caller
+has not set that variable and never one the scrub removed, and `HEART_COMMAND` when
+`launch.heart` is set — the running artifact's own path followed by the arguments it was given,
+separated by spaces.
 
 ## Index: `ginary.index.json`
 
@@ -354,6 +408,27 @@ is a change to a *released* format: v1 has not shipped.
   failed with a bare `AlreadyExists`, which is the completeness marker surviving a rejection
   after all. Both ends now refuse the repeat by name — `unpack` with `DuplicateEntry`, `pack`
   with `ReservedName` — rather than leaving it to a file-system race between two writers.
+
+### v1, milestone B1 — six additive `launch` keys
+
+- **`args_file`, `config`, `distribution`, `filename_encoding`, `heart` and `env` are back, with
+  the code that writes them.** A3a removed four of these from the document precisely because
+  nothing wrote them; they return now that `[tools.ginary]` sets them and the launcher reads
+  them. `format_version` stays **1**: every one has a serde default, so a launcher that predates
+  them reads a manifest that carries them, and a launcher that has them reads a manifest that
+  does not.
+- **`config` is stored without its extension.** `erl -config` appends `.config`, so a manifest
+  that named `releases/sys.config` would send the runtime looking for `sys.config.config`. The
+  file is staged under its real name and the manifest names the stem.
+- **The args file is the first thing in the argument vector.** `erl` takes the last value of a
+  repeated flag. A user file that came after ginary's own flags could turn the shell back on,
+  put a second `-boot` in front of the bundled one, or change the code path; in front of them it
+  can only supply defaults. The build refuses the seven flags that would matter anyway, and the
+  position is what makes that refusal a second line of defence rather than the only one.
+- **`distribution` removes two arguments and adds none.** `-start_epmd false` goes; nothing
+  takes its place, because a distributed runtime starts the daemon itself. The daemon is bundled
+  at build time, so an artifact that says `true` and ships no `epmd` is a build error rather
+  than a run-time surprise.
 
 ### v1, milestone A3b
 

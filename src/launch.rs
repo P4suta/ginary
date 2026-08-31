@@ -14,10 +14,14 @@
 //! In this order, and the order is the contract:
 //!
 //! ```text
+//! [-args_file <root>/<launch.args_file>]
 //! -boot <root>/<launch.boot>
 //! -noshell
 //! +B
-//! -start_epmd false
+//! +fnu | +fnl | +fna                        from launch.filename_encoding
+//! [-start_epmd false]                       absent when launch.distribution
+//! [-config <root>/<launch.config>]
+//! [-heart]                                  when launch.heart
 //! -pa <root>/<launch.pa[0]>  ...  -pa <root>/<launch.pa[n]>
 //! <launch.erl_flags ...>
 //! <GINARY_ERL_FLAGS split on ASCII whitespace>
@@ -25,6 +29,13 @@
 //! -extra
 //! <the user's arguments, byte for byte>
 //! ```
+//!
+//! The args file comes **first**, before anything ginary passes. `erl` takes
+//! the last value of a repeated flag, so a user file placed after `-noshell`
+//! could switch the shell back on; placed before it, the user's flags are
+//! defaults that ginary's own flags override. That is the whole reason for the
+//! position, and it is why `docs/format.md` documents the file as a set of
+//! defaults rather than as overrides.
 //!
 //! `-extra` is the last thing ginary contributes. Everything after it is the
 //! application's, carried as [`OsString`] so that an argument which is not
@@ -37,13 +48,18 @@
 //! not set them — `HOME` and `ERL_CRASH_DUMP`. The first four are what
 //! `erlexec` would have derived from its own path if it were the real one; the
 //! last two are defaults, not overrides, because a user who set `HOME` meant
-//! it.
+//! it. Then the manifest's own `launch.env`, each only when the caller has not
+//! set it, and `HEART_COMMAND` when the manifest asks for `heart`.
 //!
 //! Removed: [`REMOVED_VARS`], plus every variable whose name begins `ERL_OTP`
 //! and ends `_FLAGS`. Those carry emulator flags from the developer's own
 //! Erlang installation into an artifact that ships its own, and a packaged
 //! application that behaves differently on one machine because of an exported
 //! `ERL_AFLAGS` is a support case nobody can reproduce.
+//!
+//! The removal list is built *before* `launch.env` is applied, and a name in
+//! both is not set: `env` may not put back what the scrub took out. The build
+//! refuses such a name, and this is the launcher's half of the same rule.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
@@ -78,9 +94,24 @@ pub const ERL_FLAGS_VAR: &str = "GINARY_ERL_FLAGS";
 /// The name of the crash dump the runtime writes.
 pub const CRASH_DUMP_NAME: &str = "erl_crash.dump";
 
+/// The variable `heart` re-runs the application with.
+///
+/// Set only when the manifest asks for `heart`, and only when the caller has
+/// not set one: a `HEART_COMMAND` the user exported is a deliberate
+/// supervision policy and the launcher does not know better than it.
+pub const HEART_COMMAND_VAR: &str = "HEART_COMMAND";
+
 /// The programs [`preflight`] checks under the manifest's bindir, besides the
 /// launch program itself.
 pub const REQUIRED_BINARIES: [&str; 3] = ["beam.smp", "erl_child_setup", "inet_gethost"];
+
+/// The expression `GINARY_CMD=selftest` gives `-eval` instead of the
+/// manifest's.
+///
+/// A selftest answers one question — can this artifact start its runtime on
+/// this machine — and running the application to answer it would be answering
+/// a different one. The runtime comes up, halts, and no application code runs.
+pub const HALT_EVAL: &str = "erlang:halt(0)";
 
 /// Everything needed to start the runtime, and nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +153,9 @@ pub enum PreflightIssue {
 /// `crash_dump_dir` is where `ERL_CRASH_DUMP` points when the user has not set
 /// it — the *application* directory rather than the entry, so a dump survives
 /// the cache entry that produced it and a user can find it after an upgrade.
+/// `self_exe` is the running artifact, which is what `HEART_COMMAND` names
+/// when the manifest asks for `heart`: nothing else on the machine can restart
+/// this application.
 ///
 /// # Errors
 ///
@@ -136,24 +170,51 @@ pub fn plan(
     user_args: &[OsString],
     env: &Env,
     crash_dump_dir: &Path,
+    self_exe: &Path,
 ) -> Result<LaunchPlan, LauncherError> {
     m.validate()?;
 
     let bindir = root.join(&m.launch.bindir);
     let program = bindir.join(&m.launch.program);
 
+    let mut args: Vec<OsString> = Vec::new();
+
+    // First of all, before ginary's own flags: `erl` takes the last value of a
+    // repeated flag, so the user's file is a set of defaults this vector then
+    // overrides rather than a set of overrides.
+    if let Some(args_file) = &m.launch.args_file {
+        args.push(OsString::from("-args_file"));
+        args.push(root.join(args_file).into_os_string());
+    }
+
     // The fixed head, in the order `docs/format.md` fixes it. `-start_epmd`
     // and `false` are two argv items, not one: the flag takes its value as a
     // separate argument, and an `erlexec` given `-start_epmd false` as a single
     // word would start the daemon this artifact deliberately does not ship.
-    let mut args: Vec<OsString> = vec![
-        OsString::from("-boot"),
-        root.join(&m.launch.boot).into_os_string(),
-        OsString::from("-noshell"),
-        OsString::from("+B"),
-        OsString::from("-start_epmd"),
-        OsString::from("false"),
-    ];
+    args.push(OsString::from("-boot"));
+    args.push(root.join(&m.launch.boot).into_os_string());
+    args.push(OsString::from("-noshell"));
+    args.push(OsString::from("+B"));
+    // A manifest whose encoding this build has no flag for contributes none.
+    // The build refuses such a value, so the only way here is an artifact from
+    // a newer ginary, and passing an emulator flag ginary invented would be
+    // worse than leaving the runtime on its own default.
+    if let Some(flag) = crate::config::filename_encoding_flag(&m.launch.filename_encoding) {
+        args.push(OsString::from(flag));
+    }
+    // A distributed artifact bundles `epmd` and lets the runtime start it;
+    // every other artifact ships no daemon and has to say so.
+    if !m.launch.distribution {
+        args.push(OsString::from("-start_epmd"));
+        args.push(OsString::from("false"));
+    }
+    if let Some(config) = &m.launch.config {
+        args.push(OsString::from("-config"));
+        args.push(root.join(config).into_os_string());
+    }
+    if m.launch.heart {
+        args.push(OsString::from("-heart"));
+    }
     for entry in &m.launch.pa {
         args.push(OsString::from("-pa"));
         args.push(root.join(entry).into_os_string());
@@ -168,6 +229,16 @@ pub fn plan(
     // emulator flag, and a packaged application owns every argument it is given.
     args.push(OsString::from("-extra"));
     args.extend(user_args.iter().cloned());
+
+    // Built before the environment is: `launch.env` is applied after the
+    // scrub, so a name in both lists has to be recognisable as one that was
+    // removed rather than set.
+    let mut remove: Vec<OsString> = REMOVED_VARS.iter().map(OsString::from).collect();
+    remove.extend(
+        env.keys()
+            .filter(|name| is_otp_flags_family(name))
+            .map(OsStr::to_os_string),
+    );
 
     let mut set: Vec<(OsString, OsString)> = vec![
         (OsString::from("ROOTDIR"), root.as_os_str().to_os_string()),
@@ -186,13 +257,34 @@ pub fn plan(
             crash_dump_dir.join(CRASH_DUMP_NAME).into_os_string(),
         ));
     }
-
-    let mut remove: Vec<OsString> = REMOVED_VARS.iter().map(OsString::from).collect();
-    remove.extend(
-        env.keys()
-            .filter(|name| is_otp_flags_family(name))
-            .map(OsStr::to_os_string),
-    );
+    // The names the launcher decides for itself, `HEART_COMMAND` included:
+    // it is pushed below rather than above, and a manifest may not get in
+    // first. `config::REJECTED_ENV_NAMES` refuses these at build time, so only
+    // a hand-written or older manifest reaches this, which is exactly the
+    // input the launcher may not trust.
+    let mut claimed: Vec<OsString> = set.iter().map(|(name, _)| name.clone()).collect();
+    if m.launch.heart {
+        claimed.push(OsString::from(HEART_COMMAND_VAR));
+    }
+    // The artifact's own defaults, on the same terms: only when the caller has
+    // said nothing, never a name the scrub above has just taken out, and never
+    // one the launcher has already decided.
+    for (name, value) in &m.launch.env {
+        let key = OsString::from(name);
+        if env.contains(name) || remove.contains(&key) || claimed.contains(&key) {
+            continue;
+        }
+        set.push((key, OsString::from(value)));
+    }
+    // The command `heart` re-runs, which can only be this artifact: nothing
+    // else on the machine knows how to start this application. A
+    // `HEART_COMMAND` the caller exported is a supervision policy of their own.
+    if m.launch.heart && !env.contains(HEART_COMMAND_VAR) {
+        set.push((
+            OsString::from(HEART_COMMAND_VAR),
+            heart_command(self_exe, user_args),
+        ));
+    }
 
     Ok(LaunchPlan {
         program,
@@ -200,6 +292,63 @@ pub fn plan(
         set,
         remove,
     })
+}
+
+/// `HEART_COMMAND`: the running artifact, then the arguments it was given.
+///
+/// Space-separated, because that is the only shape `heart` has: it hands the
+/// value to `/bin/sh -c`. That is also why every element is quoted when it
+/// needs to be — a path with a space in it, an argument with a space, a `;` or
+/// a `$(` — because the shell splits and expands the value again and a restart
+/// that ran half the path would be worse than no restart at all. A run with no
+/// arguments is the path alone, without a trailing space, and an ordinary path
+/// and ordinary arguments come through unquoted, so that the common case is a
+/// command a user can read and paste.
+fn heart_command(self_exe: &Path, user_args: &[OsString]) -> OsString {
+    let mut command = shell_word(self_exe.as_os_str());
+    for argument in user_args {
+        command.push(OsStr::new(" "));
+        command.push(shell_word(argument));
+    }
+    command
+}
+
+/// One element of a `/bin/sh` command line, quoted if the shell would touch it.
+///
+/// Single quotes, because inside them the shell expands nothing at all; an
+/// embedded `'` ends the quoting, escapes itself and starts it again, which is
+/// the one construction `sh` has for it. On bytes rather than characters: the
+/// value reaches `execve` as bytes and an argument that is not valid UTF-8 must
+/// survive.
+fn shell_word(word: &OsStr) -> OsString {
+    let bytes = word.as_bytes();
+    if !bytes.is_empty() && bytes.iter().all(|byte| is_shell_safe(*byte)) {
+        return word.to_os_string();
+    }
+    let mut quoted = Vec::with_capacity(bytes.len().saturating_add(2));
+    quoted.push(b'\'');
+    for byte in bytes {
+        if *byte == b'\'' {
+            quoted.extend_from_slice(b"'\\''");
+        } else {
+            quoted.push(*byte);
+        }
+    }
+    quoted.push(b'\'');
+    OsString::from_vec(quoted)
+}
+
+/// Whether a byte is one `/bin/sh` gives back unchanged, unquoted.
+///
+/// The conservative set: letters, digits and the punctuation that appears in
+/// paths and option arguments. Everything else — whitespace, quotes, `$`, `;`,
+/// `*`, a byte that is not ASCII — earns the quoting.
+const fn is_shell_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+        )
 }
 
 /// Splits `GINARY_ERL_FLAGS` on ASCII whitespace, as a shell would.
@@ -271,6 +420,149 @@ fn check_program(path: &Path) -> Result<(), PreflightIssue> {
     }
     Ok(())
 }
+
+/// The plan a selftest runs: the same launch, with nothing of the application.
+///
+/// Two changes to `plan`'s output and no others, so that what a selftest
+/// exercises is the argument vector the artifact would really use: the value
+/// after `-eval` becomes [`HALT_EVAL`], and everything from `-extra` onwards is
+/// dropped. A plan with neither is left alone, which is what a manifest a newer
+/// ginary wrote might produce.
+pub fn halt_plan(plan: &LaunchPlan) -> LaunchPlan {
+    let mut args = plan.args.clone();
+    if let Some(position) = args.iter().position(|argument| argument == "-eval")
+        && let Some(expression) = args.get_mut(position + 1)
+    {
+        *expression = OsString::from(HALT_EVAL);
+    }
+    if let Some(position) = args.iter().position(|argument| argument == "-extra") {
+        args.truncate(position);
+    }
+    LaunchPlan {
+        program: plan.program.clone(),
+        args,
+        set: plan.set.clone(),
+        remove: plan.remove.clone(),
+    }
+}
+
+/// Why one bounded run of the runtime did not end cleanly.
+#[derive(Debug, thiserror::Error)]
+pub enum RunIssue {
+    /// The program could not be started at all.
+    #[error("the runtime could not be started: {source}")]
+    Start {
+        /// What the operating system said.
+        #[source]
+        source: std::io::Error,
+    },
+    /// It started and left a non-zero exit code.
+    #[error("the runtime exited {code} rather than 0")]
+    Exit {
+        /// The code it left.
+        code: i32,
+    },
+    /// It was killed by a signal.
+    #[error("the runtime was killed by signal {signal}")]
+    Signal {
+        /// The signal that killed it.
+        signal: i32,
+    },
+    /// It was still running when the budget ran out, and was killed.
+    #[error("the runtime did not exit within {seconds} seconds and was killed")]
+    Timeout {
+        /// The budget, in seconds.
+        seconds: u64,
+    },
+    /// It could not be waited for.
+    #[error("the runtime could not be waited for: {source}")]
+    Wait {
+        /// What the operating system said.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Starts the runtime as a child and waits at most `budget` for it to exit 0.
+///
+/// This is `GINARY_CMD=selftest`'s runner, and the only place in the launcher
+/// that puts a clock on the runtime: everywhere else the application decides
+/// how long it lives. A child that outlasts the budget is killed and reported,
+/// because a maintenance command that hangs is what a user reports as a broken
+/// artifact.
+///
+/// The plan is recorded to `diag` first, exactly as [`exec`] and [`supervise`]
+/// record theirs, so a selftest that failed can be reproduced from its trace.
+///
+/// # Errors
+///
+/// [`RunIssue`], naming which of the five things went wrong.
+pub fn run_bounded(
+    plan: LaunchPlan,
+    diag: &Diag,
+    budget: std::time::Duration,
+) -> Result<(), RunIssue> {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    record(&plan, diag);
+
+    let mut command = std::process::Command::new(&plan.program);
+    command.args(&plan.args);
+    for (key, value) in &plan.set {
+        command.env(key, value);
+    }
+    for key in &plan.remove {
+        command.env_remove(key);
+    }
+
+    // The runtime's own standard output is not part of the report: a selftest
+    // prints one line per step, and a runtime that greeted the world would
+    // make that report unparsable. Standard error is inherited, because a
+    // runtime that cannot boot says why there and that is the whole point of
+    // running it.
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+
+    let mut child = command
+        .spawn()
+        .map_err(|source| RunIssue::Start { source })?;
+    let deadline = std::time::Instant::now() + budget;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(source) => {
+                // The same cleanup the timeout arm does: a selftest that
+                // cannot wait for the runtime must not leave it running.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunIssue::Wait { source });
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunIssue::Timeout {
+                seconds: budget.as_secs(),
+            });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+
+    match (status.code(), status.signal()) {
+        (Some(0), _) => Ok(()),
+        (Some(code), _) => Err(RunIssue::Exit { code }),
+        (None, Some(signal)) => Err(RunIssue::Signal { signal }),
+        (None, None) => Err(RunIssue::Exit { code: -1 }),
+    }
+}
+
+/// How often [`run_bounded`] asks whether the child has finished.
+///
+/// Short enough that a selftest of a healthy artifact is not visibly slower
+/// than the runtime it starts, and long enough that waiting out the budget is
+/// not a busy loop.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Replaces this process with the runtime.
 ///
@@ -365,8 +657,11 @@ fn record(plan: &LaunchPlan, diag: &Diag) {
 }
 
 /// A JSON array of strings, for a trace value.
-fn json_array<'a>(values: impl Iterator<Item = std::borrow::Cow<'a, str>>) -> String {
-    let owned: Vec<String> = values.map(std::borrow::Cow::into_owned).collect();
+///
+/// `pub(crate)` because the cache records what it pruned the same way, and a
+/// trace with two shapes of list in it is a trace with two parsers.
+pub(crate) fn json_array<S: AsRef<str>>(values: impl Iterator<Item = S>) -> String {
+    let owned: Vec<String> = values.map(|value| value.as_ref().to_owned()).collect();
     serde_json::to_string(&owned).unwrap_or_else(|_| "[]".to_owned())
 }
 

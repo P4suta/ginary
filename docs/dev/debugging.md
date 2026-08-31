@@ -13,9 +13,10 @@ nothing today.
 | `GINARY_DEBUG=1` | implemented | Human-readable progress on stderr, prefixed `ginary[debug]: `, one line per phase with its facts and its elapsed time: `start`, `read_manifest`, `cache_sweep`, `cache_tmp`, `extract`, `chmod`, `sync`, `rename` or `cache_hit`, `preflight_retry`, `exec`. |
 | `GINARY_TRACE=<file>` | implemented | JSON Lines, one object per phase, appended to the file: `{"t_us":..,"phase":..,"kv":{..}[,"elapsed_us":..]}`. The whole `LaunchPlan` is recorded immediately before `execve`, so the launch that failed can be reproduced from the trace. A file that cannot be opened costs one warning and the run carries on. |
 | `GINARY_SUPERVISE=1` | implemented | Spawns the runtime and waits instead of calling `execve`, which is the code path Windows will use anyway. The exit code is mirrored; a child killed by a signal exits `128 + signo`. Records the exit status, the signal and the elapsed time, and if an `erl_crash.dump` appeared during the run, prints its `Slogan` line. |
-| `GINARY_CMD=<command>` | implemented | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags. `directory` prints the cache entry the artifact would use and creates nothing; `extract-only` extracts and prints the entry without launching; `inspect` prints the manifest, the payload geometry and the digest as one JSON object. Any other value is a usage error and exits 2. `selftest` and `uninstall` are still planned. |
+| `GINARY_CMD=<command>` | implemented | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags, and one of five values. `directory` prints the cache entry the artifact would use and creates nothing; `extract-only` extracts and prints the entry without launching; `inspect` prints the manifest, the payload geometry and the digest as one JSON object; `selftest` extracts, preflights and starts the runtime with `-eval erlang:halt(0)` and no `-extra`, printing `extract:`, `preflight:` and `run:` with `PASS` or `FAIL` and exiting 0 or 1; `uninstall` removes every cache entry of this application that nobody holds, prints what it removed and what it kept and why, and exits 0 even when it kept something. Any other value is a usage error and exits 2. |
 | `GINARY_ERL_FLAGS` | implemented | Extra emulator flags for one run, split on ASCII whitespace and placed after the manifest's own flags and before `-eval`. |
 | `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `launcher:panic` (panic on the launcher path, so the panic hook has something to catch), `pack:fail` (the *builder* stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact). |
+| `GINARY_PRUNE_DAYS=<n>` | implemented | How many days an unused cache entry of the running application may live before the next launch prunes it. Defaults to 14; `0` turns pruning off for that run. A value that is not a count of days falls back to the default rather than failing a launch: a misspelt housekeeping preference must not stop an application from starting. |
 | `GINARY_OFFLINE=1` | planned | The builder refuses to reach the network and lists what it would have fetched. |
 | `GINARY_REQUIRE_TOOLCHAIN=1` | implemented (convention) | Turns a skipped toolchain-gated test into a failure. See [testing.md](testing.md). |
 
@@ -23,8 +24,70 @@ The launcher **removes** `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`, `E
 `ERL_EPMD_PORT` and every variable whose name begins `ERL_OTP` and ends `_FLAGS` before starting
 the runtime. If a packaged application behaves differently from a `gleam run`, that scrubbing is
 the first thing to check. It **sets** `ROOTDIR`, `BINDIR`, `EMU=beam` and `PROGNAME`
-unconditionally, and `HOME` and `ERL_CRASH_DUMP` only when the caller has not: a `HOME` you
-exported is yours.
+unconditionally, and `HOME`, `ERL_CRASH_DUMP`, every pair of the manifest's `launch.env` and
+`HEART_COMMAND` only when the caller has not: a `HOME` you exported is yours, and so is a
+`LOG_LEVEL` the artifact would otherwise have defaulted. `launch.env` is applied *after* the
+scrub, so a name in the scrub list is never reintroduced; the build refuses such a name anyway.
+
+## The cache lock, and pruning
+
+Every launch takes a shared `flock` on `<entry>/.lock` immediately before `execve`, with
+`FD_CLOEXEC` cleared, so the lock is inherited by the runtime and released by the kernel when the
+runtime exits. Pruning takes `flock(LOCK_EX | LOCK_NB)` on the same file and skips any entry it
+cannot get. Neither side ever waits: the launcher's `LOCK_SH` is non-blocking too, retried for
+half a second and then given up on, so a foreign `flock -x` on an entry cannot hang an
+application — it only costs that run its lock. Immediately after locking, the launcher re-checks
+that the entry is still there and extracts it again if a prune took it in the meantime. [ADR 0010](../adr/0010-cache-locking-and-pruning.md) explains why, and
+`tests/launcher.rs::the_shared_lock_outlives_the_launcher_and_dies_with_the_runtime` proves the
+`execve` half with util-linux `flock(1)` rather than with ginary's own code: it runs an artifact
+whose runtime sleeps, asserts from outside that `flock -n -x <entry>/.lock` **fails** while the
+child runs — nothing of ginary is alive at that moment — and **succeeds** once it exits.
+
+You can run the same check by hand:
+
+```console
+$ ./my_gleam_app &                                        # or any long-running artifact
+$ entry=$(GINARY_CMD=directory ./my_gleam_app)
+$ flock -n -x "$entry/.lock" true && echo free || echo held
+held
+$ kill %1; sleep 1
+$ flock -n -x "$entry/.lock" true && echo free || echo held
+free
+```
+
+Two symptoms and what they mean:
+
+- **A cache entry never goes away, however old.** Something holds its lock. Find it with
+  `fuser "$entry/.lock"` or `lsof "$entry/.lock"` — a runtime that is still running, or a
+  descriptor a supervisor inherited and never closed. `ginary cache prune --all` will not remove
+  it either: `--all` is "whatever its age", not "whatever is using it". `ginary cache clean` is
+  the blunt instrument that ignores the lock, and running it under a live application is the
+  thing the lock exists to prevent.
+- **A cache entry disappeared under a running application.** The lock could not be taken and the
+  launch went ahead anyway, which is deliberate — a lock that cannot be taken is a pruning risk
+  and not a reason to refuse to start. `GINARY_TRACE` records it as a `lock` phase with the
+  error. `flock` is advisory and per-filesystem, so a cache on NFS without a lock daemon is the
+  usual cause; `GINARY_CACHE_DIR` on local disk is the fix.
+- **A start records a `lock_retry` phase.** A prune removed the entry between the preflight and
+  the lock, and the launcher extracted it again rather than starting out of a tree that was being
+  deleted. One retry is all there is; a second disappearance is [exit
+  code](../../README.md#exit-codes) 124 naming the entry.
+- **`ginary cache prune` says an entry is `unremovable`.** Nobody holds it and it is old enough
+  to go, and the file system refused the rename that moves it aside: a read-only application
+  directory, a full disk, a mount that has gone away. It is reported rather than dropped, so the
+  `total:` line counts it.
+
+A prune that runs writes a `prune` phase to the trace: `removed` and `kept` count the two
+columns, and `removed_paths` and `kept_paths` name them, as JSON arrays of strings — a `kept`
+entry carries its reason (`locked`, `fresh` or `unremovable`) in the same string. An entry that
+vanished has to be explainable from a trace, and a count explains nothing. Nothing a prune does
+reaches standard error: pruning is housekeeping, and housekeeping does not decide whether an
+application starts.
+
+`GINARY_CMD=uninstall` removes only what the cache wrote — `<key>` entries and the
+`.<key>.tmp-<pid>`, `.<key>.corrupt-<pid>` and `.<key>.trash-<pid>` residue beside them. Anything
+else in the application directory is left where it is, `erl_crash.dump` included, which is why
+that directory survives an uninstall when a dump is in it.
 
 ## Diagnosing the environment today
 
@@ -196,7 +259,15 @@ $ GINARY_CMD=extract-only ./my_gleam_app   # extract, and stop
 $ GINARY_DEBUG=1 ./my_gleam_app            # and the second run says `cache_hit`
 $ ginary cache dir                         # the same resolution, from the build tool
 $ ginary cache clean --app my_gleam_app    # throw the entry away and start cold
+$ ginary cache prune --days 7              # remove what nothing has used for a week
+$ ginary cache prune --all --app my_gleam_app   # every entry nobody is holding
+$ GINARY_CMD=selftest ./my_gleam_app       # does the runtime start on this machine?
+$ GINARY_CMD=uninstall ./my_gleam_app      # remove everything this artifact extracted
 ```
+
+`selftest` is the first thing to run against a machine an artifact will not start on: it
+separates "the payload will not extract" from "the tree is incomplete" from "the runtime will
+not come up", and the third of those is the only one that needs a real BEAM.
 
 To keep the intermediate tree instead:
 

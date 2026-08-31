@@ -16,7 +16,11 @@ none of them has to be a real project on disk.
 | `bad_name.toml` | a project name that is not a Gleam name |
 | `no_name.toml` | a manifest with no `name` key |
 | `malformed.toml` | TOML that does not parse |
+| `runtime.toml` | the six runtime keys B1 adds, each away from its default |
+| `bad_encoding.toml` | `filename_encoding` naming an encoding the emulator has no flag for |
+| `bad_env_key.toml` | `env` naming an `ERL_*` variable, which the launcher scrubs |
+| `bad_env_name.toml` | `env` naming `ROOTDIR`, which the launcher derives |
 
-Two of the nine are valid — `defaults.toml` and `full.toml` — and the other seven are invalid on
-purpose. `tests/config.rs` asserts the exact error variant of each of the seven, so editing one
-means editing its assertion with it.
+Three of the thirteen are valid — `defaults.toml`, `full.toml` and `runtime.toml` — and the other
+ten are invalid on purpose. `tests/config.rs` asserts the exact error variant of each of the ten,
+so editing one means editing its assertion with it.

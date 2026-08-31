@@ -1,16 +1,19 @@
 ---
 source: tests/launch.rs
-expression: "scrub(&render(&plan),\n&[(Path::new(ROOT), \"<root>\"), (Path::new(DUMPS), \"<app-dir>\")])"
+expression: "scrub(&render(&plan),\n&[(Path::new(ROOT), \"<root>\"), (Path::new(DUMPS), \"<app-dir>\"),\n(Path::new(SELF_EXE), \"<self>\")])"
 ---
 program: <root>/erts-17.0.5/bin/erlexec
 argv:
+  -args_file
+  <root>/releases/vm.args
   -boot
   <root>/bin/no_dot_erlang
   -noshell
   +B
-  +fnu
-  -start_epmd
-  false
+  +fnl
+  -config
+  <root>/releases/sys
+  -heart
   -pa
   <root>/lib/hello/ebin
   -pa
@@ -29,6 +32,9 @@ set:
   PROGNAME=hello
   HOME=<root>
   ERL_CRASH_DUMP=<app-dir>/erl_crash.dump
+  GINARY_ENV_ONE=one
+  GINARY_ENV_TWO=two
+  HEART_COMMAND=<self> --name world
 remove:
   ERL_LIBS
   ERL_FLAGS

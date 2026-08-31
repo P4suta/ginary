@@ -17,6 +17,7 @@
 //! user believes is in force, and accepting it silently would be worse than
 //! refusing the build.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -45,6 +46,49 @@ pub const MAX_COMPRESSION_LEVEL: i32 = 22;
 /// one ginary passes or silently changes what the artifact does, so the build
 /// refuses it and says which one the launcher owns. See [`erl_flag_reason`].
 pub const REJECTED_ERL_FLAGS: [&str; 5] = ["-boot", "-extra", "-noshell", "-pa", "-pz"];
+
+/// The filename encoding an artifact uses when the project says nothing.
+///
+/// `+fnu` is what a Gleam application wants on every machine ginary targets:
+/// the shipment's file names are UTF-8 and a runtime that read them as
+/// Latin-1 would not find its own modules.
+pub const DEFAULT_FILENAME_ENCODING: &str = "utf8";
+
+/// The three values `filename_encoding` may take, in the order an error lists
+/// them.
+pub const FILENAME_ENCODINGS: [&str; 3] = ["utf8", "latin1", "auto"];
+
+/// The flags an `-args_file` may not hold.
+///
+/// The first five are [`REJECTED_ERL_FLAGS`] plus `-noinput`, for the same
+/// reason: the launcher passes them itself and a second copy either
+/// contradicts it or silently changes what the artifact does. `-args_file`
+/// itself is refused because `erl` follows the nesting and a file that
+/// includes another is a file whose content ginary has not linted.
+pub const REJECTED_ARGS_FILE_FLAGS: [&str; 7] = [
+    "-args_file",
+    "-boot",
+    "-extra",
+    "-noinput",
+    "-noshell",
+    "-pa",
+    "-pz",
+];
+
+/// The prefix `[tools.ginary] env` may not name.
+///
+/// Every `ERL_*` variable is either one the launcher scrubs — see
+/// [`crate::launch::REMOVED_VARS`] — or one it sets, and the launcher applies
+/// `env` *after* the scrub. A default that could be reintroduced there would
+/// be the artifact putting back the very variable the launcher removed to make
+/// the run reproducible, so the name is refused at build time instead.
+pub const REJECTED_ENV_PREFIX: &str = "ERL_";
+
+/// The variables `[tools.ginary] env` may not name, sorted.
+///
+/// The four the launcher derives from the extracted root, plus `HOME`, which
+/// it defaults only when the caller has not set one.
+pub const REJECTED_ENV_NAMES: [&str; 5] = ["BINDIR", "EMU", "HOME", "PROGNAME", "ROOTDIR"];
 
 /// Why a name in `erts_extra_bins` or `--extra-bin` may be refused.
 ///
@@ -82,6 +126,18 @@ pub struct ToolsConfig {
     pub erts_extra_bins: Vec<String>,
     /// Emulator flags the launcher passes before `-eval`.
     pub erl_flags: Vec<String>,
+    /// A project-relative `-args_file`, copied into the artifact.
+    pub vm_args: Option<String>,
+    /// A project-relative `sys.config`, copied into the artifact.
+    pub sys_config: Option<String>,
+    /// Whether the artifact ships `epmd` and starts the runtime distributed.
+    pub distribution: bool,
+    /// `utf8`, `latin1` or `auto`; see [`FILENAME_ENCODINGS`].
+    pub filename_encoding: Option<String>,
+    /// Variables the launcher sets, each only when the caller has not.
+    pub env: BTreeMap<String, String>,
+    /// Whether the artifact ships `heart` and starts the runtime under it.
+    pub heart: bool,
 }
 
 impl ToolsConfig {
@@ -115,6 +171,32 @@ impl ToolsConfig {
         }
     }
 
+    /// The configured `vm_args`, or [`None`].
+    pub fn vm_args(&self) -> Option<&str> {
+        self.vm_args.as_deref()
+    }
+
+    /// The configured `sys_config`, or [`None`].
+    pub fn sys_config(&self) -> Option<&str> {
+        self.sys_config.as_deref()
+    }
+
+    /// The filename encoding, or [`DEFAULT_FILENAME_ENCODING`].
+    pub fn filename_encoding(&self) -> &str {
+        match &self.filename_encoding {
+            Some(encoding) => encoding,
+            None => DEFAULT_FILENAME_ENCODING,
+        }
+    }
+
+    /// The emulator flag [`ToolsConfig::filename_encoding`] maps to.
+    ///
+    /// [`None`] when the value is not one of [`FILENAME_ENCODINGS`], which
+    /// [`ToolsConfig::validate`] refuses before a build can reach this.
+    pub fn encoding_flag(&self) -> Option<&'static str> {
+        filename_encoding_flag(self.filename_encoding())
+    }
+
     /// The zstd level, or [`DEFAULT_COMPRESSION_LEVEL`].
     pub fn compression_level(&self) -> i32 {
         self.compression_level.unwrap_or(DEFAULT_COMPRESSION_LEVEL)
@@ -130,8 +212,16 @@ impl ToolsConfig {
     /// [`ConfigError::CompressionLevel`] when the level is outside
     /// [`MIN_COMPRESSION_LEVEL`]`..=`[`MAX_COMPRESSION_LEVEL`],
     /// [`ConfigError::ExtraBin`] for the first `erts_extra_bins` entry that is
-    /// not a program name, and [`ConfigError::ErlFlag`] for the first flag of
-    /// [`REJECTED_ERL_FLAGS`] that `erl_flags` holds.
+    /// not a program name, [`ConfigError::ErlFlag`] for the first flag of
+    /// [`REJECTED_ERL_FLAGS`] that `erl_flags` holds,
+    /// [`ConfigError::FilenameEncoding`] when `filename_encoding` is not one of
+    /// [`FILENAME_ENCODINGS`], and [`ConfigError::EnvName`] for the first `env`
+    /// key the launcher owns.
+    ///
+    /// The two paths — `vm_args` and `sys_config` — are *not* checked here.
+    /// Whether a file exists and what is in it is a question about a tree, and
+    /// this function is pure; [`crate::bundle`] asks it, at the moment it
+    /// copies the file into the artifact.
     pub fn validate(&self, path: &Path) -> Result<(), ConfigError> {
         let level = self.compression_level();
         if !(MIN_COMPRESSION_LEVEL..=MAX_COMPRESSION_LEVEL).contains(&level) {
@@ -153,6 +243,21 @@ impl ToolsConfig {
                 return Err(ConfigError::ErlFlag {
                     path: path.to_path_buf(),
                     flag: flag.clone(),
+                    reason,
+                });
+            }
+        }
+        if self.encoding_flag().is_none() {
+            return Err(ConfigError::FilenameEncoding {
+                path: path.to_path_buf(),
+                value: self.filename_encoding().to_owned(),
+            });
+        }
+        for name in self.env.keys() {
+            if let Some(reason) = env_name_reason(name) {
+                return Err(ConfigError::EnvName {
+                    path: path.to_path_buf(),
+                    name: name.clone(),
                     reason,
                 });
             }
@@ -255,6 +360,231 @@ pub fn erl_flag_reason(flag: &str) -> Option<&'static str> {
     }
 }
 
+/// The emulator flag one of [`FILENAME_ENCODINGS`] maps to.
+///
+/// `utf8` is `+fnu`, `latin1` is `+fnl` and `auto` is `+fna`. [`None`] for
+/// anything else, which is what [`ToolsConfig::validate`] turns into
+/// [`ConfigError::FilenameEncoding`].
+pub fn filename_encoding_flag(name: &str) -> Option<&'static str> {
+    match name {
+        "utf8" => Some("+fnu"),
+        "latin1" => Some("+fnl"),
+        "auto" => Some("+fna"),
+        _ => None,
+    }
+}
+
+/// Why a flag may not appear in an args file, or [`None`] if it may.
+///
+/// The reason is the actionable half: a user told that `-pa` is refused still
+/// has to be told who sets it instead. See [`REJECTED_ARGS_FILE_FLAGS`].
+pub fn args_file_flag_reason(flag: &str) -> Option<&'static str> {
+    match flag {
+        "-args_file" => Some(
+            "erl follows the nesting, and the file it would include is one ginary has not read",
+        ),
+        "-noinput" => Some("ginary always starts the runtime with -noshell, which implies it"),
+        // The five the launcher passes itself, with the same explanation the
+        // `erl_flags` lint gives: one rule, stated once.
+        _ => erl_flag_reason(flag),
+    }
+}
+
+/// Why a variable may not appear in `[tools.ginary] env`, or [`None`].
+///
+/// See [`REJECTED_ENV_PREFIX`] and [`REJECTED_ENV_NAMES`].
+pub fn env_name_reason(name: &str) -> Option<&'static str> {
+    if name.starts_with(REJECTED_ENV_PREFIX) {
+        return Some(
+            "every ERL_ variable is one the launcher sets or scrubs, and `env` is applied after \
+             the scrub, so a default here could only put back what the scrub removed",
+        );
+    }
+    if REJECTED_ENV_NAMES.contains(&name) {
+        return Some(
+            "the launcher derives this from the extracted root, and an artifact that overrode it \
+             would be pointing the runtime at a tree that is not its own",
+        );
+    }
+    None
+}
+
+/// One word of an args file, with the line it started on.
+///
+/// `erl -args_file` splits on whitespace, honours `'` and `"` quoting and
+/// treats `#` as a comment to the end of the line. The line number is carried
+/// because it is the only thing that makes a refusal actionable: an args file
+/// is a list of flags with no other structure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArgsToken {
+    /// The 1-based line the token started on.
+    pub line: u32,
+    /// The token with its quotes removed.
+    pub text: String,
+}
+
+/// Splits an args file the way `erl -args_file` does.
+///
+/// Whitespace separates tokens; `'` and `"` quote a run of characters,
+/// including whitespace, and are not part of the token; `#` starts a comment
+/// that runs to the end of the line, unless it is inside quotes.
+pub fn tokenize_args_file(text: &str) -> Vec<ArgsToken> {
+    scan_args_file(text).0
+}
+
+/// The tokens of an args file, and the line a quote is left open on.
+///
+/// The second half is what makes the first half trustworthy: a quote that is
+/// never closed swallows the rest of the file into one token, so every token
+/// after it is a guess, and a caller that lints tokens has to know. See
+/// [`ConfigError::ArgsFileQuote`].
+fn scan_args_file(text: &str) -> (Vec<ArgsToken>, Option<u32>) {
+    let mut tokens = Vec::new();
+    // The token being built, with the line it started on. A quote opens one
+    // even when it encloses nothing, so that `-setcookie ''` is two tokens
+    // rather than one.
+    let mut pending: Option<(u32, String)> = None;
+    // The quote character and the line it was opened on, which is the line a
+    // refusal names.
+    let mut quote: Option<(char, u32)> = None;
+    let mut comment = false;
+    let mut line: u32 = 1;
+
+    for character in text.chars() {
+        if character == '\n' {
+            match quote {
+                // A newline inside quotes is a character of the token, and the
+                // token keeps the line it started on.
+                Some(_) => push(&mut pending, line, character),
+                None => flush(&mut pending, &mut tokens),
+            }
+            comment = false;
+            line = line.saturating_add(1);
+            continue;
+        }
+        if comment {
+            continue;
+        }
+        match quote {
+            Some((open, _)) if character == open => quote = None,
+            Some(_) => push(&mut pending, line, character),
+            None if character == '\'' || character == '"' => {
+                quote = Some((character, line));
+                if pending.is_none() {
+                    pending = Some((line, String::new()));
+                }
+            }
+            None if character == '#' => {
+                flush(&mut pending, &mut tokens);
+                comment = true;
+            }
+            None if character.is_whitespace() => flush(&mut pending, &mut tokens),
+            None => push(&mut pending, line, character),
+        }
+    }
+    flush(&mut pending, &mut tokens);
+    (tokens, quote.map(|(_, line)| line))
+}
+
+/// Adds one character to the token being built, starting one if there is none.
+fn push(pending: &mut Option<(u32, String)>, line: u32, character: char) {
+    pending
+        .get_or_insert_with(|| (line, String::new()))
+        .1
+        .push(character);
+}
+
+/// Ends the token being built, if there is one.
+fn flush(pending: &mut Option<(u32, String)>, tokens: &mut Vec<ArgsToken>) {
+    if let Some((line, text)) = pending.take() {
+        tokens.push(ArgsToken { line, text });
+    }
+}
+
+/// Refuses an args file that holds a flag the launcher owns.
+///
+/// `path` names the file in the message, and the message names the line, so
+/// that a refusal points at a place in a file rather than at a setting.
+///
+/// # Errors
+///
+/// [`ConfigError::ArgsFileQuote`] when a quote is left open, which is checked
+/// first because it decides what the tokens are, and then
+/// [`ConfigError::ArgsFileFlag`] for the first token of
+/// [`REJECTED_ARGS_FILE_FLAGS`] the file holds.
+pub fn lint_args_file(text: &str, path: &Path) -> Result<(), ConfigError> {
+    let (tokens, unterminated) = scan_args_file(text);
+    // Before the flags, because it decides what the flags even are: with a
+    // quote left open the tail of the file is one token, so a lint that
+    // reported what it found there would be reporting a reading of the file
+    // `erl` does not share.
+    if let Some(line) = unterminated {
+        return Err(ConfigError::ArgsFileQuote {
+            path: path.to_path_buf(),
+            line,
+        });
+    }
+    for token in tokens {
+        if let Some(reason) = args_file_flag_reason(&token.text) {
+            return Err(ConfigError::ArgsFileFlag {
+                path: path.to_path_buf(),
+                line: token.line,
+                flag: token.text,
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks that `text` is a `sys.config`: exactly one term, and a list.
+///
+/// # Errors
+///
+/// [`ConfigError::SysConfigSyntax`] carrying the line and column
+/// [`crate::appfile::parse_terms`] reported, and
+/// [`ConfigError::SysConfigShape`] when the file parses and is not one list.
+pub fn validate_sys_config(text: &str, path: &Path) -> Result<(), ConfigError> {
+    use crate::appfile::Term;
+
+    let terms =
+        crate::appfile::parse_terms(text).map_err(|error| ConfigError::SysConfigSyntax {
+            path: path.to_path_buf(),
+            line: error.line,
+            col: error.col,
+            message: format!("expected {}, found {}", error.expected, error.found),
+        })?;
+
+    let found = match terms.as_slice() {
+        [Term::List(_)] => return Ok(()),
+        // A file with nothing in it is not an empty list: `file:consult/1`
+        // answers `[]` for both, and an artifact whose configuration silently
+        // vanished is exactly the failure this lint exists to catch.
+        [] => "nothing at all".to_owned(),
+        [term] => describe_term(term).to_owned(),
+        terms => format!("{} terms", terms.len()),
+    };
+    Err(ConfigError::SysConfigShape {
+        path: path.to_path_buf(),
+        found,
+    })
+}
+
+/// What one term is, as the phrase [`ConfigError::SysConfigShape`] reads with.
+fn describe_term(term: &crate::appfile::Term) -> &'static str {
+    use crate::appfile::Term;
+
+    match term {
+        Term::Atom(_) => "an atom",
+        Term::Str(_) => "a string",
+        Term::Bin(_) => "a binary",
+        Term::Int(_) => "an integer",
+        Term::Float(_) => "a float",
+        Term::Tuple(_) => "a tuple",
+        Term::List(_) => "a list",
+    }
+}
+
 /// Where the artifact is written.
 ///
 /// `flag` is `--out` and wins when it is present. A `--out` that names an
@@ -317,6 +647,12 @@ pub struct BuildFlags {
     pub extra_otp_apps: Vec<String>,
     /// `--extra-bin`, repeatable.
     pub extra_bins: Vec<String>,
+    /// `--distribution`, which can only turn the table's setting on.
+    pub distribution: bool,
+    /// `--vm-args`, a path as the user typed it.
+    pub vm_args: Option<PathBuf>,
+    /// `--sys-config`, a path as the user typed it.
+    pub sys_config: Option<PathBuf>,
     /// `--explain`.
     pub explain: bool,
     /// `-v`, counted, so that `-vv` stays open.
@@ -355,6 +691,18 @@ pub struct BuildOptions {
     pub erts_extra_bins: Vec<String>,
     /// Emulator flags the launcher passes before `-eval`.
     pub erl_flags: Vec<String>,
+    /// The args file to copy into the artifact, resolved against the project.
+    pub vm_args: Option<PathBuf>,
+    /// The `sys.config` to copy into the artifact, resolved against it too.
+    pub sys_config: Option<PathBuf>,
+    /// Whether to ship `epmd` and start the runtime distributed.
+    pub distribution: bool,
+    /// The filename encoding, always one of [`FILENAME_ENCODINGS`].
+    pub filename_encoding: String,
+    /// Variables the launcher sets, each only when the caller has not.
+    pub env: BTreeMap<String, String>,
+    /// Whether to ship `heart` and start the runtime under it.
+    pub heart: bool,
     /// Whether to print the closure and staging accounts before the report.
     pub explain: bool,
     /// How much the build says about itself on standard error.
@@ -413,9 +761,35 @@ impl BuildOptions {
             otp_applications: append_unique(&config.tools.otp_applications, &flags.extra_otp_apps),
             erts_extra_bins: append_unique(&config.tools.erts_extra_bins, &flags.extra_bins),
             erl_flags: config.tools.erl_flags.clone(),
+            // A flag is a path the user typed on a command line and is used as
+            // typed; a table value is the project's and is relative to it, as
+            // `output` is.
+            vm_args: resolve_file(root, flags.vm_args.as_deref(), config.tools.vm_args()),
+            sys_config: resolve_file(root, flags.sys_config.as_deref(), config.tools.sys_config()),
+            // A boolean flag has one direction: its absence is not a request to
+            // turn the table's setting off.
+            distribution: flags.distribution || config.tools.distribution,
+            filename_encoding: config.tools.filename_encoding().to_owned(),
+            env: config.tools.env.clone(),
+            heart: config.tools.heart,
             explain: flags.explain,
             verbose: flags.verbose,
         })
+    }
+}
+
+/// The path a file-naming setting resolves to, flag first.
+///
+/// `flag` is used exactly as the user typed it, because every other path on a
+/// command line is relative to the working directory. `configured` is the
+/// project's own, and is joined onto `root` for the reason
+/// `[tools.ginary] output` is: a value in `gleam.toml` describes the project
+/// rather than the terminal it is built from.
+fn resolve_file(root: &Path, flag: Option<&Path>, configured: Option<&str>) -> Option<PathBuf> {
+    match (flag, configured) {
+        (Some(path), _) => Some(path.to_path_buf()),
+        (None, Some(value)) => Some(root.join(value)),
+        (None, None) => None,
     }
 }
 
@@ -553,6 +927,100 @@ pub enum ConfigError {
     ExtraBinFlag {
         /// The name that was refused.
         name: String,
+    },
+    /// `filename_encoding` is not one of [`FILENAME_ENCODINGS`].
+    #[error(
+        "{path}: [tools.ginary] filename_encoding must be `utf8`, `latin1` or `auto`, not \
+         `{value}`"
+    )]
+    FilenameEncoding {
+        /// The file the value is in.
+        path: PathBuf,
+        /// The value that was refused.
+        value: String,
+    },
+    /// A file `[tools.ginary]` names is not in the project.
+    #[error("{path}: [tools.ginary] {key} names `{value}`, and there is no file at {missing}")]
+    MissingFile {
+        /// The manifest that names the file.
+        path: PathBuf,
+        /// The key that names it, such as `vm_args`.
+        key: &'static str,
+        /// The value as the manifest wrote it.
+        value: String,
+        /// Where the value resolved to.
+        missing: PathBuf,
+    },
+    /// An args file holds a flag the launcher passes itself.
+    #[error("{path}:{line}: `{flag}` may not appear in an args file: {reason}")]
+    ArgsFileFlag {
+        /// The args file the flag is in.
+        path: PathBuf,
+        /// The 1-based line it is on.
+        line: u32,
+        /// The flag that was refused.
+        flag: String,
+        /// Who passes it instead; see [`args_file_flag_reason`].
+        reason: &'static str,
+    },
+    /// A file `[tools.ginary]` names is there and cannot be read.
+    ///
+    /// Separate from [`ConfigError::MissingFile`] because the two send a user
+    /// to different places: one to the name in the manifest, the other to the
+    /// file itself.
+    #[error("{path}: [tools.ginary] {key} names `{value}`, and {file} cannot be read: {reason}")]
+    UnreadableFile {
+        /// The manifest that names the file.
+        path: PathBuf,
+        /// The key that names it, such as `sys_config`.
+        key: &'static str,
+        /// The value as the manifest wrote it.
+        value: String,
+        /// Where the value resolved to.
+        file: PathBuf,
+        /// What went wrong, as a phrase.
+        reason: String,
+    },
+    /// An args file ends with a quote nobody closed.
+    #[error(
+        "{path}:{line}: a quote is opened here and never closed, so every token after it is a \
+         guess; `erl -args_file` would read the rest of the file as one argument"
+    )]
+    ArgsFileQuote {
+        /// The args file the quote is in.
+        path: PathBuf,
+        /// The 1-based line the quote was opened on.
+        line: u32,
+    },
+    /// A `sys.config` is not the Erlang term syntax `file:consult/1` reads.
+    #[error("{path}:{line}:{col}: {message}")]
+    SysConfigSyntax {
+        /// The file the error is in.
+        path: PathBuf,
+        /// The 1-based line.
+        line: u32,
+        /// The 1-based column, counted in characters.
+        col: u32,
+        /// What the parser expected and what it found.
+        message: String,
+    },
+    /// A `sys.config` parses and is not one list.
+    #[error("{path}: a sys.config holds exactly one term, a list, and this holds {found}")]
+    SysConfigShape {
+        /// The file that is the wrong shape.
+        path: PathBuf,
+        /// What it holds instead, as a phrase.
+        found: String,
+    },
+    /// `env` names a variable the launcher owns.
+    #[error("{path}: [tools.ginary] env may not name `{name}`: {reason}")]
+    EnvName {
+        /// The file the name is in.
+        path: PathBuf,
+        /// The name that was refused.
+        name: String,
+        /// Why; see [`env_name_reason`].
+        reason: &'static str,
     },
     /// `erl_flags` holds a flag the launcher passes itself.
     #[error("{path}: [tools.ginary] erl_flags may not hold `{flag}`: {reason}")]

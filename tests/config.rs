@@ -14,11 +14,13 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ginary::config::{
-    self, BuildFlags, BuildOptions, ConfigError, DEFAULT_COMPRESSION_LEVEL, DEFAULT_OUTPUT,
-    ProjectConfig, ToolsConfig,
+    self, ArgsToken, BuildFlags, BuildOptions, ConfigError, DEFAULT_COMPRESSION_LEVEL,
+    DEFAULT_FILENAME_ENCODING, DEFAULT_OUTPUT, FILENAME_ENCODINGS, ProjectConfig,
+    REJECTED_ARGS_FILE_FLAGS, REJECTED_ENV_NAMES, ToolsConfig,
 };
 use ginary::strip::StripOptions;
 
@@ -337,6 +339,390 @@ fn reading_a_manifest_from_disk_gives_what_parsing_its_text_gives() {
     assert_eq!(from_disk, from_text);
 }
 
+// ------------------------------------------ the runtime settings (B1) --
+
+#[test]
+fn a_manifest_with_no_tools_table_takes_every_runtime_default() {
+    let config = parse("defaults.toml");
+
+    assert_eq!(config.tools.vm_args(), None);
+    assert_eq!(config.tools.sys_config(), None);
+    assert!(!config.tools.distribution, "distribution is opt in");
+    assert!(!config.tools.heart, "heart is opt in");
+    assert_eq!(config.tools.env, BTreeMap::new());
+    assert_eq!(
+        config.tools.filename_encoding(),
+        DEFAULT_FILENAME_ENCODING,
+        "a Gleam shipment's file names are UTF-8, so `utf8` is the only safe default"
+    );
+    assert_eq!(config.tools.encoding_flag(), Some("+fnu"));
+}
+
+#[test]
+fn every_runtime_key_of_the_tools_table_is_read() {
+    let config = parse("runtime.toml");
+
+    assert_eq!(config.name, "runtime_app");
+    assert_eq!(config.tools.vm_args(), Some("config/vm.args"));
+    assert_eq!(config.tools.sys_config(), Some("config/sys.config"));
+    assert!(config.tools.distribution);
+    assert!(config.tools.heart);
+    assert_eq!(config.tools.filename_encoding(), "latin1");
+    assert_eq!(config.tools.encoding_flag(), Some("+fnl"));
+    assert_eq!(
+        config.tools.env,
+        BTreeMap::from([
+            ("LOG_LEVEL".to_owned(), "info".to_owned()),
+            ("RELEASE_NAME".to_owned(), "runtime_app".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn each_filename_encoding_maps_to_its_emulator_flag() {
+    assert_eq!(config::filename_encoding_flag("utf8"), Some("+fnu"));
+    assert_eq!(config::filename_encoding_flag("latin1"), Some("+fnl"));
+    assert_eq!(config::filename_encoding_flag("auto"), Some("+fna"));
+    for name in ["utf-8", "UTF8", "", "koi8-r", "+fnu"] {
+        assert_eq!(
+            config::filename_encoding_flag(name),
+            None,
+            "`{name}` is not one of the three the emulator has a flag for"
+        );
+    }
+}
+
+#[test]
+fn the_three_encodings_are_the_ones_the_error_lists() {
+    assert_eq!(FILENAME_ENCODINGS, ["utf8", "latin1", "auto"]);
+    for name in FILENAME_ENCODINGS {
+        assert!(
+            config::filename_encoding_flag(name).is_some(),
+            "`{name}` is offered to the user and must map to a flag"
+        );
+    }
+}
+
+#[test]
+fn a_filename_encoding_the_emulator_has_no_flag_for_is_refused() {
+    let error = refuse("bad_encoding.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::FilenameEncoding { path, value }
+                if path == Path::new(MANIFEST) && value == "koi8-r"
+        ),
+        "expected ConfigError::FilenameEncoding, got {error:?}"
+    );
+    let message = error.to_string();
+    for name in FILENAME_ENCODINGS {
+        assert!(
+            message.contains(name),
+            "the message must list `{name}`, and it is `{message}`"
+        );
+    }
+}
+
+// ------------------------------------------------- the args file lint --
+
+#[test]
+fn an_args_file_splits_on_whitespace_and_carries_its_line_numbers() {
+    let tokens = config::tokenize_args_file("-sname node\n+S 2:2\n");
+
+    assert_eq!(
+        tokens,
+        vec![
+            ArgsToken {
+                line: 1,
+                text: "-sname".to_owned()
+            },
+            ArgsToken {
+                line: 1,
+                text: "node".to_owned()
+            },
+            ArgsToken {
+                line: 2,
+                text: "+S".to_owned()
+            },
+            ArgsToken {
+                line: 2,
+                text: "2:2".to_owned()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_quoted_token_keeps_its_spaces_and_loses_its_quotes() {
+    let tokens = config::tokenize_args_file("-setcookie \"a b\" -name 'x@y'\n");
+
+    assert_eq!(
+        tokens
+            .into_iter()
+            .map(|token| token.text)
+            .collect::<Vec<String>>(),
+        ["-setcookie", "a b", "-name", "x@y"],
+        "both quote characters group a run of characters and are not part of it"
+    );
+}
+
+#[test]
+fn a_comment_runs_to_the_end_of_its_line_and_no_further() {
+    let tokens = config::tokenize_args_file("# a whole line\n+S 2:2 # trailing\n-sname node\n");
+
+    assert_eq!(
+        tokens,
+        vec![
+            ArgsToken {
+                line: 2,
+                text: "+S".to_owned()
+            },
+            ArgsToken {
+                line: 2,
+                text: "2:2".to_owned()
+            },
+            ArgsToken {
+                line: 3,
+                text: "-sname".to_owned()
+            },
+            ArgsToken {
+                line: 3,
+                text: "node".to_owned()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_hash_inside_quotes_is_not_a_comment() {
+    let tokens = config::tokenize_args_file("-setcookie \"a#b\"\n");
+
+    assert_eq!(
+        tokens
+            .into_iter()
+            .map(|token| token.text)
+            .collect::<Vec<String>>(),
+        ["-setcookie", "a#b"]
+    );
+}
+
+#[test]
+fn an_args_file_that_names_no_flag_the_launcher_owns_passes_the_lint() {
+    let text = "# the node\n-sname worker\n-setcookie \"a b\"\n+S 2:2\n";
+
+    assert!(
+        config::lint_args_file(text, Path::new("/w/vm.args")).is_ok(),
+        "an args file may hold every flag but the seven ginary passes itself"
+    );
+
+    let refused = config::lint_args_file("-sname a\n-boot start_clean\n", Path::new("/w/vm.args"))
+        .expect_err("`-boot` is the launcher's");
+    assert!(
+        matches!(
+            &refused,
+            ConfigError::ArgsFileFlag { path, line, flag, .. }
+                if path == Path::new("/w/vm.args") && *line == 2 && flag == "-boot"
+        ),
+        "expected ConfigError::ArgsFileFlag on line 2, got {refused:?}"
+    );
+}
+
+#[test]
+fn every_flag_the_launcher_owns_is_refused_in_an_args_file_with_its_line() {
+    for flag in REJECTED_ARGS_FILE_FLAGS {
+        let text = format!("+S 2:2\n# a comment\n{flag} value\n");
+        let error = config::lint_args_file(&text, Path::new("/w/vm.args"))
+            .expect_err("a flag the launcher owns must be refused in an args file");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::ArgsFileFlag { line, flag: found, .. }
+                    if *line == 3 && found == flag
+            ),
+            "`{flag}` must be refused on line 3, and it said {error:?}"
+        );
+    }
+}
+
+#[test]
+fn each_rejected_args_file_flag_has_its_own_reason() {
+    for flag in REJECTED_ARGS_FILE_FLAGS {
+        let reason = config::args_file_flag_reason(flag)
+            .unwrap_or_else(|| panic!("`{flag}` is refused and must say why"));
+        assert!(
+            !reason.is_empty(),
+            "`{flag}` must carry an actionable reason"
+        );
+    }
+    for flag in ["-sname", "-name", "-setcookie", "+S", "-config"] {
+        assert_eq!(
+            config::args_file_flag_reason(flag),
+            None,
+            "`{flag}` is the user's to set in an args file"
+        );
+    }
+}
+
+#[test]
+fn the_args_file_lint_reports_the_first_offending_line() {
+    let text = "+S 2:2\n-pa /opt/lib\n-pz /opt/other\n";
+    let error = config::lint_args_file(text, Path::new("/w/vm.args"))
+        .expect_err("an args file that sets the code path must be refused");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::ArgsFileFlag { line, flag, .. } if *line == 2 && flag == "-pa"
+        ),
+        "the first offence is the one reported, and it said {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("/w/vm.args:2"),
+        "the message must locate the flag, and it is `{message}`"
+    );
+}
+
+// ------------------------------------------------- the sys.config lint --
+
+#[test]
+fn a_sys_config_that_is_one_list_of_terms_is_accepted() {
+    let text = "[{kernel, [{logger_level, info}]}, {my_app, [{port, 8080}]}].\n";
+
+    assert!(
+        config::validate_sys_config(text, Path::new("/w/sys.config")).is_ok(),
+        "this is exactly the shape `file:consult/1` reads"
+    );
+
+    let error = config::validate_sys_config("{kernel, []}.\n", Path::new("/w/sys.config"))
+        .expect_err("a sys.config holds a list, not a tuple");
+    assert!(
+        matches!(&error, ConfigError::SysConfigShape { .. }),
+        "expected ConfigError::SysConfigShape, got {error:?}"
+    );
+}
+
+#[test]
+fn a_sys_config_that_does_not_parse_names_the_line_and_the_column() {
+    // `%` is Erlang's comment, so the offending `#` is on line 2, column 12.
+    let text = "% the config\n[{kernel, #{}}].\n";
+    let error = config::validate_sys_config(text, Path::new("/w/sys.config"))
+        .expect_err("a map is not in the subset a sys.config may use");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::SysConfigSyntax { path, line, col, .. }
+                if path == Path::new("/w/sys.config") && *line == 2 && *col == 11
+        ),
+        "expected a syntax error at 2:11, got {error:?}"
+    );
+    assert!(
+        error.to_string().starts_with("/w/sys.config:2:11: "),
+        "the message must lead with file:line:col, and it is `{error}`"
+    );
+}
+
+#[test]
+fn a_sys_config_holding_two_terms_is_refused() {
+    let error = config::validate_sys_config("[].\n[].\n", Path::new("/w/sys.config"))
+        .expect_err("a sys.config holds exactly one term");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::SysConfigShape { found, .. } if found.contains('2')
+        ),
+        "the message must say how many terms it found, and it said {error:?}"
+    );
+}
+
+#[test]
+fn an_empty_sys_config_is_refused_rather_than_read_as_an_empty_list() {
+    let error = config::validate_sys_config("\n% nothing\n", Path::new("/w/sys.config"))
+        .expect_err("a file with no term in it is not a sys.config");
+
+    assert!(
+        matches!(&error, ConfigError::SysConfigShape { .. }),
+        "expected ConfigError::SysConfigShape, got {error:?}"
+    );
+}
+
+// ------------------------------------------------- the env key refusals --
+
+#[test]
+fn an_env_key_the_launcher_scrubs_is_refused() {
+    let error = refuse("bad_env_key.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::EnvName { path, name, .. }
+                if path == Path::new(MANIFEST) && name == "ERL_AFLAGS"
+        ),
+        "expected ConfigError::EnvName, got {error:?}"
+    );
+}
+
+#[test]
+fn an_env_key_the_launcher_derives_is_refused() {
+    let error = refuse("bad_env_name.toml");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigError::EnvName { name, .. } if name == "ROOTDIR"
+        ),
+        "expected ConfigError::EnvName for ROOTDIR, got {error:?}"
+    );
+}
+
+#[test]
+fn every_erl_prefixed_name_and_every_derived_name_is_refused() {
+    for name in [
+        "ERL_",
+        "ERL_LIBS",
+        "ERL_AFLAGS",
+        "ERL_CRASH_DUMP",
+        "ERL_OTP29_FLAGS",
+    ] {
+        assert!(
+            config::env_name_reason(name).is_some(),
+            "`{name}` is the launcher's and must be refused"
+        );
+    }
+    assert_eq!(
+        REJECTED_ENV_NAMES,
+        ["BINDIR", "EMU", "HOME", "PROGNAME", "ROOTDIR"]
+    );
+    for name in REJECTED_ENV_NAMES {
+        assert!(
+            config::env_name_reason(name).is_some(),
+            "`{name}` is derived from the extracted root and must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_variable_the_launcher_does_not_own_is_kept() {
+    for name in ["LOG_LEVEL", "RELEASE_NAME", "PATH", "ERLANG_HOME", "TERM"] {
+        assert_eq!(
+            config::env_name_reason(name),
+            None,
+            "`{name}` is the project's to default, and `ERLANG_HOME` only looks like ours"
+        );
+    }
+    // The other half of the same rule, so that a `None` for everything cannot
+    // read as this test passing.
+    assert!(
+        config::env_name_reason("ERL_LIBS").is_some(),
+        "`ERL_LIBS` is the launcher's and must not be kept"
+    );
+    let config = parse("runtime.toml");
+    assert_eq!(config.tools.env.len(), 2);
+}
+
 // ----------------------------------------------------------- the merge --
 
 /// The flags a build starts from: everything off, nothing named.
@@ -379,6 +765,12 @@ fn the_merge_falls_back_to_the_defaults_when_neither_flags_nor_table_speak() {
     assert_eq!(options.otp_applications, Vec::<String>::new());
     assert_eq!(options.erts_extra_bins, Vec::<String>::new());
     assert_eq!(options.erl_flags, Vec::<String>::new());
+    assert_eq!(options.vm_args, None);
+    assert_eq!(options.sys_config, None);
+    assert!(!options.distribution);
+    assert!(!options.heart);
+    assert_eq!(options.env, BTreeMap::new());
+    assert_eq!(options.filename_encoding, DEFAULT_FILENAME_ENCODING);
 }
 
 #[test]
@@ -618,4 +1010,162 @@ fn the_out_flag_reaches_the_merged_options() {
     );
 
     assert_eq!(options.out, dir.path().join("full_app"));
+}
+
+// --------------------------------- the runtime settings through the merge --
+
+/// Merges `runtime.toml` and the given flags against a project root.
+fn merge_runtime(root: &Path, flags: &BuildFlags) -> BuildOptions {
+    let config = parse("runtime.toml");
+    BuildOptions::merge(root, &config, flags).expect("the merge succeeds")
+}
+
+#[test]
+fn the_table_decides_every_runtime_setting_when_no_flag_speaks() {
+    let root = Path::new("/w/runtime_app");
+    let options = merge_runtime(root, &no_flags(root));
+
+    assert_eq!(
+        options.vm_args.as_deref(),
+        Some(root.join("config/vm.args").as_path()),
+        "a table path is relative to the project, as `output` is"
+    );
+    assert_eq!(
+        options.sys_config.as_deref(),
+        Some(root.join("config/sys.config").as_path())
+    );
+    assert!(options.distribution);
+    assert!(options.heart);
+    assert_eq!(options.filename_encoding, "latin1");
+    assert_eq!(
+        options.env,
+        BTreeMap::from([
+            ("LOG_LEVEL".to_owned(), "info".to_owned()),
+            ("RELEASE_NAME".to_owned(), "runtime_app".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn the_vm_args_flag_wins_over_the_table_and_is_relative_to_the_user() {
+    // `--vm-args` is typed on a command line, and every other path on a
+    // command line is relative to the working directory.
+    let root = Path::new("/w/runtime_app");
+    let options = merge_runtime(
+        root,
+        &BuildFlags {
+            vm_args: Some(PathBuf::from("other/vm.args")),
+            ..no_flags(root)
+        },
+    );
+
+    assert_eq!(
+        options.vm_args,
+        Some(PathBuf::from("other/vm.args")),
+        "the flag is used as typed and is not joined onto the project"
+    );
+}
+
+#[test]
+fn the_sys_config_flag_wins_over_the_table() {
+    let root = Path::new("/w/runtime_app");
+    let options = merge_runtime(
+        root,
+        &BuildFlags {
+            sys_config: Some(PathBuf::from("/etc/app/sys.config")),
+            ..no_flags(root)
+        },
+    );
+
+    assert_eq!(
+        options.sys_config,
+        Some(PathBuf::from("/etc/app/sys.config"))
+    );
+}
+
+#[test]
+fn the_distribution_flag_turns_the_setting_on_and_never_off() {
+    // A boolean flag has one direction: `--distribution` on a project that
+    // already asked for it changes nothing, and its absence is not a request
+    // to turn the table's setting off.
+    let root = Path::new("/w/full_app");
+    let plain = merge(root, &no_flags(root));
+    assert!(!plain.distribution, "`full.toml` does not ask for it");
+
+    let flagged = merge(
+        root,
+        &BuildFlags {
+            distribution: true,
+            ..no_flags(root)
+        },
+    );
+    assert!(flagged.distribution);
+
+    let table = merge_runtime(Path::new("/w/runtime_app"), &no_flags(root));
+    assert!(
+        table.distribution,
+        "the absence of the flag must not override a table that asked for it"
+    );
+}
+
+#[test]
+fn a_flag_that_names_a_file_reaches_the_merged_options_from_either_side() {
+    let root = Path::new("/w/full_app");
+    let options = merge(
+        root,
+        &BuildFlags {
+            vm_args: Some(PathBuf::from("vm.args")),
+            sys_config: Some(PathBuf::from("sys.config")),
+            ..no_flags(root)
+        },
+    );
+
+    assert_eq!(options.vm_args, Some(PathBuf::from("vm.args")));
+    assert_eq!(options.sys_config, Some(PathBuf::from("sys.config")));
+    assert_eq!(
+        options.filename_encoding, DEFAULT_FILENAME_ENCODING,
+        "a table that names no encoding still gets the default through the merge"
+    );
+}
+
+#[test]
+fn the_merge_refuses_an_env_name_the_launcher_owns() {
+    let root = Path::new("/w/app");
+    let config = ProjectConfig {
+        name: "app".to_owned(),
+        version: None,
+        tools: ToolsConfig {
+            env: BTreeMap::from([("ERL_LIBS".to_owned(), "/opt/lib".to_owned())]),
+            ..ToolsConfig::default()
+        },
+    };
+
+    let error = BuildOptions::merge(root, &config, &no_flags(root))
+        .expect_err("the merge must apply the env lint");
+
+    assert!(
+        matches!(&error, ConfigError::EnvName { name, .. } if name == "ERL_LIBS"),
+        "expected ConfigError::EnvName, got {error:?}"
+    );
+}
+
+#[test]
+fn the_merge_refuses_an_encoding_the_emulator_has_no_flag_for() {
+    let root = Path::new("/w/app");
+    let config = ProjectConfig {
+        name: "app".to_owned(),
+        version: None,
+        tools: ToolsConfig {
+            filename_encoding: Some("ebcdic".to_owned()),
+            ..ToolsConfig::default()
+        },
+    };
+
+    let error = BuildOptions::merge(root, &config, &no_flags(root))
+        .expect_err("the merge must apply the encoding lint");
+
+    assert!(
+        matches!(&error, ConfigError::FilenameEncoding { value, .. } if value == "ebcdic"),
+        "expected ConfigError::FilenameEncoding, got {error:?}"
+    );
 }

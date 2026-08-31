@@ -315,12 +315,18 @@ pub fn launch_plan(
     // An empty environment rather than this process': the plan is about the
     // artifact, and a `GINARY_ERL_FLAGS` or a `HOME` that happens to be set
     // where the inspection ran is not part of it.
-    crate::launch::plan(root, &info.manifest, &[], &Env::default(), crash_dump_dir).map_err(
-        |source| InspectError::Launch {
-            path: info.path.clone(),
-            source,
-        },
+    crate::launch::plan(
+        root,
+        &info.manifest,
+        &[],
+        &Env::default(),
+        crash_dump_dir,
+        &info.path,
     )
+    .map_err(|source| InspectError::Launch {
+        path: info.path.clone(),
+        source,
+    })
 }
 
 /// Renders a plan as `program:`, `argv:`, `set:` and `remove:` blocks.

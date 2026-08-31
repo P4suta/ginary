@@ -15,6 +15,15 @@ run = [
   "cargo clippy --all-targets --all-features -- -D warnings",
 ]
 
+[tasks."lint:plain"]
+description = "Run clippy over the default feature set, with warnings denied"
+# `lint` passes `--all-features`, which compiles the `fault-injection` tests in
+# and hides anything that is dead code without them. This task is the other
+# half: it is what a contributor's plain `cargo clippy --all-targets` does, and
+# it is in `check` so a helper that only the gated tests call cannot go
+# unnoticed until someone runs clippy without the feature.
+run = "cargo clippy --all-targets -- -D warnings"
+
 [tasks.test]
 description = "Run the whole suite: unit, integration and documentation tests"
 # `--features fault-injection` compiles the launcher's named fault points in.
@@ -121,9 +130,10 @@ cargo run --quiet --manifest-path "$MISE_PROJECT_ROOT/Cargo.toml" -- build
 """
 
 [tasks.check]
-description = "The pull-request gate: lint, test, doc and deny"
+description = "The pull-request gate: lint, lint:plain, test, doc and deny"
 run = [
   "mise run lint",
+  "mise run lint:plain",
   "mise run test",
   "mise run doc",
   "mise run deny",

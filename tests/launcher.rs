@@ -14,16 +14,27 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "fault-injection")]
 use std::time::{Duration, Instant};
 
 use common::artifact::{
-    APP, ArtifactOptions, DUMP_ARG, ERTS_VSN, EXIT_ARG, RUN_BUDGET, Run, SIGNAL_ARG, STUB_EXIT,
-    STUB_SLOGAN, SyntheticArtifact, canonical_manifest, names_in, read_trace,
+    APP, ArtifactOptions, DUMP_ARG, ERTS_VSN, EXIT_ARG, RUN_BUDGET, Run, SIGNAL_ARG, SLEEP_ARG,
+    STUB_EXIT, STUB_SLOGAN, SyntheticArtifact, canonical_manifest, names_in, read_trace,
 };
+use common::cachefs::{DAY, HeldLock, is_unlocked, lock_path, plant_entry, wait_until_unlocked};
+use common::tools::require_tools;
 
 use ginary::cache::Env;
 use ginary::launcher::{CMD_USAGE, CMD_USAGE_EXIT};
+use ginary::manifest::LaunchSpec;
+
+/// How long the lock proof's runtime sleeps, in seconds.
+///
+/// Comfortably under `cachefs::LOCK_BUDGET`, which is what the assertions
+/// wait against: the two are separate numbers on purpose, so that a loaded
+/// machine cannot turn the proof into a race between them.
+const RUNTIME_NAP: &str = "3";
 
 fn artifact(dir: &tempfile::TempDir) -> SyntheticArtifact {
     SyntheticArtifact::build(dir.path())
@@ -50,8 +61,14 @@ fn ginary_lines(run: &Run) -> Vec<String> {
 }
 
 /// Waits until `predicate` holds, or fails after five seconds.
+///
+/// The `fault-injection` tests are the ones that pause a run long enough to
+/// have something to wait for. The lock proof waits too, on
+/// `cachefs::wait_until_unlocked`, because what it waits for is a lock rather
+/// than a file.
+#[cfg(feature = "fault-injection")]
 fn wait_for(what: &str, mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if predicate() {
             return;
@@ -59,6 +76,41 @@ fn wait_for(what: &str, mut predicate: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// An artifact whose manifest carries the runtime settings `change` sets.
+///
+/// `bins` are extra programs under the bindir — `epmd` for a distributed
+/// artifact, `heart` for one under `heart` — and `files` are extra staged
+/// files, which is how `releases/vm.args` and `releases/sys.config` get into
+/// the tree the launcher names.
+fn runtime_artifact(
+    dir: &tempfile::TempDir,
+    bins: &[&str],
+    files: &[(&str, &[u8])],
+    change: impl FnOnce(&mut LaunchSpec),
+) -> SyntheticArtifact {
+    let mut launch = canonical_manifest().launch;
+    change(&mut launch);
+    SyntheticArtifact::build_with(
+        dir.path(),
+        &ArtifactOptions {
+            erts_bins: bins.iter().map(|name| (*name).to_owned()).collect(),
+            extra_files: files
+                .iter()
+                .map(|(path, bytes)| {
+                    (
+                        (*path).to_owned(),
+                        0o644,
+                        (*bytes).to_vec(),
+                        ginary::assemble::Category::Other,
+                    )
+                })
+                .collect(),
+            launch: Some(launch),
+            ..ArtifactOptions::default()
+        },
+    )
 }
 
 // ------------------------------------------------------ (a) environment --
@@ -209,6 +261,7 @@ fn the_argument_vector_is_the_one_the_plan_built() {
             artifact.home().into_os_string(),
         )]),
         &artifact.app_dir(),
+        artifact.path(),
     )
     .expect("the canonical manifest must produce a plan");
 
@@ -916,7 +969,14 @@ fn ginary_cmd_inspect_prints_the_manifest_and_the_geometry() {
 fn an_unknown_ginary_cmd_is_a_usage_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact(&dir);
-    for value in ["uninstall", "", "Directory"] {
+    for value in [
+        "reinstall",
+        "",
+        "Directory",
+        "Uninstall",
+        "self-test",
+        "prune",
+    ] {
         let run = artifact.run().env("GINARY_CMD", value).output();
         assert_eq!(
             run.code(),
@@ -929,6 +989,13 @@ fn an_unknown_ginary_cmd_is_a_usage_error() {
             run.stderr_text()
         );
         assert!(run.argv().is_empty(), "nothing may be launched");
+        let stderr = run.stderr_text();
+        for name in ["selftest", "uninstall"] {
+            assert!(
+                stderr.contains(name),
+                "the usage a near miss prints must offer `{name}`, and it said:\n{stderr}"
+            );
+        }
     }
 }
 
@@ -1105,4 +1172,680 @@ fn the_launcher_never_reads_the_artifact_s_own_name() {
     ok(&run);
     assert_eq!(run.env().get("PROGNAME"), Some(&APP.to_owned()));
     assert_eq!(names_in(&artifact.app_dir()), vec![artifact.key()]);
+}
+
+// -------------------------------------------- (n) the runtime settings --
+
+#[test]
+fn a_distributed_artifact_carries_epmd_and_does_not_disable_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(&dir, &["epmd"], &[], |launch| launch.distribution = true);
+
+    let run = artifact.run().output();
+    ok(&run);
+
+    assert!(
+        artifact
+            .key_dir()
+            .join(format!("erts-{ERTS_VSN}/bin/epmd"))
+            .is_file(),
+        "a distributed artifact must bundle the daemon it stops disabling"
+    );
+    assert!(
+        !run.argv_text()
+            .iter()
+            .any(|argument| argument == "-start_epmd"),
+        "the runtime must be allowed to start epmd, and it was given {:?}",
+        run.argv_text()
+    );
+
+    // The default artifact, for contrast: it ships no daemon and says so.
+    let plain_dir = tempfile::tempdir().expect("tempdir");
+    let plain = SyntheticArtifact::build(plain_dir.path());
+    let plain_run = plain.run().output();
+    ok(&plain_run);
+    assert!(
+        plain_run
+            .argv_text()
+            .iter()
+            .any(|argument| argument == "-start_epmd"),
+        "an artifact that bundles no epmd must disable it"
+    );
+    assert!(
+        !plain
+            .key_dir()
+            .join(format!("erts-{ERTS_VSN}/bin/epmd"))
+            .exists()
+    );
+}
+
+#[test]
+fn the_args_file_and_the_config_name_files_that_are_in_the_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(
+        &dir,
+        &[],
+        &[
+            ("releases/vm.args", b"-setcookie ginary\n".as_slice()),
+            ("releases/sys.config", b"[{kernel, []}].\n".as_slice()),
+        ],
+        |launch| {
+            launch.args_file = Some("releases/vm.args".to_owned());
+            launch.config = Some("releases/sys".to_owned());
+        },
+    );
+
+    let run = artifact.run().output();
+    ok(&run);
+    let argv = run.argv_text();
+
+    assert_eq!(
+        argv.first().map(String::as_str),
+        Some("-args_file"),
+        "the args file leads the vector so that ginary's own flags win, and it got {argv:?}"
+    );
+    let args_file = artifact.key_dir().join("releases/vm.args");
+    assert_eq!(argv[1], args_file.display().to_string());
+    assert!(
+        args_file.is_file(),
+        "the file the runtime is sent to must be there"
+    );
+
+    let position = argv
+        .iter()
+        .position(|argument| argument == "-config")
+        .unwrap_or_else(|| panic!("`-config` is not in {argv:?}"));
+    assert_eq!(
+        argv[position + 1],
+        artifact
+            .key_dir()
+            .join("releases/sys")
+            .display()
+            .to_string(),
+        "`-config` names the file without its extension"
+    );
+    assert!(artifact.key_dir().join("releases/sys.config").is_file());
+}
+
+#[test]
+fn the_filename_encoding_flag_reaches_the_runtime() {
+    for (encoding, flag) in [("utf8", "+fnu"), ("latin1", "+fnl"), ("auto", "+fna")] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = runtime_artifact(&dir, &[], &[], |launch| {
+            launch.filename_encoding = encoding.to_owned();
+        });
+        let run = artifact.run().output();
+        ok(&run);
+        assert!(
+            run.argv_text().iter().any(|argument| argument == flag),
+            "`{encoding}` must reach the runtime as `{flag}`, and it got {:?}",
+            run.argv_text()
+        );
+    }
+}
+
+#[test]
+fn a_manifest_env_default_is_set_and_a_caller_s_value_wins() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(&dir, &[], &[], |launch| {
+        launch.env = std::collections::BTreeMap::from([
+            ("GINARY_ENV_ONE".to_owned(), "from-manifest".to_owned()),
+            ("GINARY_ENV_TWO".to_owned(), "from-manifest".to_owned()),
+        ]);
+    });
+
+    let run = artifact.run().env("GINARY_ENV_ONE", "from-caller").output();
+    ok(&run);
+
+    let env = run.env();
+    assert_eq!(
+        env.get("GINARY_ENV_ONE").map(String::as_str),
+        Some("from-caller"),
+        "a variable the caller exported must survive the launcher untouched"
+    );
+    assert_eq!(
+        env.get("GINARY_ENV_TWO").map(String::as_str),
+        Some("from-manifest"),
+        "and one it did not export takes the artifact's default"
+    );
+}
+
+#[test]
+fn a_manifest_env_default_cannot_reintroduce_a_scrubbed_variable() {
+    // The launcher applies `env` *after* the scrub, so this is the ordering
+    // that matters: a manifest that named `ERL_LIBS` would otherwise put back
+    // the variable the scrub had just removed. The build refuses such a name;
+    // the launcher must not depend on that having happened.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(&dir, &[], &[], |launch| {
+        launch.env = std::collections::BTreeMap::from([
+            ("ERL_LIBS".to_owned(), "/opt/lib".to_owned()),
+            ("GINARY_ENV_ONE".to_owned(), "applied".to_owned()),
+        ]);
+    });
+
+    let run = artifact.run().env("ERL_LIBS", "/from/caller").output();
+    ok(&run);
+
+    let env = run.env();
+    assert_eq!(
+        env.get("GINARY_ENV_ONE").map(String::as_str),
+        Some("applied"),
+        "the ordinary defaults in the same table are applied, so the absence below is the \
+         scrub rather than `env` never running"
+    );
+    assert_eq!(
+        env.get("ERL_LIBS").map(String::as_str),
+        Some("<unset>"),
+        "the scrub is unconditional and `env` may not undo it"
+    );
+}
+
+#[test]
+fn heart_bundles_its_program_and_names_the_artifact_in_heart_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(&dir, &["heart"], &[], |launch| launch.heart = true);
+
+    let run = artifact.run().arg("--name").arg("world").output();
+    ok(&run);
+
+    assert!(
+        artifact
+            .key_dir()
+            .join(format!("erts-{ERTS_VSN}/bin/heart"))
+            .is_file()
+    );
+    assert!(
+        run.argv_text().iter().any(|argument| argument == "-heart"),
+        "the runtime must be told to start heart, and it got {:?}",
+        run.argv_text()
+    );
+    assert_eq!(
+        run.env().get("HEART_COMMAND").map(String::as_str),
+        Some(format!("{} --name world", artifact.path().display()).as_str()),
+        "heart restarts the application by re-running the artifact with its own arguments"
+    );
+}
+
+#[test]
+fn a_heart_command_the_caller_exported_is_left_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = runtime_artifact(&dir, &["heart"], &[], |launch| launch.heart = true);
+
+    let run = artifact
+        .run()
+        .env("HEART_COMMAND", "/usr/local/bin/supervise")
+        .output();
+    ok(&run);
+
+    assert!(
+        run.argv_text().iter().any(|argument| argument == "-heart"),
+        "the runtime is still started under heart; only the command is the caller's, and it \
+         got {:?}",
+        run.argv_text()
+    );
+    assert_eq!(
+        run.env().get("HEART_COMMAND").map(String::as_str),
+        Some("/usr/local/bin/supervise")
+    );
+}
+
+// ------------------------------------ (o) the lock, across execve --
+
+#[test]
+fn the_shared_lock_outlives_the_launcher_and_dies_with_the_runtime() {
+    // The executable proof of the claim ADR 0010 rests on: `flock` belongs to
+    // the open file description, and a descriptor without FD_CLOEXEC survives
+    // `execve`. The launcher takes the lock and then execs; nothing of ginary
+    // is left running, so if the lock were process-bound it would already be
+    // gone by the time this test looks.
+    let Some(tools) = require_tools(&["flock", "sleep"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    let flock = tools.path("flock");
+    let sleep_dir = tools
+        .path("sleep")
+        .parent()
+        .expect("`sleep` has a directory")
+        .to_path_buf();
+
+    // A real `PATH`, because the stub's `sleep` is a program rather than a
+    // shell builtin. Nothing on the launcher path reads `PATH`.
+    let mut child = artifact
+        .run()
+        .env("PATH", &sleep_dir)
+        .arg(SLEEP_ARG)
+        .arg(RUNTIME_NAP)
+        .spawn();
+
+    let lock = lock_path(&artifact.key_dir());
+    assert!(
+        wait_until_unlocked(flock, &lock, false),
+        "while the runtime runs, {} must exist and must not be exclusively lockable: the \
+         launcher execs, so a lock that did not survive execve is already gone",
+        lock.display()
+    );
+
+    // `kill` reaches the stub shell and not the `sleep` it started, and that
+    // is the point: the grandchild inherited the descriptor and holds the lock
+    // until it exits on its own. So the wait that follows is bounded by
+    // `cachefs::LOCK_BUDGET` rather than by `RUNTIME_NAP`, and the two numbers
+    // are deliberately far apart.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        wait_until_unlocked(flock, &lock, true),
+        "the kernel releases the lock when the last holder exits, and nothing else does"
+    );
+}
+
+#[test]
+fn a_finished_run_leaves_the_lock_file_and_no_lock() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+
+    let lock = lock_path(&artifact.key_dir());
+    assert!(
+        lock.is_file(),
+        "the lock file stays with the entry it belongs to"
+    );
+    assert!(
+        is_unlocked(tools.path("flock"), &lock),
+        "an application that has exited holds nothing"
+    );
+}
+
+// --------------------------------------------- (p) pruning on launch --
+
+#[test]
+fn an_old_sibling_is_pruned_by_the_next_run_and_the_new_entry_is_not() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    std::fs::create_dir_all(artifact.app_dir()).expect("create the application directory");
+    let old = plant_entry(&artifact.app_dir(), "0000000000000000", DAY * 30);
+
+    let trace = dir.path().join("prune.jsonl");
+    ok(&artifact.run().env("GINARY_TRACE", &trace).output());
+
+    assert!(
+        !old.exists(),
+        "a sibling nobody has touched for a month is what pruning is for"
+    );
+    assert_eq!(
+        names_in(&artifact.app_dir()),
+        vec![artifact.key()],
+        "and nothing else is left behind"
+    );
+    let records = read_trace(&trace);
+    let prune = records
+        .iter()
+        .find(|record| record.phase == "prune")
+        .unwrap_or_else(|| {
+            let phases: Vec<&String> = records.iter().map(|record| &record.phase).collect();
+            panic!("what was pruned belongs in the trace, which holds {phases:?}")
+        });
+    let removed = prune
+        .kv
+        .get("removed_paths")
+        .expect("the prune record must name what it removed");
+    assert!(
+        removed.contains(&old.display().to_string()),
+        "a count explains nothing: the record must name the entry that vanished, and it says \
+         {removed}"
+    );
+}
+
+#[test]
+fn an_uninstall_leaves_the_crash_dump_beside_the_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+    let dump = artifact.app_dir().join("erl_crash.dump");
+    std::fs::write(&dump, b"=erl_crash_dump:0.5\nSlogan: killed\n").expect("plant a dump");
+
+    let run = artifact.run().env("GINARY_CMD", "uninstall").output();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr_text());
+    assert!(
+        dump.is_file(),
+        "the dump is why the application directory is worth keeping, and uninstall removes only \
+         what the cache wrote:\n{}",
+        run.stdout_text()
+    );
+    assert!(
+        !artifact.key_dir().exists(),
+        "the entry itself is the cache's own and goes"
+    );
+    assert!(
+        artifact.app_dir().is_dir(),
+        "and the directory holding the dump stays"
+    );
+}
+
+#[test]
+fn a_locked_old_sibling_survives_the_next_run() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    std::fs::create_dir_all(artifact.app_dir()).expect("create the application directory");
+    let busy = plant_entry(&artifact.app_dir(), "0000000000000000", DAY * 30);
+    let free = plant_entry(&artifact.app_dir(), "1111111111111111", DAY * 30);
+    let lock = HeldLock::take(tools.path("flock"), &busy);
+
+    ok(&artifact.run().output());
+
+    assert!(
+        busy.join("ginary.json").is_file(),
+        "another application is running out of that entry; pruning must skip it"
+    );
+    assert!(
+        !free.exists(),
+        "and its equally stale neighbour, which nobody holds, goes: the lock is what \
+         separated them"
+    );
+    lock.release(tools.path("flock"));
+}
+
+#[test]
+fn a_fresh_sibling_survives_the_next_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    std::fs::create_dir_all(artifact.app_dir()).expect("create the application directory");
+    let fresh = plant_entry(&artifact.app_dir(), "0000000000000000", DAY);
+    let old = plant_entry(&artifact.app_dir(), "1111111111111111", DAY * 30);
+
+    ok(&artifact.run().output());
+
+    assert!(fresh.join("ginary.json").is_file());
+    assert!(
+        !old.exists(),
+        "the age is what decides, so a run that spared both spared nothing"
+    );
+}
+
+#[test]
+fn ginary_prune_days_zero_turns_pruning_off_for_a_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    std::fs::create_dir_all(artifact.app_dir()).expect("create the application directory");
+    let old = plant_entry(&artifact.app_dir(), "0000000000000000", DAY * 400);
+
+    ok(&artifact.run().env("GINARY_PRUNE_DAYS", "0").output());
+
+    assert!(
+        old.join("ginary.json").is_file(),
+        "a user who turned pruning off must keep every entry"
+    );
+
+    // And the same entry against the default age, so that the survival above
+    // is the setting rather than a prune that never happens.
+    ok(&artifact.run().output());
+    assert!(
+        !old.exists(),
+        "without the override the same sibling is four hundred days stale"
+    );
+}
+
+#[test]
+fn a_failing_prune_never_fails_the_launch() {
+    // An application directory whose entries cannot be removed is a
+    // housekeeping problem, and housekeeping does not decide whether an
+    // application starts.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+
+    // Extract first, then plant the sibling and make it unremovable, then run
+    // again. The sibling cannot be planted before the first run: that run
+    // prunes as every run does, and a thirty-day-old entry would be gone
+    // before this test had a chance to protect it.
+    let old = plant_entry(&artifact.app_dir(), "0000000000000000", DAY * 30);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o500))
+        .expect("make the sibling unremovable");
+    let run = artifact.run().output();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700))
+        .expect("restore the mode so the tempdir can be cleaned up");
+
+    assert_eq!(
+        run.code(),
+        STUB_EXIT,
+        "the application must start whatever pruning could not do\n{}",
+        run.stderr_text()
+    );
+    assert_eq!(
+        ginary_lines(&run),
+        Vec::<String>::new(),
+        "and a best-effort prune says nothing on standard error"
+    );
+    assert!(
+        old.join("ginary.json").is_file(),
+        "the sibling is still there, which is the failure this test arranged"
+    );
+
+    // With the mode restored the same sibling goes, so the survival above is
+    // the failure being tolerated rather than pruning never running.
+    ok(&artifact.run().output());
+    assert!(!old.exists());
+}
+
+// ----------------------------------------- (q) GINARY_CMD uninstall --
+
+#[test]
+fn ginary_cmd_uninstall_removes_every_entry_of_this_application() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+    let sibling = plant_entry(&artifact.app_dir(), "0000000000000000", DAY);
+
+    let run = artifact.run().env("GINARY_CMD", "uninstall").output();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr_text());
+    let stdout = run.stdout_text();
+    for entry in [artifact.key_dir(), sibling.clone()] {
+        assert!(
+            stdout.contains(&format!("removed {}", entry.display())),
+            "uninstall must name what it removed, and it said:\n{stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("total: 2 removed, 0 kept"),
+        "the summary must count both columns, and it said:\n{stdout}"
+    );
+    assert!(!sibling.exists());
+    assert!(
+        !artifact.app_dir().exists(),
+        "an application directory with nothing left in it goes too"
+    );
+}
+
+#[test]
+fn ginary_cmd_uninstall_keeps_a_locked_entry_and_still_exits_zero() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+    let busy = plant_entry(&artifact.app_dir(), "0000000000000000", DAY);
+    let lock = HeldLock::take(tools.path("flock"), &busy);
+
+    let run = artifact.run().env("GINARY_CMD", "uninstall").output();
+
+    assert_eq!(
+        run.code(),
+        0,
+        "a partial uninstall is reported, not failed\n{}",
+        run.stderr_text()
+    );
+    let stdout = run.stdout_text();
+    assert!(
+        stdout.contains(&format!("kept {} (locked)", busy.display())),
+        "uninstall must say what it kept and why, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("total: 1 removed, 1 kept"),
+        "the summary said:\n{stdout}"
+    );
+    assert!(busy.join("ginary.json").is_file());
+    assert!(
+        artifact.app_dir().is_dir(),
+        "an application directory that still holds something must stay"
+    );
+    lock.release(tools.path("flock"));
+}
+
+#[test]
+fn ginary_cmd_uninstall_removes_temporary_and_corrupt_residue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    ok(&artifact.run().output());
+    let residue: PathBuf = artifact.app_dir().join(".0000000000000000.tmp-4000000000");
+    std::fs::create_dir_all(residue.join("lib")).expect("plant residue");
+
+    let run = artifact.run().env("GINARY_CMD", "uninstall").output();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr_text());
+    assert!(
+        !residue.exists(),
+        "uninstall means the application leaves nothing behind, residue included"
+    );
+    assert!(!artifact.app_dir().exists());
+}
+
+#[test]
+fn ginary_cmd_uninstall_on_a_cold_machine_removes_nothing_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+
+    let run = artifact.run().env("GINARY_CMD", "uninstall").output();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr_text());
+    assert_eq!(run.stdout_text(), "total: 0 removed, 0 kept\n");
+    assert!(
+        run.argv().is_empty(),
+        "`uninstall` must not start the runtime"
+    );
+}
+
+// ------------------------------------------ (r) GINARY_CMD selftest --
+
+#[test]
+fn ginary_cmd_selftest_extracts_checks_and_runs_a_halt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+
+    let run = artifact.run().env("GINARY_CMD", "selftest").output();
+
+    assert_eq!(
+        run.code(),
+        0,
+        "a healthy artifact selftests clean\n{}",
+        run.stderr_text()
+    );
+    assert_eq!(
+        run.stdout_text(),
+        "extract: PASS\npreflight: PASS\nrun: PASS\n",
+        "each step reports itself, in the order the launcher does them"
+    );
+    assert!(
+        artifact.key_dir().join("ginary.json").is_file(),
+        "selftest extracts, because there is nothing to test until it has"
+    );
+}
+
+#[test]
+fn a_selftest_run_replaces_the_eval_and_drops_the_user_s_arguments() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    let trace = dir.path().join("selftest.jsonl");
+
+    let run = artifact
+        .run()
+        .env("GINARY_CMD", "selftest")
+        .env("GINARY_TRACE", &trace)
+        .arg("--name")
+        .arg("world")
+        .output();
+    assert_eq!(run.code(), 0, "{}", run.stderr_text());
+
+    let records = read_trace(&trace);
+    let exec = records
+        .iter()
+        .rfind(|record| record.phase == "exec")
+        .expect("the selftest run must be recorded like any other launch");
+    let argv: Vec<String> = serde_json::from_str(
+        exec.kv
+            .get("argv")
+            .expect("the exec record must carry the whole argv")
+            .as_str(),
+    )
+    .expect("`argv` must be a JSON array of strings");
+
+    let position = argv
+        .iter()
+        .position(|argument| argument == "-eval")
+        .unwrap_or_else(|| panic!("`-eval` is not in {argv:?}"));
+    assert_eq!(
+        argv[position + 1],
+        "erlang:halt(0)",
+        "a selftest starts the runtime and stops it, and runs no application code"
+    );
+    assert!(
+        !argv.iter().any(|argument| argument == "-extra"),
+        "there are no user arguments in a selftest, so there is nothing to introduce, \
+         and it got {argv:?}"
+    );
+}
+
+#[test]
+fn a_selftest_of_a_runtime_that_cannot_start_fails_the_step_and_exits_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = SyntheticArtifact::build_with(
+        dir.path(),
+        &ArtifactOptions {
+            omit: vec![format!("erts-{ERTS_VSN}/bin/beam.smp")],
+            ..ArtifactOptions::default()
+        },
+    );
+
+    let run = artifact.run().env("GINARY_CMD", "selftest").output();
+
+    assert_eq!(
+        run.code(),
+        1,
+        "a selftest that found a broken artifact must say so with its exit code\n{}",
+        run.stderr_text()
+    );
+    let stdout = run.stdout_text();
+    assert!(
+        stdout.contains("extract: PASS"),
+        "the steps before the failure still report, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("preflight: FAIL"),
+        "the failing step must be named, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("beam.smp"),
+        "and it must name the file, and it said:\n{stdout}"
+    );
+}
+
+#[test]
+fn the_usage_line_names_all_five_commands() {
+    assert_eq!(
+        CMD_USAGE,
+        "usage: GINARY_CMD=directory|extract-only|inspect|selftest|uninstall"
+    );
 }

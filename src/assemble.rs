@@ -339,6 +339,64 @@ impl StagedRoot {
         }
     }
 
+    /// Writes one more file into the staged tree and into the listing.
+    ///
+    /// This is how the runtime settings reach the artifact: `[tools.ginary]
+    /// vm_args` and `sys_config` name files in the *project*, and the launcher
+    /// needs them at fixed root-relative paths inside the extracted tree. They
+    /// are not applications and not part of the runtime, so nothing in
+    /// [`stage`] would have copied them.
+    ///
+    /// The listing is rewritten, because `ginary.stage.json` is what
+    /// [`crate::payload::pack`] packs from and what it checks the tree
+    /// against: a file the listing does not name would be either packed and
+    /// undescribed or dropped without a word.
+    ///
+    /// `path` is root-relative and `/`-separated, and is the caller's to
+    /// choose: it is not a value that comes from a project.
+    ///
+    /// # Errors
+    ///
+    /// [`AssembleError::Io`] when the file, its parent directory, its mode or
+    /// the listing cannot be written.
+    pub fn add_file(
+        &mut self,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+        category: Category,
+    ) -> Result<(), AssembleError> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let full = self.root.join(path);
+        if let Some(parent) = full.parent() {
+            create_dir(parent)?;
+        }
+        std::fs::write(&full, contents).map_err(|source| AssembleError::Io {
+            path: full.clone(),
+            source,
+        })?;
+        std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode)).map_err(
+            |source| AssembleError::Io {
+                path: full.clone(),
+                source,
+            },
+        )?;
+
+        let staged = StagedFile {
+            path: path.to_owned(),
+            size: contents.len() as u64,
+            mode,
+            category,
+        };
+        match self.files.iter_mut().find(|file| file.path == path) {
+            Some(existing) => *existing = staged,
+            None => self.files.push(staged),
+        }
+        self.files.sort_by(|left, right| left.path.cmp(&right.path));
+        write_listing(&self.root.join(LISTING_NAME), &self.listing())
+    }
+
     /// Re-reads the tree and rewrites `ginary.stage.json`.
     ///
     /// Stripping rewrites files in place, so every size this struct holds — and

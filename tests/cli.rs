@@ -1437,6 +1437,199 @@ fn cache_clean_of_a_cache_that_was_never_created_removes_nothing() {
     assert!(!root.exists(), "cleaning must not create the root");
 }
 
+// ------------------------------------------------------ ginary cache prune --
+
+/// Plants `<root>/<app>/<key>/ginary.json` and back-dates it by `days`.
+fn plant_aged(root: &Path, app: &str, key: &str, days: u64) -> PathBuf {
+    let entry = root.join(app).join(key);
+    std::fs::create_dir_all(&entry).expect("create a cache entry");
+    let manifest = entry.join("ginary.json");
+    std::fs::write(&manifest, b"{}\n").expect("write the marker");
+    crate::common::cachefs::set_mtime(
+        &manifest,
+        std::time::SystemTime::now()
+            .checked_sub(crate::common::cachefs::DAY * u32::try_from(days).expect("a day count"))
+            .expect("a date the clock can hold"),
+    );
+    entry
+}
+
+#[test]
+fn the_cache_help_lists_prune_beside_dir_and_clean() {
+    let assert = ginary().args(["cache", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    for name in ["dir", "clean", "prune"] {
+        assert!(
+            stdout.contains(name),
+            "`ginary cache --help` must list `{name}`, and it said:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn cache_prune_removes_the_old_and_keeps_the_fresh_with_a_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let old = plant_aged(&root, "hello", "1111111111111111", 30);
+    let fresh = plant_aged(&root, "hello", "2222222222222222", 2);
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "prune"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains(&format!("removed {}", old.display())),
+        "the table must name what went, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("kept {} (fresh)", fresh.display())),
+        "the table must say why something stayed, and it said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("total: 1 removed, 1 kept"),
+        "the summary must count both columns, and it said:\n{stdout}"
+    );
+    assert!(!old.exists());
+    assert!(fresh.is_dir());
+}
+
+#[test]
+fn cache_prune_days_moves_the_line_between_old_and_fresh() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let entry = plant_aged(&root, "hello", "1111111111111111", 5);
+
+    ginary_with_cache(&root)
+        .args(["cache", "prune", "--days", "30"])
+        .assert()
+        .success();
+    assert!(
+        entry.is_dir(),
+        "five days is fresh against a thirty-day age"
+    );
+
+    ginary_with_cache(&root)
+        .args(["cache", "prune", "--days", "1"])
+        .assert()
+        .success();
+    assert!(!entry.exists(), "and stale against a one-day one");
+}
+
+#[test]
+fn cache_prune_all_ignores_the_age() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let fresh = plant_aged(&root, "hello", "1111111111111111", 0);
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "prune", "--all"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(!fresh.exists(), "`--all` prunes whatever the entry's age");
+    assert!(
+        stdout.contains("total: 1 removed, 0 kept"),
+        "the summary said:\n{stdout}"
+    );
+}
+
+#[test]
+fn cache_prune_all_still_keeps_an_entry_a_process_is_holding() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let busy = plant_aged(&root, "hello", "1111111111111111", 400);
+    let lock = crate::common::cachefs::HeldLock::take(tools.path("flock"), &busy);
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "prune", "--all"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert!(
+        stdout.contains(&format!("kept {} (locked)", busy.display())),
+        "`--all` is `whatever its age`, not `whatever is using it`; it said:\n{stdout}"
+    );
+    assert!(busy.join("ginary.json").is_file());
+    lock.release(tools.path("flock"));
+}
+
+#[test]
+fn cache_prune_app_reaches_one_application_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let hello = plant_aged(&root, "hello", "1111111111111111", 30);
+    let other = plant_aged(&root, "other", "2222222222222222", 30);
+
+    ginary_with_cache(&root)
+        .args(["cache", "prune", "--app", "hello", "--all"])
+        .assert()
+        .success();
+
+    assert!(!hello.exists());
+    assert!(other.is_dir(), "`--app` must not reach another application");
+}
+
+#[test]
+fn cache_prune_app_that_is_not_a_name_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    std::fs::create_dir_all(&root).expect("create the root");
+    // Something old enough that a prune which got as far as running would take
+    // it: the claim below is that the name is checked before anything is
+    // removed, and a cache with nothing in it could not tell.
+    let planted = plant_aged(&root, "hello", "1111111111111111", 400);
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "prune", "--app", "../etc"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8");
+
+    assert!(
+        stderr.contains("is not an application name"),
+        "the refusal must be about the name rather than about the flag, and it said:\n{stderr}"
+    );
+    assert!(
+        planted.join("ginary.json").is_file(),
+        "nothing may be removed before the name is checked, and {} is four hundred days old",
+        planted.display()
+    );
+}
+
+#[test]
+fn cache_prune_of_a_cache_that_was_never_created_removes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("absent");
+
+    let assert = ginary_with_cache(&root)
+        .args(["cache", "prune"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    assert_eq!(stdout, "total: 0 removed, 0 kept\n");
+    assert!(!root.exists(), "pruning must not create the root");
+}
+
+#[test]
+fn build_help_lists_the_three_runtime_flags() {
+    let assert = ginary().args(["build", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+    for flag in ["--distribution", "--vm-args", "--sys-config"] {
+        assert!(
+            stdout.contains(flag),
+            "`ginary build --help` must list `{flag}`, and it said:\n{stdout}"
+        );
+    }
+}
+
 // ------------------------------- `ginary build` and `ginary inspect` (A4) --
 
 /// A `ginary` run from a directory the test owns, so no ambient `gleam.toml`

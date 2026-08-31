@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::assemble::{AssembleError, StageOptions};
+use crate::assemble::{AssembleError, Category, StageOptions};
 use crate::closure::{self, AppSet, ClosureError};
 use crate::config::{BuildOptions, ConfigError};
 use crate::diag::Diag;
@@ -66,6 +66,42 @@ pub const LAUNCH_PROGRAM: &str = "erlexec";
 
 /// The boot script, relative to the extracted root and without `.boot`.
 pub const BOOT_SCRIPT: &str = "bin/no_dot_erlang";
+
+/// Where an `[tools.ginary] vm_args` is copied to inside the artifact.
+///
+/// Fixed rather than taken from the project: the manifest names a path the
+/// launcher joins onto the extracted root, and a value the project chose would
+/// be a path from a project reaching into a cache directory.
+pub const STAGED_VM_ARGS: &str = "releases/vm.args";
+
+/// Where an `[tools.ginary] sys_config` is copied to.
+pub const STAGED_SYS_CONFIG: &str = "releases/sys.config";
+
+/// What `-config` is given: [`STAGED_SYS_CONFIG`] without its extension.
+///
+/// `erl -config` appends `.config` itself, so passing the suffix would send
+/// the runtime looking for `sys.config.config`.
+pub const STAGED_CONFIG_ARG: &str = "releases/sys";
+
+/// The program a distributed artifact bundles beyond the required four.
+pub const EPMD_BIN: &str = "epmd";
+
+/// The program an artifact under `heart` bundles.
+pub const HEART_BIN: &str = "heart";
+
+/// The mode the copied `vm.args` and `sys.config` are given.
+///
+/// Readable and not executable: they are read by the runtime, not run.
+pub const CONFIG_FILE_MODE: u32 = 0o644;
+
+/// What a distributed artifact that names no node is warned about.
+///
+/// Distribution without `-name` or `-sname` starts a runtime that cannot be
+/// reached, which is a build that did half of what was asked and said nothing.
+/// It is a warning and not an error because the node name can legitimately
+/// come from the environment at run time, through `GINARY_ERL_FLAGS`.
+pub const DISTRIBUTION_NO_NAME: &str = "[tools.ginary] distribution is on and neither erl_flags nor the args file names the node \
+     with -name or -sname; the runtime will start distribution and have no name to register";
 
 /// The `app_version` recorded when the project declares none.
 ///
@@ -365,19 +401,24 @@ fn assemble_and_write(
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
     let root = work.join(WORK_STAGE_NAME);
-    let staged = {
+    let mut staged = {
         let _phase = diag.phase("stage");
         crate::assemble::stage(
             set,
             otp,
             &StageOptions {
-                extra_bins: opts.erts_extra_bins.clone(),
+                extra_bins: runtime_bins(opts),
                 remove_junk: true,
                 force: true,
             },
             &root,
         )?
     };
+
+    // Before stripping and before the tree is measured: the two files are part
+    // of the artifact, so they belong in the size report and in the listing the
+    // payload is packed from.
+    let warnings = stage_runtime_files(opts, &mut staged, diag)?;
 
     let strip_report = {
         let _phase = diag.phase("strip");
@@ -413,8 +454,158 @@ fn assemble_and_write(
         size_report,
         manifest,
         staging: None,
-        warnings: Vec::new(),
+        warnings,
         explain,
+    })
+}
+
+/// The programs to stage beyond the required four.
+///
+/// The project's own `erts_extra_bins`, plus the one each runtime setting
+/// implies: a distributed artifact needs `epmd` and one under `heart` needs
+/// `heart`. Asking for a program twice stages it once.
+fn runtime_bins(opts: &BuildOptions) -> Vec<String> {
+    let mut bins = opts.erts_extra_bins.clone();
+    let mut want = |name: &str| {
+        if !bins.iter().any(|existing| existing == name) {
+            bins.push(name.to_owned());
+        }
+    };
+    if opts.distribution {
+        want(EPMD_BIN);
+    }
+    if opts.heart {
+        want(HEART_BIN);
+    }
+    bins
+}
+
+/// Copies `vm_args` and `sys_config` into the staged tree, checking both.
+///
+/// Each file must exist, and each is checked for what it holds before it is
+/// copied: an args file may not carry a flag the launcher passes itself, and a
+/// `sys.config` must be the one list of terms `file:consult/1` reads. Both
+/// checks happen here rather than in [`crate::config`] because both are
+/// questions about a file, and everything in that module is pure.
+///
+/// Returns the warnings the settings earned — today that is the one about a
+/// distributed artifact that names no node.
+///
+/// # Errors
+///
+/// [`BundleError::RuntimeFile`] when a named file is not there or is not
+/// usable, and [`BundleError::Assemble`] when it cannot be written into the
+/// staged tree.
+fn stage_runtime_files(
+    opts: &BuildOptions,
+    staged: &mut crate::assemble::StagedRoot,
+    diag: &Diag,
+) -> Result<Vec<String>, BundleError> {
+    let mut vm_args_text = None;
+    if let Some(path) = &opts.vm_args {
+        let text = read_runtime_file(opts, "vm_args", path)?;
+        crate::config::lint_args_file(&text, path).map_err(BundleError::RuntimeFile)?;
+        staged.add_file(
+            STAGED_VM_ARGS,
+            text.as_bytes(),
+            CONFIG_FILE_MODE,
+            Category::Other,
+        )?;
+        diag.kv("vm_args", &[("from", &path.display().to_string())]);
+        vm_args_text = Some(text);
+    }
+
+    if let Some(path) = &opts.sys_config {
+        let text = read_runtime_file(opts, "sys_config", path)?;
+        crate::config::validate_sys_config(&text, path).map_err(BundleError::RuntimeFile)?;
+        staged.add_file(
+            STAGED_SYS_CONFIG,
+            text.as_bytes(),
+            CONFIG_FILE_MODE,
+            Category::Other,
+        )?;
+        diag.kv("sys_config", &[("from", &path.display().to_string())]);
+    }
+
+    Ok(runtime_warnings(opts, vm_args_text.as_deref()))
+}
+
+/// The warnings one build's runtime settings earn, given its args file.
+///
+/// Pure, and separate from [`stage_runtime_files`] for that reason: what a
+/// build says about a setting is a rule about two lists of strings, and a rule
+/// that can only be reached by staging a tree is a rule nothing checks.
+fn runtime_warnings(opts: &BuildOptions, vm_args: Option<&str>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if opts.distribution && !names_a_node(opts, vm_args) {
+        warnings.push(DISTRIBUTION_NO_NAME.to_owned());
+    }
+    warnings
+}
+
+/// Reads one file `[tools.ginary]` names, or says which key named it.
+///
+/// The two failures are told apart because they send a user to two different
+/// places: a name that resolves to nothing is a mistake in `gleam.toml`, and a
+/// file that is there and cannot be read is a mistake in the file. A `sys.config`
+/// written in Latin-1 is the case that made the difference matter — it is legal
+/// Erlang, `filename_encoding = "latin1"` is a setting ginary offers, and being
+/// told the file does not exist would send its author looking for the wrong
+/// thing.
+fn read_runtime_file(
+    opts: &BuildOptions,
+    key: &'static str,
+    path: &Path,
+) -> Result<String, BundleError> {
+    let manifest = opts.root.join(crate::gleam::MANIFEST_NAME);
+    std::fs::read_to_string(path).map_err(|error| {
+        BundleError::RuntimeFile(match error.kind() {
+            std::io::ErrorKind::NotFound => ConfigError::MissingFile {
+                path: manifest,
+                key,
+                value: path.display().to_string(),
+                missing: path.to_path_buf(),
+            },
+            _ => ConfigError::UnreadableFile {
+                path: manifest,
+                key,
+                value: path.display().to_string(),
+                file: path.to_path_buf(),
+                reason: unreadable_reason(&error),
+            },
+        })
+    })
+}
+
+/// Why a file that is there could not be read, as a phrase.
+///
+/// `InvalidData` is spelled out because the operating system had nothing to do
+/// with it: it is `read_to_string` refusing bytes that are not UTF-8, and
+/// "stream did not contain valid UTF-8" is not a sentence about a file the user
+/// can go and look at.
+fn unreadable_reason(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::InvalidData => {
+            "it is not valid UTF-8, and ginary reads a configuration file as text".to_owned()
+        }
+        _ => error.to_string(),
+    }
+}
+
+/// Whether anything this build passes names the distributed node.
+///
+/// `erl_flags` and the args file are the two places a `-name` or an `-sname`
+/// can come from at build time. `GINARY_ERL_FLAGS` is a third and is not
+/// knowable here, which is why the absence of a name is a warning.
+fn names_a_node(opts: &BuildOptions, vm_args: Option<&str>) -> bool {
+    let is_name = |token: &str| token == "-name" || token == "-sname";
+    if opts.erl_flags.iter().any(|flag| is_name(flag)) {
+        return true;
+    }
+    vm_args.is_some_and(|text| {
+        crate::config::tokenize_args_file(text)
+            .iter()
+            .any(|token| is_name(&token.text))
     })
 }
 
@@ -472,6 +663,18 @@ fn manifest_for(opts: &BuildOptions, otp: &OtpInfo, set: &AppSet) -> Result<Mani
             pa,
             eval: format!("'{0}@@main':run('{0}')", opts.app),
             erl_flags: opts.erl_flags.clone(),
+            // Every one of these is additive and every one has a serde
+            // default, which is what keeps `format_version` at 1: an artifact
+            // this build writes still parses in a launcher that predates them.
+            args_file: opts.vm_args.as_ref().map(|_| STAGED_VM_ARGS.to_owned()),
+            config: opts
+                .sys_config
+                .as_ref()
+                .map(|_| STAGED_CONFIG_ARG.to_owned()),
+            distribution: opts.distribution,
+            filename_encoding: opts.filename_encoding.clone(),
+            heart: opts.heart,
+            env: opts.env.clone(),
         },
         // Nothing is recorded yet: `native.rs` is Phase C, and an empty list
         // is what `docs/format.md` says an artifact with no declared native
@@ -573,6 +776,12 @@ pub enum BundleError {
     /// The project's configuration is not usable.
     #[error("cannot read the project configuration")]
     Config(#[from] ConfigError),
+    /// A file `[tools.ginary]` names is missing or is not what it claims.
+    ///
+    /// Separate from [`BundleError::Config`] because the headline has to be:
+    /// the manifest parsed, and what did not hold up is a file it pointed at.
+    #[error("cannot use the runtime configuration the project names")]
+    RuntimeFile(#[source] ConfigError),
     /// The project could not be found, or its shipment could not be obtained.
     ///
     /// Neutral about *how* the shipment was to be obtained, because
@@ -643,4 +852,194 @@ pub enum BundleError {
         /// The point that fired.
         point: &'static str,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    //! The parts of a build that need neither a project nor a toolchain.
+    //!
+    //! Three of them are private and stay private: the program list a runtime
+    //! setting implies, the question a distributed build asks about its own
+    //! flags, and the reading of a file `[tools.ginary]` names. Each is a rule
+    //! with no seam an integration test could reach, and each is a rule a
+    //! reviewer must be able to see fail.
+
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::config::{BuildFlags, ProjectConfig};
+
+    /// The options a project whose `[tools.ginary]` is `table` builds with.
+    fn options(root: &Path, table: &str) -> BuildOptions {
+        let text = format!("name = \"hello\"\n\n[tools.ginary]\n{table}");
+        let config = ProjectConfig::from_toml(&text, &root.join("gleam.toml"))
+            .expect("the table parses and validates");
+        let flags = BuildFlags {
+            start: root.to_path_buf(),
+            ..BuildFlags::default()
+        };
+        BuildOptions::merge(root, &config, &flags).expect("the defaults merge")
+    }
+
+    // ------------------------------------------------ the program list --
+
+    #[test]
+    fn a_plain_build_stages_nothing_beyond_the_required_four() {
+        let opts = options(Path::new("/w/hello"), "");
+
+        assert_eq!(runtime_bins(&opts), Vec::<String>::new());
+    }
+
+    #[test]
+    fn distribution_adds_epmd_and_heart_adds_heart() {
+        let root = Path::new("/w/hello");
+
+        assert_eq!(
+            runtime_bins(&options(root, "distribution = true\n")),
+            vec![EPMD_BIN.to_owned()],
+            "a distributed artifact has to carry the daemon it is allowed to start"
+        );
+        assert_eq!(
+            runtime_bins(&options(root, "heart = true\n")),
+            vec![HEART_BIN.to_owned()],
+            "and one under heart has to carry the program that restarts it"
+        );
+        assert_eq!(
+            runtime_bins(&options(root, "distribution = true\nheart = true\n")),
+            vec![EPMD_BIN.to_owned(), HEART_BIN.to_owned()],
+            "both settings, both programs"
+        );
+    }
+
+    #[test]
+    fn a_program_the_project_already_asked_for_is_staged_once() {
+        let opts = options(
+            Path::new("/w/hello"),
+            "distribution = true\nerts_extra_bins = [\"epmd\", \"dyn_erl\"]\n",
+        );
+
+        assert_eq!(
+            runtime_bins(&opts),
+            vec!["epmd".to_owned(), "dyn_erl".to_owned()],
+            "the project's own order is kept and nothing is asked for twice"
+        );
+    }
+
+    // -------------------------------------------------- the node's name --
+
+    #[test]
+    fn a_distributed_build_that_names_no_node_earns_one_warning() {
+        let opts = options(Path::new("/w/hello"), "distribution = true\n");
+
+        assert_eq!(
+            runtime_warnings(&opts, None),
+            vec![DISTRIBUTION_NO_NAME.to_owned()],
+            "a distributed runtime with no name is a node nothing can reach, and the build \
+             says so rather than refusing"
+        );
+    }
+
+    #[test]
+    fn an_sname_in_erl_flags_answers_the_question() {
+        let opts = options(
+            Path::new("/w/hello"),
+            "distribution = true\nerl_flags = [\"-sname\", \"hello\"]\n",
+        );
+
+        assert_eq!(runtime_warnings(&opts, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_sname_in_the_args_file_answers_it_too() {
+        // The only case that reads the args file, which is why it is the case
+        // a tokenizer change would break silently.
+        let opts = options(Path::new("/w/hello"), "distribution = true\n");
+        let args_file = "# the node this artifact is\n-sname hello\n+SDio 4\n";
+
+        assert_eq!(
+            runtime_warnings(&opts, Some(args_file)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_build_that_is_not_distributed_warns_about_nothing() {
+        let opts = options(Path::new("/w/hello"), "");
+
+        assert_eq!(runtime_warnings(&opts, None), Vec::<String>::new());
+    }
+
+    // --------------------------------------------- reading a named file --
+
+    /// A project root with `config/<name>` in it, holding `bytes`.
+    fn project_with(name: &str, bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).expect("the config directory");
+        let path = config.join(name);
+        std::fs::write(&path, bytes).expect("write the file");
+        (dir, path)
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_reported_as_missing() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let opts = options(dir.path(), "vm_args = \"config/vm.args\"\n");
+        let path = dir.path().join("config/vm.args");
+
+        let error =
+            read_runtime_file(&opts, "vm_args", &path).expect_err("there is no file at that path");
+
+        let BundleError::RuntimeFile(ConfigError::MissingFile { key, missing, .. }) = &error else {
+            panic!("expected ConfigError::MissingFile, got {error:?}");
+        };
+        assert_eq!(*key, "vm_args");
+        assert_eq!(missing, &path);
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf_8_says_so_rather_than_saying_it_is_missing() {
+        // A latin1 `sys.config` is legal Erlang, and `filename_encoding =
+        // "latin1"` is one of the three settings ginary offers. Telling that
+        // user the file does not exist sends them looking for the wrong thing.
+        let (dir, path) = project_with("sys.config", b"[{kernel, [{msg, \"caf\xe9\"}]}].\n");
+        let opts = options(dir.path(), "sys_config = \"config/sys.config\"\n");
+
+        let error = read_runtime_file(&opts, "sys_config", &path)
+            .expect_err("ginary reads a configuration file as text");
+
+        let BundleError::RuntimeFile(ConfigError::UnreadableFile {
+            key, file, reason, ..
+        }) = &error
+        else {
+            panic!("expected ConfigError::UnreadableFile, got {error:?}");
+        };
+        assert_eq!(*key, "sys_config");
+        assert_eq!(file, &path);
+        assert!(
+            reason.contains("UTF-8"),
+            "the reason must be the one the user has to fix: {reason}"
+        );
+        let message = error.to_string();
+        assert!(
+            !message.contains("there is no file"),
+            "a file that is there is not missing: {message}"
+        );
+    }
+
+    #[test]
+    fn a_directory_where_a_file_was_named_says_what_went_wrong() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("config");
+        std::fs::create_dir_all(&path).expect("the directory");
+        let opts = options(dir.path(), "vm_args = \"config\"\n");
+
+        let error = read_runtime_file(&opts, "vm_args", &path)
+            .expect_err("a directory is not an args file");
+
+        let BundleError::RuntimeFile(ConfigError::UnreadableFile { file, .. }) = &error else {
+            panic!("expected ConfigError::UnreadableFile, got {error:?}");
+        };
+        assert_eq!(file, &path);
+    }
 }

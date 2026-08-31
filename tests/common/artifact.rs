@@ -75,6 +75,22 @@ pub const DUMP_ARG: &str = "--dump";
 /// The slogan the stub writes into the dump it is asked for.
 pub const STUB_SLOGAN: &str = "Slogan: init terminating in do_boot (ginary test stub)";
 
+/// The argument the stub stays alive for, in seconds.
+///
+/// The lock proof needs a runtime that is still running when the test looks at
+/// the cache entry: nothing about a launcher that has already exited can say
+/// whether the `flock` survived `execve`. `sleep` is a program rather than a
+/// shell builtin, so a run that uses this must put a real `PATH` on the child
+/// — see [`Runner::env`].
+pub const SLEEP_ARG: &str = "--sleep";
+
+/// The `-eval` expression the stub treats as a request to exit zero.
+///
+/// `GINARY_CMD=selftest` replaces the manifest's expression with this one, so
+/// a stub that honours it is a stub that can be selftested. Nothing else in
+/// the stub looks at `-eval`.
+pub const HALT_EVAL: &str = "erlang:halt(0)";
+
 /// The compression level the tests pack at.
 ///
 /// One rather than nineteen: a launcher test packs a few kilobytes and runs
@@ -92,7 +108,8 @@ pub const LEVEL: i32 = 1;
 /// arguments, one per line, printed with `printf` so that a byte which is not
 /// valid UTF-8 arrives on standard output as itself.
 const ERLEXEC_STUB: &str = r#"#!/bin/sh
-for name in ROOTDIR BINDIR EMU PROGNAME HOME ERL_CRASH_DUMP ERL_LIBS ERL_FLAGS ERL_AFLAGS
+for name in ROOTDIR BINDIR EMU PROGNAME HOME ERL_CRASH_DUMP ERL_LIBS ERL_FLAGS ERL_AFLAGS \
+            HEART_COMMAND GINARY_ENV_ONE GINARY_ENV_TWO
 do
   eval "value=\${$name-@unset@}"
   if [ "$value" = "@unset@" ]; then
@@ -105,12 +122,15 @@ echo "cwd:$(pwd)"
 code=7
 signal=
 dump=
+nap=
 previous=
 for argument in "$@"
 do
   case $previous in
     --exit) code=$argument ;;
     --signal) signal=$argument ;;
+    --sleep) nap=$argument ;;
+    -eval) case $argument in "erlang:halt(0)") code=0 ;; esac ;;
   esac
   if [ "$argument" = "--dump" ]; then dump=1; fi
   previous=$argument
@@ -123,6 +143,7 @@ if [ -n "$dump" ] && [ -n "$ERL_CRASH_DUMP" ]; then
     echo "System version: ginary test stub"
   } > "$ERL_CRASH_DUMP"
 fi
+if [ -n "$nap" ]; then sleep "$nap"; fi
 if [ -n "$signal" ]; then kill -"$signal" $$; fi
 exit "$code"
 "#;
@@ -150,6 +171,21 @@ pub struct ArtifactOptions {
     pub app: Option<String>,
     /// The zstd level.
     pub level: Option<i32>,
+    /// Extra programs to stage under the bindir, beyond the required four.
+    ///
+    /// `epmd` and `heart` are what a distribution or a `heart` artifact
+    /// carries; each is written as the refusing stub, because nothing but
+    /// their presence is asserted.
+    pub erts_bins: Vec<String>,
+    /// Extra files to stage: root-relative path, mode, contents, category.
+    ///
+    /// `releases/vm.args` and `releases/sys.config` arrive this way, so a
+    /// launcher test can assert that the argument vector names a file that is
+    /// actually in the extracted tree.
+    pub extra_files: Vec<(String, u32, Vec<u8>, Category)>,
+    /// A whole `launch` spec to put in the manifest instead of the canonical
+    /// one.
+    pub launch: Option<LaunchSpec>,
 }
 
 /// A packaged application built by hand.
@@ -192,6 +228,9 @@ impl SyntheticArtifact {
         }
         if let Some(app) = &options.app {
             manifest.app.clone_from(app);
+        }
+        if let Some(launch) = &options.launch {
+            manifest.launch.clone_from(launch);
         }
 
         let mut payload = Vec::new();
@@ -796,7 +835,16 @@ pub fn canonical_manifest() -> Manifest {
                 "lib/stdlib-8.0.3/ebin".to_owned(),
             ],
             eval: format!("'{APP}@@main':run('{APP}')"),
-            erl_flags: vec!["+fnu".to_owned()],
+            // Not `+fnu`: the filename encoding is its own launch field now
+            // and the launcher builds that flag itself, so a manifest flag
+            // that happened to be the same word could not tell the two apart.
+            erl_flags: vec!["+SDio".to_owned(), "4".to_owned()],
+            args_file: None,
+            config: None,
+            distribution: false,
+            filename_encoding: ginary::config::DEFAULT_FILENAME_ENCODING.to_owned(),
+            heart: false,
+            env: BTreeMap::new(),
         },
         native: Vec::new(),
         created_at: "2026-08-31T00:00:00Z".to_owned(),
@@ -871,6 +919,17 @@ pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
             Category::AppResource,
         ),
     ];
+
+    let mut contents = contents;
+    for name in &options.erts_bins {
+        contents.push((
+            format!("{bindir}/{name}"),
+            0o755,
+            OTHER_BIN_STUB.as_bytes().to_vec(),
+            Category::ErtsBinary,
+        ));
+    }
+    contents.extend(options.extra_files.iter().cloned());
 
     let mut files = Vec::new();
     for (path, mode, data, category) in contents {

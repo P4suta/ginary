@@ -160,6 +160,24 @@ pub enum Command {
         /// A program to stage from the runtime's `bin`. Repeatable.
         #[arg(long = "extra-bin", value_name = "NAME")]
         extra_bins: Vec<String>,
+        /// Bundle `epmd` and start the runtime distributed.
+        ///
+        /// Turns `[tools.ginary] distribution` on; there is no flag that turns
+        /// it off, because the absence of a switch is not an instruction.
+        #[arg(long)]
+        distribution: bool,
+        /// An `erl -args_file` to copy into the artifact.
+        ///
+        /// Overrides `[tools.ginary] vm_args`, and is relative to the working
+        /// directory rather than to the project.
+        #[arg(long = "vm-args", value_name = "PATH")]
+        vm_args: Option<PathBuf>,
+        /// A `sys.config` to copy into the artifact.
+        ///
+        /// Overrides `[tools.ginary] sys_config`, and is relative to the
+        /// working directory rather than to the project.
+        #[arg(long = "sys-config", value_name = "PATH")]
+        sys_config: Option<PathBuf>,
         /// The form the build report takes.
         #[arg(long, value_name = "FORMAT", default_value = "text")]
         report: ReportFormat,
@@ -328,6 +346,24 @@ pub enum CacheCommand {
         /// Print a JSON object instead of a table.
         #[arg(long)]
         json: bool,
+    },
+    /// Remove the extracted runtimes nothing has used for a while.
+    ///
+    /// The same housekeeping every packaged application does for itself as it
+    /// starts, on demand and over the whole cache. An entry a process is
+    /// running out of is never removed, whatever its age: the lock decides,
+    /// and `--all` is "whatever its age", not "whatever is using it".
+    Prune {
+        /// How many days an unused entry may live. Defaults to
+        /// `GINARY_PRUNE_DAYS`, or 14.
+        #[arg(long, value_name = "N")]
+        days: Option<u64>,
+        /// Consider every entry, whatever its age. Locks are still honoured.
+        #[arg(long)]
+        all: bool,
+        /// Prune one application's directory instead of all of them.
+        #[arg(long, value_name = "NAME")]
+        app: Option<String>,
     },
 }
 
@@ -628,6 +664,9 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             compression_level,
             extra_otp_apps,
             extra_bins,
+            distribution,
+            vm_args,
+            sys_config,
             report,
             explain,
             verbose,
@@ -644,6 +683,9 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 compression_level: *compression_level,
                 extra_otp_apps: extra_otp_apps.clone(),
                 extra_bins: extra_bins.clone(),
+                distribution: *distribution,
+                vm_args: vm_args.clone(),
+                sys_config: sys_config.clone(),
                 explain: *explain,
                 verbose: *verbose,
             },
@@ -737,6 +779,32 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             let report = cache::clean(&dirs.root, app.as_deref())
                 .with_context(|| format!("cannot clean the cache at {}", dirs.root.display()))?;
             write_cache_clean(&dirs, app.as_deref(), &report, *json, out)
+        }
+        Command::Cache {
+            command: CacheCommand::Prune { days, all, app },
+        } => {
+            // For the reason `clean` checks it, and before anything is joined:
+            // what pruning does to a directory is remove it.
+            if let Some(app) = app.as_deref()
+                && !cache::is_app_name(app)
+            {
+                anyhow::bail!("{}", cache::AppNameRefusal(app));
+            }
+            let env = cache::Env::from_env();
+            let dirs = cache::resolve(&env, cache::current_uid());
+            let options = cache::PruneOptions {
+                days: days.unwrap_or_else(|| cache::prune_days(&env)),
+                all: *all,
+            };
+            let report = cache::prune(
+                &dirs.root,
+                app.as_deref(),
+                options,
+                std::time::SystemTime::now(),
+            )
+            .with_context(|| format!("cannot prune the cache at {}", dirs.root.display()))?;
+            write!(out, "{}", crate::launcher::render_prune(&report))
+                .context("cannot write the prune report to standard output")
         }
     }
 }

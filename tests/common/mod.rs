@@ -12,6 +12,7 @@
 pub mod artifact;
 pub mod bounded;
 pub mod built;
+pub mod cachefs;
 pub mod erl;
 pub mod fake_otp;
 pub mod fixture;

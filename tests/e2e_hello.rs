@@ -569,3 +569,181 @@ fn a_build_that_fails_while_packing_removes_its_work_directory_too() {
         project.artifact().display()
     );
 }
+
+// ------------------------------- (g) the runtime settings, end to end --
+
+/// The `[tools.ginary]` table the runtime-settings variant builds with.
+///
+/// Written into the *copy* of the fixture rather than into the fixture: the
+/// committed project deliberately has no table, so that every other test in
+/// this file builds the plainest artifact there is.
+const RUNTIME_TABLE: &str = "\n[tools.ginary]\nvm_args = \"config/vm.args\"\n\
+                             sys_config = \"config/sys.config\"\n\
+                             filename_encoding = \"utf8\"\n\n\
+                             [tools.ginary.env]\nGINARY_E2E = \"set-by-the-artifact\"\n";
+
+/// An args file that names nothing ginary passes itself.
+const VM_ARGS: &str = "# the fixture's own emulator flags\n+SDio 4\n";
+
+/// A `sys.config` with one application key in it.
+const SYS_CONFIG: &str = "[{kernel, [{logger_level, notice}]}].\n";
+
+/// Copies the fixture and adds the three files the runtime settings name.
+///
+/// # Panics
+///
+/// If the copy or any of the writes fails.
+fn build_runtime_variant() -> BuiltProject {
+    let project = BuiltProject::copy(APP);
+    let config = project.root().join("config");
+    std::fs::create_dir_all(&config).expect("the config directory");
+    std::fs::write(config.join("vm.args"), VM_ARGS).expect("the args file");
+    std::fs::write(config.join("sys.config"), SYS_CONFIG).expect("the sys.config");
+
+    let manifest = project.root().join("gleam.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("read the manifest");
+    text.push_str(RUNTIME_TABLE);
+    std::fs::write(&manifest, text).expect("write the manifest back");
+
+    let output = project.build();
+    assert!(
+        output.status.success(),
+        "`ginary build` with the runtime settings failed with {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    project
+}
+
+#[test]
+fn the_runtime_settings_reach_the_exec_argv_and_the_application_still_runs() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = build_runtime_variant();
+
+    let run = project.run("runtime").traced().args(["0", "x"]).output();
+
+    assert_eq!(
+        run.code(),
+        0,
+        "the application must still run with an args file and a sys.config\n--- stderr ---\n{}",
+        run.stderr()
+    );
+    assert!(
+        run.stdout().contains("hello from priv"),
+        "the application is unchanged by the runtime settings:\n{}",
+        run.stdout()
+    );
+
+    let trace = run.trace_text();
+    let exec = trace
+        .lines()
+        .rfind(|line| line.contains("\"phase\":\"exec\""))
+        .unwrap_or_else(|| panic!("no exec record in the trace:\n{trace}"));
+    for needle in [
+        "-args_file",
+        "releases/vm.args",
+        "-config",
+        "releases/sys",
+        "+fnu",
+    ] {
+        assert!(
+            exec.contains(needle),
+            "the exec record must carry `{needle}`, and it is:\n{exec}"
+        );
+    }
+}
+
+#[test]
+fn the_env_default_reaches_the_application_and_a_caller_still_wins() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = build_runtime_variant();
+
+    let plain = project.run("env-default").traced().args(["0"]).output();
+    assert_eq!(plain.code(), 0, "--- stderr ---\n{}", plain.stderr());
+    assert!(
+        plain
+            .trace_text()
+            .contains("GINARY_E2E=set-by-the-artifact"),
+        "the artifact's own default must be in the launch it recorded:\n{}",
+        plain.trace_text()
+    );
+
+    let overridden = project
+        .run("env-caller")
+        .traced()
+        .env("GINARY_E2E", "set-by-the-caller")
+        .args(["0"])
+        .output();
+    assert_eq!(
+        overridden.code(),
+        0,
+        "--- stderr ---\n{}",
+        overridden.stderr()
+    );
+    assert!(
+        !overridden
+            .trace_text()
+            .contains("GINARY_E2E=set-by-the-artifact"),
+        "a variable the caller exported must not be set by the launcher at all:\n{}",
+        overridden.trace_text()
+    );
+}
+
+#[test]
+fn an_args_file_that_names_a_flag_the_launcher_owns_fails_the_build() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = BuiltProject::copy(APP);
+    let config = project.root().join("config");
+    std::fs::create_dir_all(&config).expect("the config directory");
+    std::fs::write(config.join("vm.args"), "+SDio 4\n-pa /opt/lib\n").expect("the args file");
+    let manifest = project.root().join("gleam.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("read the manifest");
+    text.push_str("\n[tools.ginary]\nvm_args = \"config/vm.args\"\n");
+    std::fs::write(&manifest, text).expect("write the manifest back");
+
+    let output = project.build();
+
+    assert!(
+        !output.status.success(),
+        "an args file that builds its own code path must stop the build"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("-pa") && stderr.contains("vm.args:2"),
+        "the message must name the flag and the line, and it said:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_sys_config_that_does_not_parse_fails_the_build_with_a_position() {
+    let Some(_tools) = require_tools(&TOOLS) else {
+        return;
+    };
+    let project = BuiltProject::copy(APP);
+    let config = project.root().join("config");
+    std::fs::create_dir_all(&config).expect("the config directory");
+    std::fs::write(config.join("sys.config"), "[{kernel, #{}}].\n").expect("the sys.config");
+    let manifest = project.root().join("gleam.toml");
+    let mut text = std::fs::read_to_string(&manifest).expect("read the manifest");
+    text.push_str("\n[tools.ginary]\nsys_config = \"config/sys.config\"\n");
+    std::fs::write(&manifest, text).expect("write the manifest back");
+
+    let output = project.build();
+
+    assert!(
+        !output.status.success(),
+        "a sys.config the runtime could not consult must stop the build"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sys.config:1:11"),
+        "the message must name file, line and column, and it said:\n{stderr}"
+    );
+}

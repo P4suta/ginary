@@ -9,7 +9,10 @@
 //! by feeding the launcher a different artifact, because all three are about
 //! *timing*.
 //!
-//! So the launcher carries named points a test can arm from the environment.
+//! Two more are about the same thing on the launch side: an entry that is
+//! removed while the launcher is on its way to the lock, and a build that
+//! stops half-way. So the launcher carries named points a test can arm from
+//! the environment.
 //! `GINARY_FAULT=<point>[:<action>]` is read once, and the points are:
 //!
 //! | point | action | effect |
@@ -17,11 +20,12 @@
 //! | `after-extract` | `pause` | sleep [`PAUSE`] with the temporary tree on disk, so a test can `SIGKILL` the process |
 //! | `rename` | `eexist` | the rename onto the cache entry reports `EEXIST`, as a lost race does |
 //! | `unpack` | `corrupt` | a byte of the manifest is flipped in memory, so the digest cannot match |
+//! | `before-lock` | `on` | the cache entry is removed between the preflight and the shared lock, which is what a prune that won the race leaves behind |
 //! | `launcher` | `panic` | the launcher panics, so the panic hook `main` installs is the thing under test |
 //! | `pack` | `fail` | `bundle::build` stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact |
 //!
 //! `pack` is the one point on the *build* side rather than the launcher's, and
-//! it is here for the same reason as the other three: "a build that fails
+//! it is here for the same reason as the others: "a build that fails
 //! half-way cleans up after itself" cannot be reached by handing the builder a
 //! different project, because every input that would fail a build fails it
 //! before anything has been written.

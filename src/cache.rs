@@ -886,6 +886,395 @@ impl<R: Read> Read for Corrupting<R> {
     }
 }
 
+/// The variable that says how old an unused cache entry may get.
+///
+/// A count of days. `0` disables pruning entirely, which is what a machine
+/// with one artifact and a slow disk wants; anything else is an age.
+pub const PRUNE_DAYS_VAR: &str = "GINARY_PRUNE_DAYS";
+
+/// How old an unused entry may get before pruning removes it, in days.
+pub const DEFAULT_PRUNE_DAYS: u64 = 14;
+
+/// Why one prune left an entry alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptReason {
+    /// A process holds the entry's `.lock`.
+    Locked,
+    /// The entry is younger than the age it was pruned against.
+    Fresh,
+    /// The entry could not be moved aside, so it is still where it was.
+    ///
+    /// Nobody holds it and it is old enough to go; the file system refused —
+    /// a read-only application directory, a full one, a mount that has gone
+    /// away. It is reported rather than dropped, because a `kept` column that
+    /// omits an entry makes the summary a count of nothing.
+    Unremovable,
+}
+
+impl KeptReason {
+    /// The word `ginary cache prune` prints in its `kept` column.
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Fresh => "fresh",
+            Self::Unremovable => "unremovable",
+        }
+    }
+}
+
+/// What one prune chooses between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PruneOptions {
+    /// The age in days. `0` disables pruning; see [`PRUNE_DAYS_VAR`].
+    pub days: u64,
+    /// Ignore the age and consider every entry, `--all`.
+    ///
+    /// It never ignores the lock: `--all` is "whatever its age", not
+    /// "whatever is using it".
+    pub all: bool,
+}
+
+impl Default for PruneOptions {
+    /// [`DEFAULT_PRUNE_DAYS`], and no `--all`.
+    fn default() -> Self {
+        Self {
+            days: DEFAULT_PRUNE_DAYS,
+            all: false,
+        }
+    }
+}
+
+/// What one prune removed and what it left, with the reason.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// The entries that were removed, sorted.
+    pub removed: Vec<PathBuf>,
+    /// The entries that stayed, sorted, each with why.
+    pub kept: Vec<(PathBuf, KeptReason)>,
+}
+
+/// The age one prune runs against, from [`PRUNE_DAYS_VAR`].
+///
+/// [`DEFAULT_PRUNE_DAYS`] when the variable is unset, empty, or not a number:
+/// a launcher that refused to start because a variable was misspelt would be
+/// trading an application for a housekeeping preference.
+pub fn prune_days(env: &Env) -> u64 {
+    non_empty(env.get(PRUNE_DAYS_VAR))
+        .and_then(OsStr::to_str)
+        .and_then(|text| text.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PRUNE_DAYS)
+}
+
+/// The prefix of a tree one prune has renamed aside and is about to remove.
+///
+/// The rename is what makes the removal atomic from a reader's point of view,
+/// exactly as `.<key>.corrupt-<pid>` is in [`discard_incomplete`]: nothing ever
+/// sees `<app>/<key>` being emptied under it.
+pub const TRASH_PREFIX: &str = "trash-";
+
+/// Seconds in a day, for turning [`PruneOptions::days`] into an age.
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// Prunes the *siblings* of one entry, best effort, never failing.
+///
+/// `keep` is the entry this process is about to run out of and is never
+/// considered. Every other `<app_dir>/<key>` whose `ginary.json` was last
+/// modified more than [`PruneOptions::days`] before `now`, and whose `.lock`
+/// can be taken exclusively, is renamed to `.<key>.trash-<pid>` and then
+/// removed: the rename is what makes the removal atomic from a reader's point
+/// of view, exactly as it is in [`discard_incomplete`].
+///
+/// Nothing here can fail a launch. A directory that cannot be listed, an entry
+/// that cannot be renamed and an entry another process holds are all left
+/// alone and reported.
+pub fn prune_app(
+    app_dir: &Path,
+    keep: Option<&str>,
+    options: PruneOptions,
+    now: std::time::SystemTime,
+    diag: &Diag,
+) -> PruneReport {
+    let mut report = PruneReport::default();
+    // `--all` is `whatever its age`, so it overrides the switch as well as the
+    // number: an age of zero is a preference about staleness and `--all` is a
+    // request that names none.
+    if options.days == 0 && !options.all {
+        return report;
+    }
+    let Ok(entries) = std::fs::read_dir(app_dir) else {
+        return report;
+    };
+    let pid = std::process::id();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if Some(name) == keep || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        // Pruning owns *complete* entries and nothing else. A temporary tree,
+        // a corrupt one and a directory somebody else put here all lack a
+        // `ginary.json`, and all of them are the sweep's business.
+        let Ok(manifest) = std::fs::metadata(path.join(MANIFEST_NAME)) else {
+            continue;
+        };
+        if !manifest.is_file() {
+            continue;
+        }
+
+        if !options.all {
+            let Ok(modified) = manifest.modified() else {
+                continue;
+            };
+            let age = now.duration_since(modified).unwrap_or_default();
+            if age.as_secs() < options.days.saturating_mul(SECONDS_PER_DAY) {
+                report.kept.push((path, KeptReason::Fresh));
+                continue;
+            }
+        }
+
+        // The lock decides, and a lock that could not even be taken is a
+        // "leave this alone": the cost of skipping an entry is a directory
+        // that stays on disk, and the cost of removing one wrongly is a
+        // running application losing its runtime.
+        let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
+            report.kept.push((path, KeptReason::Locked));
+            continue;
+        };
+
+        let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
+        if std::fs::rename(&path, &aside).is_err() {
+            // Nobody holds it and it is old enough to go; the file system
+            // refused. Reported rather than dropped: a `kept` column that
+            // silently omits an entry makes the summary a count of nothing.
+            report.kept.push((path, KeptReason::Unremovable));
+            continue;
+        }
+        drop(lock);
+        if std::fs::remove_dir_all(&aside).is_ok() {
+            report.removed.push(path);
+        } else {
+            // The entry was renamed and could not be removed, so the tree is
+            // still there under a name that says nothing about what it holds.
+            // Putting it back is the only honest outcome: a cache entry the
+            // launcher can still hit beats a directory nobody will ever look
+            // at again.
+            let _ = std::fs::rename(&aside, &path);
+            report.kept.push((path, KeptReason::Unremovable));
+        }
+    }
+    report.removed.sort();
+    report.kept.sort_by(|left, right| left.0.cmp(&right.0));
+
+    record_prune(&report, diag);
+    report
+}
+
+/// Records what one prune did, by name.
+///
+/// The paths and not just the counts: an entry that vanished is a thing a bug
+/// report has to be able to explain, and "one directory was removed" explains
+/// nothing. The shape is the one [`crate::launch`] records an argument vector
+/// with — [`crate::launch::json_array`], the same function — so that a trace
+/// reader has one thing to parse rather than two.
+fn record_prune(report: &PruneReport, diag: &Diag) {
+    if !diag.is_enabled() {
+        return;
+    }
+    let removed =
+        crate::launch::json_array(report.removed.iter().map(|path| path.display().to_string()));
+    let kept = crate::launch::json_array(
+        report
+            .kept
+            .iter()
+            .map(|(path, reason)| format!("{} ({})", path.display(), reason.describe())),
+    );
+    diag.kv(
+        "prune",
+        &[
+            ("removed", &report.removed.len().to_string()),
+            ("kept", &report.kept.len().to_string()),
+            ("removed_paths", &removed),
+            ("kept_paths", &kept),
+        ],
+    );
+}
+
+/// Removes every trace of one application from the cache, lock permitting.
+///
+/// This is what `GINARY_CMD=uninstall` runs. Unlike [`prune_app`] it has no
+/// age: everything goes, complete entries and the temporary, corrupt and
+/// trashed residue beside them, and the only thing that saves an entry is a
+/// process holding it. The application directory itself is removed when
+/// nothing is left in it.
+///
+/// Best effort throughout, and reported rather than fatal: a partial uninstall
+/// is a fact the caller has to be told, not a failure.
+pub fn uninstall(app_dir: &Path) -> PruneReport {
+    let mut report = PruneReport::default();
+    let Ok(entries) = std::fs::read_dir(app_dir) else {
+        return report;
+    };
+    let pid = std::process::id();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let path = entry.path();
+
+        // Residue is nobody's to hold: a `.<key>.tmp-<pid>` tree belongs to a
+        // process that is extracting or is gone, and neither state is one an
+        // uninstall asks permission from. Everything else in this directory is
+        // somebody else's — the crash dump the launcher points the runtime at
+        // lives here — and an uninstall that deleted it would be removing the
+        // very thing the directory is worth keeping for.
+        if !path.join(MANIFEST_NAME).is_file() {
+            if is_cache_residue(name) && remove_anything(&path) {
+                report.removed.push(path);
+            }
+            continue;
+        }
+
+        let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
+            report.kept.push((path, KeptReason::Locked));
+            continue;
+        };
+        let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
+        if std::fs::rename(&path, &aside).is_err() {
+            // Nobody holds it: the file system refused, which is a different
+            // thing to tell a user and a different thing to do about it.
+            report.kept.push((path, KeptReason::Unremovable));
+            continue;
+        }
+        drop(lock);
+        if std::fs::remove_dir_all(&aside).is_ok() {
+            report.removed.push(path);
+        } else {
+            let _ = std::fs::rename(&aside, &path);
+            report.kept.push((path, KeptReason::Unremovable));
+        }
+    }
+    report.removed.sort();
+    report.kept.sort_by(|left, right| left.0.cmp(&right.0));
+
+    // Only when it is empty: an application directory that still holds an
+    // entry somebody is running out of is an application that is still
+    // installed, and the crash dumps beside it are still worth reading.
+    if report.kept.is_empty() {
+        let _ = std::fs::remove_dir(app_dir);
+    }
+    report
+}
+
+/// Whether a name in an application directory is one the cache wrote.
+///
+/// Two shapes and no others: a bare `<key>` directory, which is an entry
+/// whether or not it has a `ginary.json` in it, and the dotted
+/// `.<key>.<tmp-|corrupt-|trash-><pid>` a half-finished extraction, a rejected
+/// payload or an interrupted prune leaves behind. Anything else — an
+/// `erl_crash.dump`, a note somebody left, a directory another tool put here —
+/// is not the cache's to remove.
+fn is_cache_residue(name: &str) -> bool {
+    if is_cache_key(name) {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((key, tail)) = rest.split_once('.') else {
+        return false;
+    };
+    if !is_cache_key(key) {
+        return false;
+    }
+    [TMP_PREFIX, CORRUPT_PREFIX, TRASH_PREFIX]
+        .iter()
+        .any(|prefix| match tail.strip_prefix(prefix) {
+            Some(digits) => !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
+            None => false,
+        })
+}
+
+/// Whether a name is a cache key: [`crate::trailer::Trailer::cache_key`].
+///
+/// Sixteen lower-case hexadecimal digits, the first eight bytes of the
+/// payload's digest.
+fn is_cache_key(name: &str) -> bool {
+    name.len() == CACHE_KEY_LEN
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The length of a cache key: eight digest bytes in hexadecimal.
+const CACHE_KEY_LEN: usize = 16;
+
+/// Removes one path whatever it is, answering whether it is gone.
+fn remove_anything(path: &Path) -> bool {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path).is_ok(),
+        Ok(_) => std::fs::remove_file(path).is_ok(),
+        Err(_) => false,
+    };
+    removed || !path.exists()
+}
+
+/// Prunes every application under `root`, or one named application.
+///
+/// This is what `ginary cache prune` runs. `app` is checked before it is
+/// joined, for the reason [`clean`] checks it: what this function does to a
+/// directory is remove it.
+///
+/// # Errors
+///
+/// [`LauncherError::Cache`] when `app` is not a single path component. A
+/// `root` that is not there is an empty report rather than an error, and a
+/// directory that cannot be listed is skipped rather than fatal: pruning is
+/// housekeeping and housekeeping does not fail a command.
+pub fn prune(
+    root: &Path,
+    app: Option<&str>,
+    options: PruneOptions,
+    now: std::time::SystemTime,
+) -> Result<PruneReport, LauncherError> {
+    let app_dirs: Vec<PathBuf> = match app {
+        Some(app) => {
+            check_app(root, app)?;
+            vec![root.join(app)]
+        }
+        None => match std::fs::read_dir(root) {
+            Ok(entries) => {
+                let mut found: Vec<PathBuf> = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .collect();
+                found.sort();
+                found
+            }
+            // A cache that was never created has nothing to prune, and saying
+            // so is not the same as failing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(LauncherError::cache(root, error)),
+        },
+    };
+
+    let diag = Diag::disabled();
+    let mut report = PruneReport::default();
+    for app_dir in app_dirs {
+        let one = prune_app(&app_dir, None, options, now, &diag);
+        report.removed.extend(one.removed);
+        report.kept.extend(one.kept);
+    }
+    report.removed.sort();
+    report.kept.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(report)
+}
+
 /// What one `ginary cache clean` removed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CleanReport {

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `filename_encoding` set to something that is not one of the three the
+# emulator has a flag for.
+
+name = "bad_encoding"
+version = "0.1.0"
+
+[tools.ginary]
+filename_encoding = "koi8-r"

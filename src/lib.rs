@@ -60,6 +60,8 @@
 //!   go with them;
 //! - [`selfexe`] — opening the running executable by inode;
 //! - [`cache`] — where the runtime extracts, and the atomic extraction;
+//! - [`cache_lock`] — the `flock` a running application holds on its entry,
+//!   and the exclusive one pruning needs before it may remove another;
 //! - [`launch`] — the argument vector and the environment difference;
 //! - [`launcher`] — the launcher-mode entry point and `GINARY_CMD`;
 //! - [`fault`] — the named fault points the launcher tests arm, compiled in
@@ -87,6 +89,7 @@ pub mod beam;
 pub mod bundle;
 pub mod cache;
 pub mod cache_dir;
+pub mod cache_lock;
 pub mod cli;
 pub mod closure;
 pub mod config;

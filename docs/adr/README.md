@@ -21,3 +21,5 @@ only partly built, the record says so under `Consequences`.
   maintenance through the environment
 - [0009](0009-front-entries-in-their-own-zstd-block.md) — The manifest and the index get a zstd
   block of their own
+- [0010](0010-cache-locking-and-pruning.md) — A cache entry is locked for the life of the
+  runtime, and pruning honours the lock

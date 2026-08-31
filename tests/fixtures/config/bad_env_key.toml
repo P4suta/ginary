@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `env` naming a variable the launcher scrubs. The launcher applies `env`
+# after the scrub, so accepting this would let an artifact put back the very
+# variable the scrub removed.
+
+name = "bad_env_key"
+version = "0.1.0"
+
+[tools.ginary.env]
+ERL_AFLAGS = "+S 1"

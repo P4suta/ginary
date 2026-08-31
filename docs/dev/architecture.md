@@ -21,8 +21,8 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)* or *(A4)* exist; the
-rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)* or *(B1)*
+exist; the rest are the plan.
 
 ```
 build side
@@ -51,7 +51,8 @@ build side
 
 launcher side
   selfexe.rs       (A3b) opens the running executable by inode
-  cache.rs         (A3b) resolve, sweep, extract, rename, clean
+  cache.rs         (A3b) resolve, sweep, extract, rename, clean; (B1) prune, uninstall
+  cache_lock.rs    (B1) the flock a runtime holds on its entry, across execve
   launch.rs        (A3b) builds the LaunchPlan (argv and env), execs or supervises
   launcher.rs      (A3b) the launcher-mode entry point and GINARY_CMD
   diag.rs          (A3a) phase timing, GINARY_DEBUG, GINARY_TRACE
@@ -453,6 +454,8 @@ $ ./my_gleam_app --name world
         +-- GINARY_CMD set? --------> directory     resolve only, print <cache>/<app>/<key>, 0
         |                             extract-only  extract, print the entry, 0
         |                             inspect       manifest + geometry + sha256 as JSON, 0
+        |                             selftest      extract + preflight + a no-op halt, 0 or 1
+        |                             uninstall     remove every entry nobody holds, always 0
         |                             anything else usage on stderr, 2
         v
     payload::read_manifest          seek to payload_offset, read entry 0, stop
@@ -483,9 +486,19 @@ $ ./my_gleam_app --name world
         |  Err -> remove the entry, extract once more, check again
         |         still Err ........> 124  ginary: the runtime cache at <entry> is unusable: ...
         v
+    cache::prune_app                the stale siblings of this entry, best effort, never fatal
+        |                           older than GINARY_PRUNE_DAYS (14; 0 disables) and not
+        |                           exclusively lockable -> rename aside, remove; else keep
+        v
+    cache_lock::SharedLock          flock(LOCK_SH) on <entry>/.lock, FD_CLOEXEC cleared, so the
+        |                           runtime inherits it and the kernel releases it (ADR 0010)
+        |                           Err -> recorded and ignored; a lock is not a precondition
+        v
     launch::plan                    pure: program, argv, env set, env remove
-        |                           argv: -boot -noshell +B -start_epmd false -pa... <erl_flags>
-        |                                 $GINARY_ERL_FLAGS -eval -extra <the user's arguments>
+        |                           argv: [-args_file] -boot -noshell +B +fnu|+fnl|+fna
+        |                                 [-start_epmd false] [-config] [-heart] -pa...
+        |                                 <erl_flags> $GINARY_ERL_FLAGS -eval
+        |                                 -extra <the user's arguments>
         v
     Diag records the whole plan     argv and the environment difference, as JSON arrays
         |
@@ -511,8 +524,15 @@ names the file; a third extraction would be a loop, and a loop is what a user re
 - The launcher never interprets the user's arguments. `--help` belongs to the application.
 - The launcher never panics; every failure maps to a documented exit code between 121 and 125.
 - The builder never mutates the shipment; it only reads it.
-- Cache entries are immutable once renamed into place, so a running application cannot observe a
-  half-written runtime.
+- The extracted tree of a cache entry is immutable once renamed into place, so a running
+  application cannot observe a half-written runtime. The one file written into a completed entry
+  afterwards is `.lock`, which carries no content and belongs to
+  [ADR 0010](../adr/0010-cache-locking-and-pruning.md); nothing in the runtime reads it.
+- A cache entry a runtime is running out of is never removed by pruning. The proof is an
+  `flock` the runtime holds by inheritance rather than a marker any process has to release, so a
+  killed runtime frees it and a crashed one leaves nothing behind.
+- Pruning never fails a launch. An entry that cannot be listed, locked or removed is left alone
+  and recorded; housekeeping does not decide whether an application starts.
 - Identical input produces identical artifact bytes, stripping included.
 - No tool that rewrites a file in the artifact is trusted; every one of them is checked
   afterwards against what it claimed to have done.

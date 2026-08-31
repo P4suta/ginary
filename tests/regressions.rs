@@ -63,3 +63,19 @@ mod a4_a_work_directory_that_could_not_be_removed_was_unreported;
 mod a4_an_unreadable_trailer_was_a_damaged_artifact;
 #[path = "regressions/a4_extra_bin_names_were_used_as_paths.rs"]
 mod a4_extra_bin_names_were_used_as_paths;
+#[path = "regressions/b1_a_locked_entry_blocked_the_launch.rs"]
+mod b1_a_locked_entry_blocked_the_launch;
+#[path = "regressions/b1_a_prune_that_could_not_rename_reported_nothing.rs"]
+mod b1_a_prune_that_could_not_rename_reported_nothing;
+#[path = "regressions/b1_an_unterminated_quote_hid_the_rest_of_an_args_file.rs"]
+mod b1_an_unterminated_quote_hid_the_rest_of_an_args_file;
+#[path = "regressions/b1_heart_command_was_not_shell_quoted.rs"]
+mod b1_heart_command_was_not_shell_quoted;
+#[path = "regressions/b1_manifest_env_overrode_the_launcher_s_own.rs"]
+mod b1_manifest_env_overrode_the_launcher_s_own;
+#[path = "regressions/b1_the_entry_could_vanish_between_the_preflight_and_the_lock.rs"]
+mod b1_the_entry_could_vanish_between_the_preflight_and_the_lock;
+#[path = "regressions/b1_the_prune_trace_named_nothing_it_removed.rs"]
+mod b1_the_prune_trace_named_nothing_it_removed;
+#[path = "regressions/b1_uninstall_removed_the_crash_dump.rs"]
+mod b1_uninstall_removed_the_crash_dump;

@@ -108,6 +108,42 @@ pub struct LaunchSpec {
     pub eval: String,
     /// Extra flags to place before `-extra`.
     pub erl_flags: Vec<String>,
+    /// The args file `-args_file` is given, relative to the extracted root.
+    ///
+    /// [`None`] when the project named no `vm_args`. It is inserted *before*
+    /// ginary's own fixed flags, because `erl` takes the last value of a
+    /// repeated flag: putting the user's file first is what makes ginary's
+    /// flags win over it rather than the other way round.
+    #[serde(default)]
+    pub args_file: Option<String>,
+    /// The `-config` argument, root-relative and without the `.config` suffix.
+    #[serde(default)]
+    pub config: Option<String>,
+    /// Whether the artifact starts the runtime distributed.
+    ///
+    /// `true` means `epmd` is in the bundle and `-start_epmd false` is *not*
+    /// in the argument vector.
+    #[serde(default)]
+    pub distribution: bool,
+    /// One of [`crate::config::FILENAME_ENCODINGS`], mapped to `+fnu`, `+fnl`
+    /// or `+fna`.
+    #[serde(default = "default_filename_encoding")]
+    pub filename_encoding: String,
+    /// Whether `heart` is bundled, `-heart` passed and `HEART_COMMAND` set.
+    #[serde(default)]
+    pub heart: bool,
+    /// Variables the launcher sets, each only when the caller has not.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// The filename encoding a manifest that names none carries.
+///
+/// A serde default rather than a constant expression because
+/// `#[serde(default = "...")]` takes a function; the value is
+/// [`crate::config::DEFAULT_FILENAME_ENCODING`].
+fn default_filename_encoding() -> String {
+    crate::config::DEFAULT_FILENAME_ENCODING.to_owned()
 }
 
 impl LaunchSpec {
@@ -124,6 +160,15 @@ impl LaunchSpec {
         check_path("launch.boot", &self.boot)?;
         for (position, entry) in self.pa.iter().enumerate() {
             check_path(&format!("launch.pa[{position}]"), entry)?;
+        }
+        // Additive, and checked exactly like the fields that came before them:
+        // an older manifest is not a way past this function, and both values
+        // are joined onto the extracted root by [`crate::launch::plan`].
+        if let Some(args_file) = &self.args_file {
+            check_path("launch.args_file", args_file)?;
+        }
+        if let Some(config) = &self.config {
+            check_path("launch.config", config)?;
         }
         Ok(())
     }

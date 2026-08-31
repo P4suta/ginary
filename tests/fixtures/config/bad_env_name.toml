@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# `env` naming a variable the launcher derives from the extracted root.
+
+name = "bad_env_name"
+version = "0.1.0"
+
+[tools.ginary.env]
+ROOTDIR = "/opt/erlang"

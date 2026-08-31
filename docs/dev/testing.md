@@ -30,10 +30,12 @@
 | `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic |
 | `src/cache.rs` unit tests | the `Env` snapshot, the four resolution rules, the `TMPDIR` fallback and the entry path |
 | `src/fault.rs` unit tests | the `<point>[:<action>]` grammar, the closed set of actions resolved through `armed_by`, and that nothing is armed without the feature |
-| `src/launcher.rs` unit tests | the three `GINARY_CMD` values, and that nothing near them is recognised |
+| `src/launcher.rs` unit tests | the five `GINARY_CMD` values, that nothing near them is recognised, and the table `prune` and `uninstall` both print |
+| `src/bundle.rs` unit tests | the three rules of a build with no seam an integration test can reach: the programs `distribution` and `heart` add to the ERTS bin set, the warning a distributed build with no `-name` earns, and the two ways a file `[tools.ginary]` names can fail to be read |
 | `tests/launch.rs` | the pure plan: the argument vector in order, `GINARY_ERL_FLAGS`, non-UTF-8 arguments, the six set variables, the removal list and its `ERL_OTP*_FLAGS` family, the two refusals, and every preflight shape |
 | `tests/cache.rs` | resolution and creation, the fallback warning, the ten extraction steps against a real payload, the sweep's three pid cases, and `clean` |
-| `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts and the three fault points |
+| `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts, the runtime settings, pruning on launch and the fault points |
+| `tests/cache_lock.rs` | the two locks against util-linux `flock(1)`: a shared lock does not exclude a second shared lock and does exclude an exclusive one, `try_exclusive` answers `None` for an entry somebody holds, and the descriptor a `SharedLock` carries is not close-on-exec |
 | `tests/artifact_real.rs` | toolchain-gated: one real artifact, assembled by hand out of the fixture and run with a cleared environment |
 | `tests/config.rs` | `[tools.ginary]`: the defaults, every key, the five rules serde cannot state, the merge of the CLI flags over the table, and the four shapes a `--out` can take |
 | `tests/gleam.rs` | the upward search for `gleam.toml`, what `--skip-export` reuses and what it says when there is nothing to reuse, the version line, and two gated runs of a real `gleam` |
@@ -98,6 +100,7 @@ reason:
 | `tests/stage_run.rs` | `gleam export erlang-shipment`, `otp::discover(None)`, and the `erlexec` of the staged tree | every test is gated on `require_tools(&["gleam", "erl"])`; the launched runtime gets `env_clear()`, an empty `PATH` directory and a `HOME` inside the test's temporary tree, and both children run under a deadline — `fixture::EXPORT_BUDGET` (180 s) and `erl::RUN_BUDGET` (60 s) — with stdin on the null device |
 | `tests/gleam.rs`, `tests/e2e_hello.rs` | the real `gleam`, and through `ginary build` the real `erl` and `strip` | every one of those tests is gated on `require_tools`; the build runs under `built::BUILD_BUDGET` (900 s) and each run of the artifact under `built::RUN_BUDGET` (120 s), and the artifact itself is run with `env_clear()` and an empty-directory `PATH`, so nothing ambient reaches the packaged application |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
+| `tests/cache_lock.rs`, `tests/launcher.rs`, `tests/regressions.rs` | util-linux `flock(1)`, and `sleep(1)` for the ADR 0010 proof | every one of those tests is gated on `require_tools(&["flock"])` — the lock has to be observed by a program that is not ginary, or it proves nothing about the kernel — and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure, which is how CI keeps them from quietly not running |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
@@ -175,8 +178,13 @@ variable the launch contract names — `<unset>` for one that is absent, so an a
 cannot be confused with a stub that never ran — then one `argv:` line per argument, and exits 7.
 Seven is not zero on purpose: "the exit code is mirrored" has to be a claim about a number
 nothing else in the system produces. The stub also answers `--exit N`, `--signal N` (it kills
-itself, so a supervised run has a signal to turn into `128 + signo`) and `--dump` (it writes
-`$ERL_CRASH_DUMP` with a `Slogan:` line in it, which is all `launch::supervise` reads). Everything the launcher decides is therefore readable on
+itself, so a supervised run has a signal to turn into `128 + signo`), `--dump` (it writes
+`$ERL_CRASH_DUMP` with a `Slogan:` line in it, which is all `launch::supervise` reads) and
+`--sleep N` (it runs `sleep N` as a separate process, which is what gives ADR 0010's proof a
+runtime to observe and a grandchild to inherit the lock). It exits 0 rather than 7 when its
+`-eval` is `erlang:halt(0)`, so that `GINARY_CMD=selftest` exercises the whole path on a machine
+with no Erlang, and the `env:` lines it prints cover `HEART_COMMAND` and the manifest's own
+`launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is therefore readable on
 standard output, and the launcher's whole contract is testable on a machine with no Erlang at
 all. `SyntheticArtifact` also carries the ways an artifact can be broken — `break_magic`,
 `break_geometry`, `break_payload`, `break_payload_tail`, `truncate` — because each one is a
@@ -190,6 +198,18 @@ damage the payload sixteen bytes before the end, past both front entries, which 
 shortening the file from its end takes the trailer with it, and `docs/format.md` rule 2 makes
 what is left the ginary command line tool rather than a damaged artifact. The fault worth a test
 is the one that still carries a trailer and no longer matches it.
+
+`tests/common/cachefs.rs` is what B1 added, and it exists because pruning turns on two things a
+test cannot fake for itself: how old an entry is, and whether anybody is using it. `plant_entry`
+writes `<app>/<key>/ginary.json` and back-dates it with `set_mtime`, so an entry can be thirty
+days old in a test that takes a millisecond. `is_unlocked` asks `flock -n -x` whether a lock file
+is free and `wait_until_unlocked` polls that answer until it matches, bounded by `LOCK_BUDGET`
+(10 s), so a claim about a lock is an assertion rather than a hang. `HeldLock` takes an exclusive
+lock from *outside* ginary — `flock -x <lock> sh -c 'read line'` with a pipe on its standard
+input — and releases it by closing the pipe rather than by killing the process: `flock(1)` forks,
+and the grandchild is the one holding the inherited descriptor, which is ADR 0010's own mechanism
+seen from the other side. Killing the `flock` process would leave the lock held and the test
+watching the wrong thing.
 
 `Runner::spawn` and `Runner::output` retry while the kernel answers `ETXTBSY`. That is a
 property of the harness and not of the launcher: cargo runs these tests as threads of one
@@ -691,7 +711,8 @@ assertion.
 ## Planned infrastructure
 
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
-`fixture.rs`, `erl.rs`, `bounded.rs` and `payload.rs`, described above. Still to come:
+`fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs` and
+`cachefs.rs`, described above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

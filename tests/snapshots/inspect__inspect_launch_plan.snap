@@ -8,6 +8,7 @@ argv:
   <cache>/<app>/<key>/bin/no_dot_erlang
   -noshell
   +B
+  +fnu
   -start_epmd
   false
   -pa

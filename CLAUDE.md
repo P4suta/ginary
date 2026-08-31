@@ -32,11 +32,14 @@ A bug fix without a regression test under `tests/regressions/` is rejected.
 
 ## Gates
 
-`mise run check` is the gate: `lint` (fmt check plus clippy with warnings denied), `test`,
-`doc` (rustdoc with warnings denied) and `deny` (`cargo deny check`).
+`mise run check` is the gate: `lint` (fmt check plus clippy over `--all-features` with warnings
+denied), `lint:plain` (the same clippy over the default feature set, so a helper only the gated
+tests use cannot rot), `test`, `doc` (rustdoc with warnings denied) and `deny`
+(`cargo deny check`).
 
 ```console
 mise run lint
+mise run lint:plain
 mise run test
 mise run test:fast
 mise run test:nextest

@@ -31,11 +31,13 @@ issue, that test is confirmed to fail, and only then is the code changed.
 mise run check
 ```
 
-which is `mise run lint`, `mise run test`, `mise run doc` and `mise run deny`, or individually:
+which is `mise run lint`, `mise run lint:plain`, `mise run test`, `mise run doc` and
+`mise run deny`, or individually:
 
 ```console
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test
 RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps
 cargo deny check

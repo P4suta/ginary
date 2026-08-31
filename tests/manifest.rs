@@ -450,3 +450,100 @@ fn an_empty_application_name_is_refused() {
 fn a_current_directory_application_name_is_refused() {
     an_app_is_refused(".");
 }
+
+// ------------------------------------ the additive launch fields (B1) --
+
+#[test]
+fn a_manifest_written_before_the_runtime_fields_still_reads() {
+    // The whole claim behind keeping `format_version` at 1: every field B1
+    // adds is optional on the way in, so an artifact built by an older ginary
+    // parses and takes the documented defaults.
+    let json = serde_json::to_string(&sample_manifest()).expect("the sample manifest serialises");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("it is JSON");
+    let mut object = value.as_object().cloned().expect("a JSON object");
+    let launch = object
+        .get_mut("launch")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("the launch object");
+    for key in [
+        "args_file",
+        "config",
+        "distribution",
+        "filename_encoding",
+        "heart",
+        "env",
+    ] {
+        launch.remove(key);
+    }
+    let older = serde_json::Value::Object(object).to_string();
+
+    let parsed: Manifest = serde_json::from_str(&older).expect("an older manifest still parses");
+
+    assert_eq!(parsed.launch.args_file, None);
+    assert_eq!(parsed.launch.config, None);
+    assert!(!parsed.launch.distribution);
+    assert!(!parsed.launch.heart);
+    assert_eq!(parsed.launch.env, std::collections::BTreeMap::new());
+    assert_eq!(
+        parsed.launch.filename_encoding, "utf8",
+        "the default has to be the encoding every artifact so far was built with"
+    );
+    assert_eq!(parsed.format_version, FORMAT_VERSION);
+    assert_eq!(
+        parsed.launch.validate(),
+        Ok(()),
+        "a manifest with no optional launch paths in it validates"
+    );
+
+    // And the fields, once they are there, are checked like every other path:
+    // an older manifest is not a way past `LaunchSpec::validate`.
+    let escaping = ginary::manifest::LaunchSpec {
+        args_file: Some("../vm.args".to_owned()),
+        ..parsed.launch.clone()
+    };
+    assert_eq!(
+        escaping.validate(),
+        Err(ManifestError::UnsafePath {
+            field: "launch.args_file".to_owned(),
+            value: "../vm.args".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn an_args_file_that_is_not_root_relative_is_refused() {
+    let spec = ginary::manifest::LaunchSpec {
+        args_file: Some("/etc/vm.args".to_owned()),
+        ..sample_launch()
+    };
+
+    let error = spec
+        .validate()
+        .expect_err("an absolute args file is refused");
+
+    assert_eq!(
+        error,
+        ManifestError::UnsafePath {
+            field: "launch.args_file".to_owned(),
+            value: "/etc/vm.args".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn a_config_that_climbs_out_of_the_root_is_refused() {
+    let spec = ginary::manifest::LaunchSpec {
+        config: Some("../../etc/sys".to_owned()),
+        ..sample_launch()
+    };
+
+    let error = spec.validate().expect_err("a `..` component is refused");
+
+    assert_eq!(
+        error,
+        ManifestError::UnsafePath {
+            field: "launch.config".to_owned(),
+            value: "../../etc/sys".to_owned(),
+        }
+    );
+}

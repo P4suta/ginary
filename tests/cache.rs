@@ -16,9 +16,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use common::artifact::{APP, SyntheticArtifact};
+use common::cachefs::{DAY, HeldLock, plant_entry};
 use common::payload::SharedSink;
+use common::tools::require_tools;
 
-use ginary::cache::{self, APP_DIR_MODE, BIN_MODE, CacheDirs, Env, Origin};
+use ginary::cache::{
+    self, APP_DIR_MODE, BIN_MODE, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin,
+    PRUNE_DAYS_VAR, PruneOptions, PruneReport,
+};
 use ginary::diag::Diag;
 use ginary::trailer::Trailer;
 
@@ -438,6 +443,369 @@ fn a_sweep_of_a_directory_that_is_not_there_is_an_empty_report() {
     let report = cache::sweep(&dir.path().join("absent"), 1, &Diag::disabled())
         .expect("a cache that was never created is not an error");
     assert_eq!(report, ginary::cache::SweepReport::default());
+}
+
+// ------------------------------------------------------------ pruning --
+
+/// Everything a prune needs but the age: the cache root, the application
+/// directory under it, and `now`.
+fn prune_tree(dir: &Path) -> (PathBuf, PathBuf) {
+    let root = dir.join("cache");
+    let app_dir = root.join(APP);
+    std::fs::create_dir_all(&app_dir).expect("create the application directory");
+    (root, app_dir)
+}
+
+/// The default options with a chosen age.
+fn after(days: u64) -> PruneOptions {
+    PruneOptions { days, all: false }
+}
+
+#[test]
+fn the_prune_age_defaults_to_a_fortnight() {
+    assert_eq!(DEFAULT_PRUNE_DAYS, 14);
+    assert_eq!(cache::prune_days(&env(&[])), DEFAULT_PRUNE_DAYS);
+    assert_eq!(cache::prune_days(&env(&[(PRUNE_DAYS_VAR, "3")])), 3);
+    assert_eq!(
+        cache::prune_days(&env(&[(PRUNE_DAYS_VAR, "0")])),
+        0,
+        "zero is the documented way to turn pruning off"
+    );
+}
+
+#[test]
+fn a_prune_age_that_is_not_a_count_of_days_falls_back_to_the_default() {
+    // A misspelt housekeeping preference must not stop an application from
+    // starting, so the launcher reads what it can and carries on.
+    for value in ["", "  ", "fourteen", "-3", "3d", "99999999999999999999999"] {
+        assert_eq!(
+            cache::prune_days(&env(&[(PRUNE_DAYS_VAR, value)])),
+            DEFAULT_PRUNE_DAYS,
+            "`{PRUNE_DAYS_VAR}={value}` must fall back rather than fail a launch"
+        );
+    }
+}
+
+#[test]
+fn an_old_unlocked_sibling_is_removed_and_the_entry_being_launched_is_not() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let ours = plant_entry(&app_dir, "0000000000000000", DAY * 90);
+    let old = plant_entry(&app_dir, "1111111111111111", DAY * 30);
+
+    let report = cache::prune_app(
+        &app_dir,
+        Some("0000000000000000"),
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(report.removed, vec![old.clone()]);
+    assert!(report.kept.is_empty());
+    assert!(!old.exists(), "an old sibling must actually be gone");
+    assert!(
+        ours.join("ginary.json").is_file(),
+        "the entry this launch is about must never be a candidate, whatever its age"
+    );
+}
+
+#[test]
+fn a_sibling_younger_than_the_age_is_kept_and_says_so() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let fresh = plant_entry(&app_dir, "1111111111111111", DAY * 3);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(report.removed, Vec::<PathBuf>::new());
+    assert_eq!(report.kept, vec![(fresh.clone(), KeptReason::Fresh)]);
+    assert!(fresh.is_dir());
+}
+
+#[test]
+fn an_age_of_zero_prunes_nothing_at_all() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let ancient = plant_entry(&app_dir, "1111111111111111", DAY * 400);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(0),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(
+        report,
+        PruneReport::default(),
+        "zero days disables pruning, and a disabled prune reports nothing rather than \
+         everything"
+    );
+    assert!(ancient.is_dir());
+
+    // The same tree against a real age, so that the emptiness above is the
+    // setting doing its work rather than the entry being unprunable.
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(1),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+    assert_eq!(report.removed, vec![ancient.clone()]);
+    assert!(!ancient.exists());
+}
+
+#[test]
+fn a_locked_sibling_is_kept_however_old_it_is() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let held = plant_entry(&app_dir, "1111111111111111", DAY * 365);
+    let lock = HeldLock::take(tools.path("flock"), &held);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(report.removed, Vec::<PathBuf>::new());
+    assert_eq!(report.kept, vec![(held.clone(), KeptReason::Locked)]);
+    assert!(
+        held.join("ginary.json").is_file(),
+        "an entry a running application holds must survive its own age"
+    );
+    lock.release(tools.path("flock"));
+}
+
+#[test]
+fn all_ignores_the_age_and_still_honours_the_lock() {
+    let Some(tools) = require_tools(&["flock"]) else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let fresh = plant_entry(&app_dir, "1111111111111111", DAY);
+    let busy = plant_entry(&app_dir, "2222222222222222", DAY);
+    let lock = HeldLock::take(tools.path("flock"), &busy);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        PruneOptions {
+            days: DEFAULT_PRUNE_DAYS,
+            all: true,
+        },
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(
+        report.removed,
+        vec![fresh.clone()],
+        "`--all` is `whatever its age`, not `whatever is using it`"
+    );
+    assert_eq!(report.kept, vec![(busy.clone(), KeptReason::Locked)]);
+    assert!(!fresh.exists());
+    assert!(busy.is_dir());
+    lock.release(tools.path("flock"));
+}
+
+#[test]
+fn pruning_leaves_temporary_corrupt_and_unrecognised_names_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    plant(&app_dir, "abc", "tmp", DEAD_PID);
+    std::fs::create_dir_all(app_dir.join(".not-an-entry")).expect("something else");
+    let old = plant_entry(&app_dir, "1111111111111111", DAY * 30);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(
+        report.removed,
+        vec![old],
+        "pruning owns complete entries; the sweep owns the rest"
+    );
+    assert!(app_dir.join(".not-an-entry").is_dir());
+    assert!(names(&app_dir).iter().any(|name| name.starts_with(".abc.")));
+}
+
+#[test]
+fn a_directory_without_a_manifest_has_no_age_and_is_not_pruned() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    let half = app_dir.join("1111111111111111");
+    std::fs::create_dir_all(&half).expect("a key directory with no manifest");
+
+    let complete = plant_entry(&app_dir, "2222222222222222", DAY * 30);
+
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        PruneOptions {
+            days: DEFAULT_PRUNE_DAYS,
+            all: true,
+        },
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(
+        report.removed,
+        vec![complete],
+        "a complete entry is prunable and a half-extracted one is the sweep's business"
+    );
+    assert!(half.is_dir());
+}
+
+#[test]
+fn pruning_an_application_directory_that_is_not_there_reports_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let absent = cache::prune_app(
+        &dir.path().join("absent"),
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+    assert_eq!(
+        absent,
+        PruneReport::default(),
+        "an application nobody has ever run has nothing to prune"
+    );
+
+    // And a directory that *is* there is not silently the same answer.
+    let (_root, app_dir) = prune_tree(dir.path());
+    let old = plant_entry(&app_dir, "1111111111111111", DAY * 30);
+    let present = cache::prune_app(
+        &app_dir,
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+    assert_eq!(present.removed, vec![old]);
+}
+
+#[test]
+fn pruning_the_whole_root_visits_every_application() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let hello = plant_entry(&root.join("hello"), "1111111111111111", DAY * 30);
+    let other = plant_entry(&root.join("other"), "2222222222222222", DAY * 30);
+    let fresh = plant_entry(&root.join("other"), "3333333333333333", DAY);
+
+    let report = cache::prune(&root, None, after(14), std::time::SystemTime::now())
+        .expect("pruning must run over a root that exists");
+
+    assert_eq!(report.removed, vec![hello, other]);
+    assert_eq!(report.kept, vec![(fresh.clone(), KeptReason::Fresh)]);
+    assert!(fresh.is_dir());
+}
+
+#[test]
+fn pruning_one_application_leaves_the_others_untouched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    let hello = plant_entry(&root.join("hello"), "1111111111111111", DAY * 30);
+    let other = plant_entry(&root.join("other"), "2222222222222222", DAY * 30);
+
+    let report = cache::prune(
+        &root,
+        Some("hello"),
+        after(14),
+        std::time::SystemTime::now(),
+    )
+    .expect("pruning one application must run");
+
+    assert_eq!(report.removed, vec![hello]);
+    assert!(other.is_dir(), "`--app` must not reach another application");
+}
+
+#[test]
+fn pruning_an_application_that_is_not_a_name_is_refused_before_anything_is_joined() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    std::fs::create_dir_all(&root).expect("create the root");
+
+    for app in ["..", "/etc", "a/b", ""] {
+        let error = cache::prune(&root, Some(app), after(14), std::time::SystemTime::now())
+            .expect_err("what pruning does to a directory is remove it");
+        assert_eq!(
+            error.exit_code(),
+            124,
+            "`--app {app}` must be refused as a cache failure"
+        );
+    }
+}
+
+#[test]
+fn pruning_a_cache_that_was_never_created_is_an_empty_report() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let absent = cache::prune(
+        &dir.path().join("absent"),
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+    )
+    .expect("pruning nothing is not an error");
+    assert_eq!(absent, PruneReport::default());
+
+    let root = dir.path().join("cache");
+    let old = plant_entry(&root.join("hello"), "1111111111111111", DAY * 30);
+    let present = cache::prune(&root, None, after(14), std::time::SystemTime::now())
+        .expect("pruning a root that exists must run");
+    assert_eq!(
+        present.removed,
+        vec![old],
+        "a root that was never created and one with nothing prunable in it are different \
+         answers to the same question"
+    );
+}
+
+#[test]
+fn a_kept_entry_names_its_reason_in_one_word() {
+    assert_eq!(KeptReason::Locked.describe(), "locked");
+    assert_eq!(KeptReason::Fresh.describe(), "fresh");
+
+    // And the word is the one a report actually carries.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_root, app_dir) = prune_tree(dir.path());
+    plant_entry(&app_dir, "1111111111111111", DAY);
+    let report = cache::prune_app(
+        &app_dir,
+        None,
+        after(14),
+        std::time::SystemTime::now(),
+        &Diag::disabled(),
+    );
+    assert_eq!(
+        report
+            .kept
+            .iter()
+            .map(|(_, reason)| reason.describe())
+            .collect::<Vec<&str>>(),
+        ["fresh"]
+    );
 }
 
 // ------------------------------------------------------------ cleaning --

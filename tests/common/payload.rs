@@ -494,6 +494,12 @@ pub fn sample_launch() -> LaunchSpec {
         pa: vec!["lib/hello/ebin".to_owned()],
         eval: "'hello@@main':run('hello')".to_owned(),
         erl_flags: vec!["+B".to_owned()],
+        args_file: None,
+        config: None,
+        distribution: false,
+        filename_encoding: ginary::config::DEFAULT_FILENAME_ENCODING.to_owned(),
+        heart: false,
+        env: BTreeMap::new(),
     }
 }
 

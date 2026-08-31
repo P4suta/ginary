@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,8 @@ use common::snapshot::scrub;
 use ginary::cache::Env;
 use ginary::error::LauncherError;
 use ginary::launch::{
-    self, CRASH_DUMP_NAME, ERL_FLAGS_VAR, LaunchPlan, PreflightIssue, REMOVED_VARS,
+    self, CRASH_DUMP_NAME, ERL_FLAGS_VAR, HEART_COMMAND_VAR, LaunchPlan, PreflightIssue,
+    REMOVED_VARS,
 };
 use ginary::manifest::Manifest;
 
@@ -33,6 +35,10 @@ const ROOT: &str = "/cache/hello/0123456789abcdef";
 /// Where a crash dump goes by default — the application directory, one level
 /// above the entry.
 const DUMPS: &str = "/cache/hello";
+
+/// The running artifact, which is what `HEART_COMMAND` names. It does not have
+/// to exist either: `plan` interpolates it and reads nothing.
+const SELF_EXE: &str = "/opt/bin/hello";
 
 fn env(pairs: &[(&str, &str)]) -> Env {
     Env::from_pairs(
@@ -48,7 +54,14 @@ fn plan_with(env: &Env, args: &[&str]) -> LaunchPlan {
 }
 
 fn build(manifest: &Manifest, env: &Env, user: &[OsString]) -> LaunchPlan {
-    match launch::plan(Path::new(ROOT), manifest, user, env, Path::new(DUMPS)) {
+    match launch::plan(
+        Path::new(ROOT),
+        manifest,
+        user,
+        env,
+        Path::new(DUMPS),
+        Path::new(SELF_EXE),
+    ) {
         Ok(plan) => plan,
         Err(error) => panic!("the canonical manifest must produce a plan: {error}"),
     }
@@ -139,16 +152,18 @@ fn the_argument_vector_is_the_documented_order() {
 fn the_fixed_flags_come_first_and_start_epmd_is_two_arguments() {
     let plan = plan_with(&env(&[]), &[]);
     assert_eq!(
-        args_of(&plan)[..5],
+        args_of(&plan)[..6],
         [
             "-boot".to_owned(),
             format!("{ROOT}/bin/no_dot_erlang"),
             "-noshell".to_owned(),
             "+B".to_owned(),
+            "+fnu".to_owned(),
             "-start_epmd".to_owned(),
-        ]
+        ],
+        "the filename encoding is a fixed flag and comes before -start_epmd"
     );
-    assert_eq!(args_of(&plan)[5], "false");
+    assert_eq!(args_of(&plan)[6], "false");
 }
 
 #[test]
@@ -179,8 +194,9 @@ fn the_manifest_flags_come_after_the_code_path_and_before_the_environment() {
             .position(|argument| argument == needle)
             .unwrap_or_else(|| panic!("`{needle}` is not in {args:?}"))
     };
-    assert!(position("-pa") < position("+fnu"), "{args:?}");
-    assert!(position("+fnu") < position("+S"), "{args:?}");
+    assert!(position("+fnu") < position("-pa"), "{args:?}");
+    assert!(position("-pa") < position("+SDio"), "{args:?}");
+    assert!(position("+SDio") < position("+S"), "{args:?}");
     assert!(position("+S") < position("-eval"), "{args:?}");
 }
 
@@ -406,14 +422,396 @@ fn nothing_is_both_set_and_removed() {
     }
 }
 
+// ------------------------------------------- the runtime settings (B1) --
+
+/// A manifest with every additive launch field set to something visible.
+///
+/// One manifest rather than six, because the combination is where an ordering
+/// bug hides: each flag on its own could be in the right place and the whole
+/// vector still be wrong.
+fn full_manifest() -> Manifest {
+    let mut manifest = canonical_manifest();
+    manifest.launch.args_file = Some("releases/vm.args".to_owned());
+    manifest.launch.config = Some("releases/sys".to_owned());
+    manifest.launch.distribution = true;
+    manifest.launch.filename_encoding = "latin1".to_owned();
+    manifest.launch.heart = true;
+    manifest.launch.env = BTreeMap::from([
+        ("GINARY_ENV_ONE".to_owned(), "one".to_owned()),
+        ("GINARY_ENV_TWO".to_owned(), "two".to_owned()),
+    ]);
+    manifest
+}
+
+/// A plan for a manifest one field of which has been changed.
+fn plan_of(change: impl FnOnce(&mut Manifest), env: &Env, args: &[&str]) -> LaunchPlan {
+    let mut manifest = canonical_manifest();
+    change(&mut manifest);
+    let user: Vec<OsString> = args.iter().map(OsString::from).collect();
+    build(&manifest, env, &user)
+}
+
+#[test]
+fn the_args_file_is_the_first_thing_in_the_vector() {
+    // Before ginary's own flags, and the order is the whole point: `erl` takes
+    // the last value of a repeated flag, so a user file that came *after*
+    // -noshell could switch the shell back on.
+    let plan = plan_of(
+        |m| m.launch.args_file = Some("releases/vm.args".to_owned()),
+        &env(&[]),
+        &[],
+    );
+    let args = args_of(&plan);
+    assert_eq!(
+        args[..3],
+        [
+            "-args_file".to_owned(),
+            format!("{ROOT}/releases/vm.args"),
+            "-boot".to_owned(),
+        ],
+        "the args file is inserted before the fixed flags, and it is {args:?}"
+    );
+
+    let without = plan_with(&env(&[]), &[]);
+    assert!(
+        !args_of(&without)
+            .iter()
+            .any(|argument| argument == "-args_file"),
+        "a manifest with no args file must not name one"
+    );
+}
+
+#[test]
+fn the_config_comes_after_start_epmd_and_before_the_code_path() {
+    let plan = plan_of(
+        |m| m.launch.config = Some("releases/sys".to_owned()),
+        &env(&[]),
+        &[],
+    );
+    let args = args_of(&plan);
+    assert_eq!(
+        args[..9],
+        [
+            "-boot".to_owned(),
+            format!("{ROOT}/bin/no_dot_erlang"),
+            "-noshell".to_owned(),
+            "+B".to_owned(),
+            "+fnu".to_owned(),
+            "-start_epmd".to_owned(),
+            "false".to_owned(),
+            "-config".to_owned(),
+            format!("{ROOT}/releases/sys"),
+        ],
+        "actual: {args:?}"
+    );
+}
+
+#[test]
+fn the_config_argument_carries_no_extension() {
+    // `-config` names a file *without* its `.config` suffix; passing the
+    // suffix makes the runtime look for `sys.config.config`.
+    let plan = plan_of(
+        |m| m.launch.config = Some("releases/sys".to_owned()),
+        &env(&[]),
+        &[],
+    );
+    let args = args_of(&plan);
+    let position = args
+        .iter()
+        .position(|argument| argument == "-config")
+        .unwrap_or_else(|| panic!("`-config` is not in {args:?}"));
+    assert_eq!(args[position + 1], format!("{ROOT}/releases/sys"));
+
+    let without = plan_with(&env(&[]), &[]);
+    assert!(
+        !args_of(&without)
+            .iter()
+            .any(|argument| argument == "-config"),
+        "a manifest with no sys.config must not name one"
+    );
+}
+
+#[test]
+fn distribution_removes_start_epmd_and_nothing_else() {
+    let without = plan_with(&env(&[]), &[]);
+    let with = plan_of(|m| m.launch.distribution = true, &env(&[]), &[]);
+
+    assert!(
+        args_of(&without).iter().any(|a| a == "-start_epmd"),
+        "the default artifact ships no epmd and must say so"
+    );
+    assert!(
+        !args_of(&with).iter().any(|a| a == "-start_epmd"),
+        "a distributed artifact must let the runtime start epmd, and it got {:?}",
+        args_of(&with)
+    );
+
+    let expected: Vec<String> = args_of(&without)
+        .into_iter()
+        .filter(|a| a != "-start_epmd" && a != "false")
+        .collect();
+    assert_eq!(
+        args_of(&with),
+        expected,
+        "distribution removes two arguments and adds none"
+    );
+}
+
+#[test]
+fn each_filename_encoding_is_its_own_flag() {
+    for (encoding, flag) in [("utf8", "+fnu"), ("latin1", "+fnl"), ("auto", "+fna")] {
+        let plan = plan_of(
+            |m| m.launch.filename_encoding = encoding.to_owned(),
+            &env(&[]),
+            &[],
+        );
+        let args = args_of(&plan);
+        assert_eq!(
+            args[4], flag,
+            "`{encoding}` must be `{flag}`, and the vector is {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|a| a.starts_with("+fn")).count(),
+            1,
+            "exactly one encoding flag, and the vector is {args:?}"
+        );
+    }
+}
+
+#[test]
+fn heart_adds_its_flag_after_the_config_and_before_the_code_path() {
+    let plan = plan_of(
+        |m| {
+            m.launch.config = Some("releases/sys".to_owned());
+            m.launch.heart = true;
+        },
+        &env(&[]),
+        &[],
+    );
+    let args = args_of(&plan);
+    let position = |needle: &str| {
+        args.iter()
+            .position(|argument| argument == needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in {args:?}"))
+    };
+    assert!(position("-config") < position("-heart"), "{args:?}");
+    assert!(position("-heart") < position("-pa"), "{args:?}");
+
+    let without = plan_with(&env(&[]), &[]);
+    assert!(
+        !args_of(&without)
+            .iter()
+            .any(|argument| argument == "-heart"),
+        "a manifest that does not ask for heart must not start it"
+    );
+    assert_eq!(value_of(&without, HEART_COMMAND_VAR), None);
+}
+
+#[test]
+fn heart_command_is_the_artifact_and_the_arguments_it_was_given() {
+    let plan = plan_of(|m| m.launch.heart = true, &env(&[]), &["--name", "world"]);
+    assert_eq!(
+        value_of(&plan, HEART_COMMAND_VAR),
+        Some(format!("{SELF_EXE} --name world")),
+        "heart restarts the application by re-running the artifact with its own arguments"
+    );
+}
+
+#[test]
+fn heart_command_for_a_run_with_no_arguments_is_the_artifact_alone() {
+    let plan = plan_of(|m| m.launch.heart = true, &env(&[]), &[]);
+    assert_eq!(
+        value_of(&plan, HEART_COMMAND_VAR),
+        Some(SELF_EXE.to_owned()),
+        "no arguments means no trailing space"
+    );
+}
+
+#[test]
+fn a_heart_command_the_caller_set_is_left_alone() {
+    let plan = plan_of(
+        |m| m.launch.heart = true,
+        &env(&[(HEART_COMMAND_VAR, "/usr/local/bin/supervise")]),
+        &[],
+    );
+    assert!(
+        args_of(&plan).iter().any(|argument| argument == "-heart"),
+        "the runtime is still started under heart; only the command is the caller's"
+    );
+    assert_eq!(
+        value_of(&plan, HEART_COMMAND_VAR),
+        None,
+        "a HEART_COMMAND the caller exported is a supervision policy the launcher does not \
+         know better than"
+    );
+}
+
+#[test]
+fn the_manifest_env_is_applied_only_when_the_caller_has_not_set_it() {
+    let manifest_env = BTreeMap::from([
+        ("GINARY_ENV_ONE".to_owned(), "from-manifest".to_owned()),
+        ("GINARY_ENV_TWO".to_owned(), "from-manifest".to_owned()),
+    ]);
+    let plan = plan_of(
+        |m| m.launch.env = manifest_env,
+        &env(&[("GINARY_ENV_ONE", "from-caller")]),
+        &[],
+    );
+    assert_eq!(
+        value_of(&plan, "GINARY_ENV_ONE"),
+        None,
+        "a variable the caller exported must not be in the plan at all"
+    );
+    assert_eq!(
+        value_of(&plan, "GINARY_ENV_TWO"),
+        Some("from-manifest".to_owned())
+    );
+}
+
+#[test]
+fn an_empty_caller_value_is_still_a_value_the_manifest_does_not_replace() {
+    let plan = plan_of(
+        |m| {
+            m.launch.env = BTreeMap::from([
+                ("GINARY_ENV_ONE".to_owned(), "x".to_owned()),
+                ("GINARY_ENV_TWO".to_owned(), "y".to_owned()),
+            ]);
+        },
+        &env(&[("GINARY_ENV_ONE", "")]),
+        &[],
+    );
+    assert_eq!(
+        value_of(&plan, "GINARY_ENV_ONE"),
+        None,
+        "an exported-but-empty variable is a deliberate, if odd, thing"
+    );
+    assert_eq!(
+        value_of(&plan, "GINARY_ENV_TWO"),
+        Some("y".to_owned()),
+        "and the one the caller said nothing about still takes its default"
+    );
+}
+
+#[test]
+fn the_manifest_env_comes_after_the_variables_the_launcher_derives() {
+    let plan = plan_of(
+        |m| m.launch.env = BTreeMap::from([("GINARY_ENV_ONE".to_owned(), "x".to_owned())]),
+        &env(&[]),
+        &[],
+    );
+    assert_eq!(
+        set_of(&plan)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>(),
+        [
+            "ROOTDIR",
+            "BINDIR",
+            "EMU",
+            "PROGNAME",
+            "HOME",
+            "ERL_CRASH_DUMP",
+            "GINARY_ENV_ONE",
+        ]
+    );
+}
+
+#[test]
+fn nothing_the_manifest_env_names_is_also_removed() {
+    // The launcher applies `env` after the scrub, so a name in both lists
+    // would put back exactly what the scrub took out. The build refuses such a
+    // name; this is the launcher's half of the same claim.
+    let plan = plan_of(
+        |m| m.launch.env = BTreeMap::from([("GINARY_ENV_ONE".to_owned(), "x".to_owned())]),
+        &env(&[("ERL_LIBS", "/x")]),
+        &[],
+    );
+    assert_eq!(
+        value_of(&plan, "GINARY_ENV_ONE"),
+        Some("x".to_owned()),
+        "the manifest's own default is applied"
+    );
+    for (key, _) in &plan.set {
+        assert!(
+            !plan.remove.contains(key),
+            "{} is both set and removed",
+            key.to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn every_runtime_setting_at_once_is_the_documented_vector() {
+    let user = [OsString::from("--name"), OsString::from("world")];
+    let plan = build(&full_manifest(), &env(&[]), &user);
+    insta::assert_snapshot!(
+        "launch_plan_every_key",
+        scrub(
+            &render(&plan),
+            &[
+                (Path::new(ROOT), "<root>"),
+                (Path::new(DUMPS), "<app-dir>"),
+                (Path::new(SELF_EXE), "<self>"),
+            ]
+        )
+    );
+}
+
+#[test]
+fn an_args_file_that_escapes_the_root_is_refused() {
+    let mut manifest = canonical_manifest();
+    manifest.launch.args_file = Some("../../etc/vm.args".to_owned());
+    let error = launch::plan(
+        Path::new(ROOT),
+        &manifest,
+        &[],
+        &env(&[]),
+        Path::new(DUMPS),
+        Path::new(SELF_EXE),
+    )
+    .expect_err("an args file outside the extracted root must be refused");
+    assert_eq!(error.exit_code(), 122);
+    assert!(
+        error.to_string().contains("launch.args_file"),
+        "the message must name the field, and it is `{error}`"
+    );
+}
+
+#[test]
+fn a_config_that_escapes_the_root_is_refused() {
+    let mut manifest = canonical_manifest();
+    manifest.launch.config = Some("/etc/sys".to_owned());
+    let error = launch::plan(
+        Path::new(ROOT),
+        &manifest,
+        &[],
+        &env(&[]),
+        Path::new(DUMPS),
+        Path::new(SELF_EXE),
+    )
+    .expect_err("an absolute -config must be refused");
+    assert_eq!(error.exit_code(), 122);
+    assert!(
+        error.to_string().contains("launch.config"),
+        "the message must name the field, and it is `{error}`"
+    );
+}
+
 // -------------------------------------------------------- the refusals --
 
 #[test]
 fn a_launch_path_that_escapes_the_root_is_refused() {
     let mut manifest = canonical_manifest();
     manifest.launch.pa[0] = "../../etc".to_owned();
-    let error = launch::plan(Path::new(ROOT), &manifest, &[], &env(&[]), Path::new(DUMPS))
-        .expect_err("a manifest whose code path leaves the root must be refused");
+    let error = launch::plan(
+        Path::new(ROOT),
+        &manifest,
+        &[],
+        &env(&[]),
+        Path::new(DUMPS),
+        Path::new(SELF_EXE),
+    )
+    .expect_err("a manifest whose code path leaves the root must be refused");
     assert_eq!(
         error.exit_code(),
         122,
@@ -429,8 +827,15 @@ fn a_launch_path_that_escapes_the_root_is_refused() {
 fn an_absolute_launch_program_is_refused() {
     let mut manifest = canonical_manifest();
     manifest.launch.program = "/usr/bin/erlexec".to_owned();
-    let error = launch::plan(Path::new(ROOT), &manifest, &[], &env(&[]), Path::new(DUMPS))
-        .expect_err("a launch program outside the extracted root must be refused");
+    let error = launch::plan(
+        Path::new(ROOT),
+        &manifest,
+        &[],
+        &env(&[]),
+        Path::new(DUMPS),
+        Path::new(SELF_EXE),
+    )
+    .expect_err("a launch program outside the extracted root must be refused");
     assert_eq!(error.exit_code(), 122);
 }
 
