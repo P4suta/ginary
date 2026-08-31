@@ -18,6 +18,8 @@ use crate::assemble::{self, StageOptions, StagedRoot};
 use crate::beam;
 use crate::bundle::{self, BuildReport};
 use crate::cache;
+use crate::cache_dir;
+use crate::catalog::{self, Catalog, CatalogPaths, LoadedCatalog};
 use crate::closure::{self, AppSet};
 use crate::config::{
     BuildFlags, BuildOptions, MAX_COMPRESSION_LEVEL, MIN_COMPRESSION_LEVEL, ProjectConfig,
@@ -25,6 +27,7 @@ use crate::config::{
 use crate::crashdump::{self, CrashDump};
 use crate::diag::{self, Diag};
 use crate::doctor;
+use crate::download;
 use crate::elf::{self, ElfInfo};
 use crate::gleam;
 use crate::inspect::{self, InspectReport, LaunchPlanReport};
@@ -381,6 +384,102 @@ pub enum Command {
         /// What to do with the cache.
         #[command(subcommand)]
         command: CacheCommand,
+    },
+    /// Read the prebuilt-OTP catalog, and fill the cache from it.
+    ///
+    /// The catalog is an index of BEAM runtimes built for machines this one is
+    /// not: one JSON document naming, per OTP version, per target, per
+    /// variant, a `.tar.zst` with its SHA-256 and everything a build would
+    /// otherwise have to guess. It is local first — there is no hosted
+    /// catalog, `repack` is the pipeline that produces one on this machine,
+    /// and nothing here publishes anything.
+    Otp {
+        /// What to do with the catalog.
+        #[command(subcommand)]
+        command: OtpCommand,
+    },
+}
+
+/// A subcommand of `ginary otp`.
+#[derive(Debug, Subcommand)]
+pub enum OtpCommand {
+    /// List what the catalog holds, and which entries are already extracted.
+    List {
+        /// Show only the entries for one target.
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
+        /// The catalog to read. Defaults to `GINARY_CATALOG`, then the cache.
+        #[arg(long, value_name = "PATH")]
+        catalog: Option<PathBuf>,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch one runtime into the cache, verifying it against the catalog.
+    Fetch {
+        /// The OTP version, as the catalog keys it.
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        /// The target the runtime is for.
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        /// The variant, when the target has more than one.
+        #[arg(long, value_name = "NAME")]
+        variant: Option<String>,
+        /// The catalog to read. Defaults to `GINARY_CATALOG`, then the cache.
+        #[arg(long, value_name = "PATH")]
+        catalog: Option<PathBuf>,
+    },
+    /// Print where one runtime is extracted, without fetching anything.
+    ///
+    /// A command that silently downloaded forty megabytes because somebody
+    /// asked where a directory was would be a surprise in a script, so this
+    /// prints the directory or says which `fetch` would produce it.
+    Path {
+        /// The OTP version, as the catalog keys it.
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        /// The target the runtime is for.
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        /// The variant, when the target has more than one.
+        #[arg(long, value_name = "NAME")]
+        variant: Option<String>,
+        /// The catalog to read. Defaults to `GINARY_CATALOG`, then the cache.
+        #[arg(long, value_name = "PATH")]
+        catalog: Option<PathBuf>,
+    },
+    /// Install a catalog into the cache, after checking that it is one.
+    Update {
+        /// The catalog to install: a file, or a URL to fetch it from.
+        #[arg(long, value_name = "PATH|URL")]
+        catalog: String,
+    },
+    /// Repack upstream runtimes into a local catalog. Publishes nothing.
+    ///
+    /// This is the whole of what a hosted `ginary-otp` repository would do,
+    /// run here: each upstream release asset is fetched and verified against
+    /// the digest the release API reported, pruned, stripped of every symlink,
+    /// checked against its own emulator and repacked deterministically, and
+    /// the entry is appended to a `catalog.json` beside the tarballs. Nothing
+    /// is pushed, tagged or published; see
+    /// `docs/adr/0013-local-first-otp-catalog.md`.
+    Repack {
+        /// The upstream release tag, such as `OTP-29.0.5`.
+        #[arg(long, value_name = "TAG")]
+        upstream_tag: String,
+        /// The runtimes to build: `<target>[:<variant>]`, comma separated.
+        #[arg(long, value_name = "LIST", value_delimiter = ',')]
+        targets: Vec<String>,
+        /// Where the tarballs and `catalog.json` go.
+        #[arg(long, value_name = "DIR", default_value = "dist/otp")]
+        out: PathBuf,
+        /// A directory of already-downloaded upstream assets.
+        ///
+        /// An asset that is there is used and hashed as it is; one that is not
+        /// is fetched into this directory, so a second run costs nothing.
+        #[arg(long, value_name = "DIR")]
+        upstream_dir: Option<PathBuf>,
     },
 }
 
@@ -885,6 +984,44 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             write!(out, "{}", crate::launcher::render_prune(&report))
                 .context("cannot write the prune report to standard output")
         }
+        Command::Otp {
+            command:
+                OtpCommand::List {
+                    target,
+                    catalog,
+                    json,
+                },
+        } => write_otp_list(target.as_deref(), catalog.as_deref(), *json, out),
+        Command::Otp {
+            command:
+                OtpCommand::Fetch {
+                    version,
+                    target,
+                    variant,
+                    catalog,
+                },
+        } => write_otp_fetch(version, target, variant.as_deref(), catalog.as_deref(), out),
+        Command::Otp {
+            command:
+                OtpCommand::Path {
+                    version,
+                    target,
+                    variant,
+                    catalog,
+                },
+        } => write_otp_path(version, target, variant.as_deref(), catalog.as_deref(), out),
+        Command::Otp {
+            command: OtpCommand::Update { catalog },
+        } => write_otp_update(catalog, out),
+        Command::Otp {
+            command:
+                OtpCommand::Repack {
+                    upstream_tag,
+                    targets,
+                    out: dir,
+                    upstream_dir,
+                },
+        } => write_otp_repack(upstream_tag, targets, dir, upstream_dir.as_deref(), out),
     }
 }
 
@@ -1861,5 +1998,348 @@ mod tests {
         ] {
             assert!(text.contains(subject), "missing {subject} in:\n{text}");
         }
+    }
+}
+
+// ------------------------------------------------------------- the otp --
+
+/// Version of the `otp list --json` schema.
+pub const OTP_FORMAT_VERSION: u32 = 1;
+
+/// The payload of `ginary otp list --json`.
+#[derive(Debug, Serialize)]
+pub struct OtpListReport {
+    /// Version of this schema; see [`OTP_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// The catalog schema the document was written in.
+    pub schema_version: u32,
+    /// Where the catalog was read from.
+    pub origin: String,
+    /// One entry per variant, sorted by version, target and variant.
+    pub entries: Vec<OtpListEntry>,
+}
+
+/// One runtime in an [`OtpListReport`].
+#[derive(Debug, Serialize)]
+pub struct OtpListEntry {
+    /// The OTP version.
+    pub version: String,
+    /// The target the runtime is for.
+    pub target: String,
+    /// The variant.
+    pub variant: String,
+    /// How the emulator is linked.
+    pub linkage: String,
+    /// Whether a NIF can be loaded into it.
+    pub nif_loading: bool,
+    /// The C library it needs.
+    pub libc: String,
+    /// The tarball's length.
+    pub size: u64,
+    /// The tarball's SHA-256.
+    pub sha256: String,
+    /// Where the tarball is, as the catalog wrote it.
+    pub url: String,
+    /// Whether it is already extracted in this machine's cache.
+    pub cached: bool,
+    /// The cache directory it extracts into.
+    pub dir: String,
+}
+
+/// Where a catalog is read from, and where its runtimes are extracted.
+struct OtpEnv {
+    /// The root of the OTP cache, `<cache>/otp`.
+    cache_root: PathBuf,
+    /// The catalog sources, in the order they are tried.
+    paths: CatalogPaths,
+}
+
+/// Resolves the cache and the catalog sources for one `ginary otp` run.
+///
+/// `--catalog` wins, then [`catalog::CATALOG_ENV_VAR`], then the catalog
+/// `ginary otp update` installed in the cache, then the embedded one, which is
+/// empty. The cache root is resolved exactly as a packaged application
+/// resolves it, so `ginary otp path` answers about the same directory a build
+/// fills.
+fn otp_env(explicit: Option<&Path>) -> anyhow::Result<OtpEnv> {
+    let dirs = cache_dir::resolve(&cache_dir::EnvSnapshot::from_env())
+        .context("cannot decide where the OTP cache is")?;
+    let cache_root = catalog::cache_root(&dirs.path);
+    let explicit = explicit.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os(catalog::CATALOG_ENV_VAR)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
+    Ok(OtpEnv {
+        cache_root: cache_root.clone(),
+        paths: CatalogPaths {
+            explicit,
+            cache: Some(cache_root.join(catalog::CATALOG_FILE)),
+        },
+    })
+}
+
+/// Lists every entry of the catalog, marking the ones already extracted.
+fn write_otp_list(
+    target: Option<&str>,
+    explicit: Option<&Path>,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let env = otp_env(explicit)?;
+    let loaded = Catalog::load(&env.paths)?;
+    let entries = otp_entries(&loaded, &env, target);
+
+    if json {
+        return write_json(
+            out,
+            &OtpListReport {
+                format_version: OTP_FORMAT_VERSION,
+                schema_version: loaded.catalog.schema_version,
+                origin: loaded.origin.label(),
+                entries,
+            },
+        );
+    }
+
+    if entries.is_empty() {
+        return writeln!(
+            out,
+            "no catalog entries in {}; run `ginary otp repack` to build one, or point \
+             `--catalog` at a catalog.json",
+            loaded.origin.label()
+        )
+        .context("cannot write the catalog listing to standard output");
+    }
+
+    let rows: Vec<[String; 7]> = entries
+        .iter()
+        .map(|entry| {
+            [
+                entry.version.clone(),
+                entry.target.clone(),
+                entry.variant.clone(),
+                entry.linkage.clone(),
+                yes_no(entry.nif_loading),
+                human_size(entry.size),
+                yes_no(entry.cached),
+            ]
+        })
+        .collect();
+    let table = closure::render_table(
+        [
+            "version", "target", "variant", "linkage", "nifs", "size", "cached",
+        ],
+        &rows,
+    );
+    out.write_all(table.as_bytes())
+        .context("cannot write the catalog listing to standard output")
+}
+
+/// Every entry of a catalog, in catalog order, narrowed to one target.
+fn otp_entries(loaded: &LoadedCatalog, env: &OtpEnv, target: Option<&str>) -> Vec<OtpListEntry> {
+    let mut entries = Vec::new();
+    for (version, otp) in &loaded.catalog.otp {
+        for (name, built) in &otp.targets {
+            if target.is_some_and(|wanted| wanted != name) {
+                continue;
+            }
+            for (variant, entry) in &built.variants {
+                let dir = env
+                    .cache_root
+                    .join(catalog::entry_dir_name(version, name, variant));
+                entries.push(OtpListEntry {
+                    version: version.clone(),
+                    target: name.clone(),
+                    variant: variant.clone(),
+                    linkage: entry.linkage.clone(),
+                    nif_loading: entry.nif_loading,
+                    libc: entry.libc.kind.clone(),
+                    size: entry.size,
+                    sha256: entry.sha256.clone(),
+                    url: entry.url.clone(),
+                    cached: catalog::is_complete(&dir),
+                    dir: dir.display().to_string(),
+                });
+            }
+        }
+    }
+    entries
+}
+
+/// Prints where one runtime is extracted, and never fetches it.
+fn write_otp_path(
+    version: &str,
+    target: &str,
+    variant: Option<&str>,
+    explicit: Option<&Path>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let env = otp_env(explicit)?;
+    let loaded = Catalog::load(&env.paths)?;
+    let selected = loaded
+        .catalog
+        .lookup(version, target, variant, &loaded.origin.label())?;
+    let dir = env.cache_root.join(selected.dir_name());
+    if !catalog::is_complete(&dir) {
+        anyhow::bail!(catalog::CatalogError::NotCached {
+            dir,
+            version: version.to_owned(),
+            target: target.to_owned(),
+            // The flags this run was given, so the remedy is this command with
+            // `path` replaced by `fetch` and nothing else changed.
+            command: catalog::fetch_command(version, target, variant, loaded.origin.flag_path(),),
+        });
+    }
+    writeln!(out, "{}", dir.display()).context("cannot write the runtime path")
+}
+
+/// Fetches one runtime into the cache.
+fn write_otp_fetch(
+    version: &str,
+    target: &str,
+    variant: Option<&str>,
+    explicit: Option<&Path>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let env = otp_env(explicit)?;
+    let loaded = Catalog::load(&env.paths)?;
+    let selected = loaded
+        .catalog
+        .lookup(version, target, variant, &loaded.origin.label())?;
+    let dir = env.cache_root.join(selected.dir_name());
+    let net = download::Net::from_vars(false, &download::Net::env_vars());
+
+    // Fetching is the network command, so an offline one is refused before it
+    // starts rather than after it has looked at a cache that cannot help.
+    if !catalog::is_complete(&dir) && net.offline {
+        let url = match catalog::resolve_url(&selected.entry.url, loaded.origin.dir()) {
+            catalog::SourceUrl::Remote(url) => url,
+            catalog::SourceUrl::File(path) => path.display().to_string(),
+        };
+        anyhow::bail!(download::DownloadError::Offline {
+            url,
+            dest_hint: dir,
+        });
+    }
+
+    let diag = Diag::from_env(&diag::EnvSnapshot::from_env());
+    let dir = catalog::ensure_otp(
+        &selected,
+        &catalog::EnsureContext {
+            cache_root: &env.cache_root,
+            catalog_dir: loaded.origin.dir(),
+            net: &net,
+            diag: &diag,
+        },
+    )?;
+    writeln!(out, "{}", dir.display()).context("cannot write the runtime path")
+}
+
+/// Installs a catalog into the cache, after checking that it is one.
+fn write_otp_update(source: &str, out: &mut impl Write) -> anyhow::Result<()> {
+    let env = otp_env(None)?;
+    let net = download::Net::from_vars(false, &download::Net::env_vars());
+    // The module's own spelling of "is this a URL", so that `otp update` and
+    // `resolve_url` cannot disagree about a path that happens to hold `://`.
+    let (origin, text) = if catalog::has_scheme(source) {
+        (source.to_owned(), download::get_text(source, &net)?)
+    } else {
+        let path = PathBuf::from(source);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read the catalog at {}", path.display()))?;
+        (path.display().to_string(), text)
+    };
+
+    // Parsed before anything is written: an update that damaged the catalog
+    // already installed would take the cache down with the document it
+    // refused.
+    let catalog = Catalog::parse(&text, &origin)?;
+    let destination = env.cache_root.join(catalog::CATALOG_FILE);
+    std::fs::create_dir_all(&env.cache_root)
+        .with_context(|| format!("cannot create {}", env.cache_root.display()))?;
+    // Temp-then-rename, and the bytes rather than a re-serialisation: a reader
+    // sees the whole document or the one that was there before, and the
+    // digests a build verifies against are the ones that were fetched.
+    catalog::install(&text, &destination)
+        .with_context(|| format!("cannot write {}", destination.display()))?;
+
+    writeln!(
+        out,
+        "installed {} entries from {origin} into {}",
+        catalog
+            .otp
+            .values()
+            .flat_map(|version| version.targets.values())
+            .map(|target| target.variants.len())
+            .sum::<usize>(),
+        destination.display()
+    )
+    .context("cannot write the update report")
+}
+
+/// Runs the local repackaging pipeline and prints what it produced.
+fn write_otp_repack(
+    upstream_tag: &str,
+    targets: &[String],
+    dir: &Path,
+    upstream_dir: Option<&Path>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let mut selectors = Vec::with_capacity(targets.len());
+    for value in targets {
+        selectors.push(catalog::RepackSelector::parse(value)?);
+    }
+    anyhow::ensure!(
+        !selectors.is_empty(),
+        "`--targets` names nothing to repack; pass `<target>[:<variant>]`, comma separated"
+    );
+
+    let options = catalog::RepackOptions {
+        upstream_tag: upstream_tag.to_owned(),
+        selectors,
+        out: dir.to_path_buf(),
+        upstream_dir: upstream_dir.map(Path::to_path_buf),
+        source_date_epoch: std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|value| value.parse().ok()),
+    };
+    let net = download::Net::from_vars(false, &download::Net::env_vars());
+    let diag = Diag::from_env(&diag::EnvSnapshot::from_env());
+    let report = catalog::repack(&options, &net, &diag)?;
+
+    for outcome in &report.outcomes {
+        writeln!(
+            out,
+            "{}:{} from {}\n  unpacked {}, pruned {} files ({}), dereferenced {} links (+{})\n  \
+             {}\n  {} {} sha256 {}",
+            outcome.target,
+            outcome.variant,
+            outcome.upstream_file,
+            human_size(outcome.unpacked_bytes),
+            outcome.prune.removed_files,
+            human_size(outcome.prune.removed_bytes),
+            outcome.deref.paths.len(),
+            human_size(outcome.deref.bytes_added),
+            outcome.beam_strip.describe(),
+            outcome.tarball.display(),
+            human_size(outcome.tarball_bytes),
+            outcome.entry.sha256,
+        )
+        .context("cannot write the repack report")?;
+    }
+    writeln!(out, "catalog {}", report.catalog.display()).context("cannot write the repack report")
+}
+
+/// Bytes as a person reads them, which is what a table prints.
+fn human_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }

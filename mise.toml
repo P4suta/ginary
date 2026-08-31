@@ -278,6 +278,34 @@ if [ -n "$failed" ]; then
 fi
 '''
 
+[tasks."otp:repack"]
+description = "Repack the upstream Linux runtimes into the local catalog under dist/otp"
+# The pipeline that would be a hosted `ginary-otp` repository, run here.
+# Nothing is published: what comes out is `dist/otp/*.tar.zst` (gitignored) and
+# `dist/otp/catalog.json` (committed), whose URLs are file names relative to
+# itself, so a checkout with the tarballs beside it resolves them.
+#
+# The three rows are the ones `scripts/smoke-matrix.sh` runs and
+# `tests/e2e_cross.rs` builds against. Roughly 130 MB of downloads the first
+# time; assets already in `dist/otp/.upstream` are reused and re-hashed rather
+# than fetched again. `SOURCE_DATE_EPOCH` makes two runs agree byte for byte.
+run = """
+set -eu
+cargo run --quiet -- otp repack \
+  --upstream-tag "${GINARY_OTP_TAG:-OTP-29.0.5}" \
+  --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
+  --out dist/otp
+"""
+
+[tasks."smoke:matrix"]
+description = "Cross-Linux smoke matrix: build for three targets and run each in a container"
+# Needs a docker daemon, the stubs from `stubs:build` and the catalog from
+# `otp:repack`; each absence is a reported skip naming the task that produces
+# it, and `GINARY_REQUIRE_TOOLCHAIN=1` turns those skips into failures. The
+# aarch64 row needs a binfmt handler, which the script probes for before it
+# runs a `--privileged` container to install one.
+run = "scripts/smoke-matrix.sh"
+
 [tasks.check]
 description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc and deny"
 run = [

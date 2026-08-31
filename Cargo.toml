@@ -18,7 +18,7 @@ categories = ["command-line-utilities", "development-tools"]
 # artifact is made from, which carries no clap, no TOML reader and none of the
 # build-side commands. See `docs/dev/log/C2.md`.
 default = ["cli"]
-cli = ["dep:clap", "dep:toml"]
+cli = ["dep:clap", "dep:toml", "dep:ureq"]
 # Fault injection for the launcher tests. Off by default, so a release build
 # holds none of the points and never reads `GINARY_FAULT`; `mise run test` and
 # CI turn it on. See `src/fault.rs` and `docs/dev/testing.md`.
@@ -73,6 +73,7 @@ toml = { version = "0.9.12", default-features = false, features = ["parse", "ser
 # encoder and the `zstdmt` C sources out: packing is single-threaded on purpose,
 # because a thread count that varies with the machine varies the output bytes.
 zstd = { version = "0.13.3", default-features = false }
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip", "platform-verifier"], optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
@@ -89,3 +90,15 @@ proptest = "1.11.0"
 lto = "thin"
 strip = "symbols"
 codegen-units = 1
+
+[profile.dev]
+# The debug information stays in the object files rather than in the binary.
+# Nothing is lost — the `.o` files sit beside it in `target/debug`, so a
+# backtrace and a debugger still resolve — and the binary itself stops being
+# tens of megabytes of DWARF. That matters here for one reason: a host build
+# appends its payload to *the running ginary*, so `tests/artifact_real.rs` and
+# `tests/e2e_hello.rs` build a real artifact out of the debug binary and hold
+# it to a size budget. Without this the C3 network stack's debug information
+# alone would put that artifact over the budget, and the budget is the claim
+# this project is about.
+split-debuginfo = "unpacked"

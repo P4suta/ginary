@@ -14,10 +14,20 @@
 //! place that looks, rather than by a user whose loader refuses the artifact.
 //! Nothing downstream trusts a provenance string.
 //!
-//! Two of the five sources are available today. `host` and `dir:PATH` resolve;
-//! `tarball:PATH`, `catalog` and `docker:IMAGE` parse — so a configuration can
-//! be written ahead of the milestone that implements them — and are refused at
-//! build time by [`ErtsError::NotYetAvailable`], which names the milestone.
+//! Four of the five sources are available. `host` and `dir:PATH` need nothing
+//! but a path and resolve through [`resolve`]; `catalog` and `tarball:PATH`
+//! need a cache root, a catalogue and a network policy, so they resolve
+//! through [`resolve_in`], which is given them, and [`resolve`] answers
+//! [`ErtsError::NeedsContext`] for both. `docker:IMAGE` parses — so a
+//! configuration can be written ahead of the milestone that implements it —
+//! and is refused at build time by [`ErtsError::NotYetAvailable`], which names
+//! the milestone [`ErtsSourceSpec::milestone`] reports, so that a build and
+//! `ginary doctor` never give two answers for one value.
+//!
+//! **A catalogue is an index, never evidence.** The catalogue arm checks every
+//! claim an entry makes — the target, the linkage, the libc — against the
+//! emulator that was actually extracted, and [`ErtsError::CatalogClaim`] names
+//! both sides of a disagreement.
 //!
 //! The inspection is injectable. [`resolve_with`] takes the function that reads
 //! an ELF, so the plumbing — the provenance strings, the mismatch message, the
@@ -27,6 +37,9 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::catalog::{CatalogError, CatalogPaths, EnsureContext, OtpReq};
+use crate::diag::Diag;
+use crate::download::Net;
 use crate::elf::{ElfError, ElfInfo};
 use crate::manifest::{LibcRequirement, OtpProvenance};
 use crate::otp::{OtpError, OtpInfo};
@@ -35,8 +48,8 @@ use crate::target::{Libc, Linkage, Target};
 /// The emulator every ERTS installation holds, and the file that is read.
 pub const EMULATOR: &str = "beam.smp";
 
-/// The milestone the three unavailable sources arrive with.
-pub const CATALOG_MILESTONE: &str = "catalog";
+/// The milestone `docker:IMAGE` arrives with.
+pub const IMAGE_MILESTONE: &str = "container image";
 
 /// What [`ErtsError::UnknownRuntimeTarget`] prints for an emulator that names
 /// no program interpreter.
@@ -77,10 +90,14 @@ impl ErtsSourceSpec {
     }
 
     /// The milestone this source arrives with, or [`None`] when it is here.
+    ///
+    /// Four of the five are here: C3 implemented `catalog` and `tarball:`, and
+    /// [`resolve_in`] performs them. Only a runtime copied out of a container
+    /// image is still to come.
     pub const fn milestone(&self) -> Option<&'static str> {
         match self {
-            Self::Host | Self::Dir(_) => None,
-            Self::Tarball(_) | Self::Catalog | Self::Docker(_) => Some(CATALOG_MILESTONE),
+            Self::Host | Self::Dir(_) | Self::Tarball(_) | Self::Catalog => None,
+            Self::Docker(_) => Some(IMAGE_MILESTONE),
         }
     }
 }
@@ -201,6 +218,13 @@ pub struct ResolvedErts {
     /// Where it came from, as [`ErtsSourceSpec::label`] spells it, with the
     /// resolved root appended for the two sources that have one.
     pub provenance: String,
+    /// What resolving this runtime raised that is not an error.
+    ///
+    /// A catalogue entry whose release is further ahead of this machine's than
+    /// ginary has tested is the one entry there is. The build folds these into
+    /// [`crate::bundle::BuildReport::warnings`], which is the channel a user
+    /// reads; the recorder gets a copy, and a copy is not a report.
+    pub warnings: Vec<String>,
 }
 
 impl ResolvedErts {
@@ -211,6 +235,16 @@ impl ResolvedErts {
             Libc::Musl => Some("musl"),
             Libc::None => None,
         }
+    }
+
+    /// The same runtime, carrying `warnings`.
+    ///
+    /// Taken by value so that the resolution is built once and the guard's
+    /// sentences are attached to it in one place; the other arms attach none.
+    #[must_use]
+    pub fn warning_with(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     /// The block `ginary.json` records about the runtime.
@@ -240,14 +274,30 @@ pub enum ErtsError {
     Otp(#[from] OtpError),
     /// The source parses and the milestone that implements it is not here.
     #[error(
-        "the ERTS source `{spec}` arrives with the {milestone} milestone; only `host` and \
-         `dir:PATH` are available today"
+        "the ERTS source `{spec}` arrives with the {milestone} milestone; `host`, `dir:PATH`, \
+         `tarball:PATH` and `catalog` are available today"
     )]
     NotYetAvailable {
         /// The source, as it was written.
         spec: String,
-        /// The milestone it arrives with.
+        /// The milestone it arrives with, as [`ErtsSourceSpec::milestone`]
+        /// reports it, so that a build and `ginary doctor` cannot disagree.
         milestone: &'static str,
+    },
+    /// The source is here and was resolved without what it needs to resolve.
+    ///
+    /// `catalog` and `tarball:PATH` both fill a cache, so both need a cache
+    /// root, a catalogue and a network policy; [`resolve_in`] is given them
+    /// and [`resolve`] is not. A build always takes the first, so this reaches
+    /// a user only through a caller that describes a runtime rather than
+    /// building one.
+    #[error(
+        "the ERTS source `{spec}` needs a cache root, a catalog and a network policy; it \
+         resolves through a build rather than through a bare inspection"
+    )]
+    NeedsContext {
+        /// The source, as it was written.
+        spec: String,
     },
     /// The emulator is not an ELF binary at all.
     #[error(
@@ -286,14 +336,41 @@ pub enum ErtsError {
         /// The target the emulator is really for.
         actual: Target,
     },
+    /// The catalogue could not be read, or held no such runtime.
+    #[error("cannot use the catalog")]
+    Catalog(#[from] CatalogError),
+    /// The catalogue's claim about a runtime is not what the emulator says.
+    ///
+    /// The catalogue is an index and the emulator is the evidence. A mismatch
+    /// is a hard error naming both, because an entry that lies about its
+    /// linkage would put `nif_loading: true` into the manifest of a runtime
+    /// that cannot `dlopen` anything.
+    #[error(
+        "the catalog says {entry} has {field} {claimed}, and the emulator at {path} has \
+         {actual}; the catalog is an index, not evidence"
+    )]
+    CatalogClaim {
+        /// The entry, as [`catalog_provenance`] spells it.
+        entry: String,
+        /// Which claim disagrees: `target`, `linkage` or `libc`.
+        field: &'static str,
+        /// What the catalogue said.
+        claimed: String,
+        /// What the emulator says.
+        actual: String,
+        /// The emulator that was read.
+        path: PathBuf,
+    },
 }
 
 /// Resolves one runtime and checks that it is the one the build asked for.
 ///
 /// `Host` discovers the installation `erl` reports and `Dir` inspects the root
 /// it names; both then read the emulator, and the target, the linkage and the
-/// minimum glibc come out of that file rather than out of the spelling. The
-/// other three sources are refused by [`ErtsError::NotYetAvailable`].
+/// minimum glibc come out of that file rather than out of the spelling.
+/// `catalog` and `tarball:PATH` are implemented and need a context this entry
+/// point has not got, so both earn [`ErtsError::NeedsContext`]; `docker:IMAGE`
+/// earns [`ErtsError::NotYetAvailable`].
 ///
 /// # Errors
 ///
@@ -324,13 +401,20 @@ pub fn resolve_with(
     let otp = match spec {
         ErtsSourceSpec::Host => crate::otp::discover(None)?,
         ErtsSourceSpec::Dir(path) => crate::otp::inspect_root(path)?,
-        // The three that parse and do not resolve. Refused here rather than by
-        // a check above the match, so that adding a variant is a compile error
-        // in the one place that decides what a source means.
-        ErtsSourceSpec::Tarball(_) | ErtsSourceSpec::Catalog | ErtsSourceSpec::Docker(_) => {
+        // The two that are implemented and need a context this entry point
+        // does not have. Refused here rather than by a check above the match,
+        // so that adding a variant is a compile error in the one place that
+        // decides what a source means.
+        ErtsSourceSpec::Tarball(_) | ErtsSourceSpec::Catalog => {
+            return Err(ErtsError::NeedsContext { spec: spec.label() });
+        }
+        // The one that is not here yet, refused with the milestone
+        // `ErtsSourceSpec::milestone` reports, which is what `ginary doctor`
+        // prints for the same value.
+        ErtsSourceSpec::Docker(_) => {
             return Err(ErtsError::NotYetAvailable {
                 spec: spec.label(),
-                milestone: CATALOG_MILESTONE,
+                milestone: IMAGE_MILESTONE,
             });
         }
     };
@@ -387,6 +471,8 @@ pub fn resolve_with(
         otp,
         target,
         linkage,
+        // `host` and `dir:` make no claim a guard could disagree with.
+        warnings: Vec::new(),
     })
 }
 
@@ -403,4 +489,256 @@ fn linkage_of(elf: crate::target::ElfTarget, needed: &[String]) -> Linkage {
         Linkage::Static if !needed.is_empty() => Linkage::Dynamic,
         linkage => linkage,
     }
+}
+
+/// What the three sources that are not `host` or `dir:` need to resolve.
+///
+/// Taken rather than read: the catalogue paths, the cache root and the network
+/// policy are all decisions the caller has already made, and a resolution that
+/// read them itself could not be tested in parallel.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceContext<'a> {
+    /// Where a catalogue may be read from.
+    pub catalog_paths: &'a CatalogPaths,
+    /// The root of the OTP cache, [`crate::catalog::cache_root`].
+    pub cache_root: &'a Path,
+    /// Whether this build may fetch, and where the bases point.
+    pub net: &'a Net,
+    /// The OTP release the shipment was compiled by.
+    pub host_release: u32,
+    /// Which version of OTP the configuration asked for.
+    pub otp_version: &'a OtpReq,
+    /// `otp_variant`, when the configuration named one.
+    pub variant: Option<&'a str>,
+    /// Where the phases are reported.
+    pub diag: &'a Diag,
+}
+
+/// How a catalogue entry is named in a provenance string and in an error.
+///
+/// `catalog:<version>/<target>/<variant>`: a label, never a path. The variant
+/// is always spelled out, so two entries of one version never read alike in a
+/// manifest.
+pub fn catalog_provenance(version: &str, target: &str, variant: &str) -> String {
+    format!("catalog:{version}/{target}/{variant}")
+}
+
+/// [`resolve`], with the context the catalogue and tarball sources need.
+///
+/// `Host` and `Dir` resolve exactly as [`resolve`] does and ignore the
+/// context. `Catalog` selects an entry, ensures it is extracted under the
+/// cache root and inspects what came out; `Tarball` extracts the archive into
+/// the same cache, keyed by its own SHA-256, and inspects that. Both then go
+/// through the one trust anchor, and every claim the catalogue made about the
+/// runtime — its target, its linkage, its libc — is checked against the
+/// emulator, with [`ErtsError::CatalogClaim`] naming both sides of a
+/// disagreement.
+///
+/// # Errors
+///
+/// [`ErtsError`].
+pub fn resolve_in(
+    spec: &ErtsSourceSpec,
+    requested: &Target,
+    ctx: &SourceContext<'_>,
+) -> Result<ResolvedErts, ErtsError> {
+    resolve_in_with(spec, requested, ctx, |path| {
+        crate::elf::inspect(path).map(|info| ElfFacts::of(&info))
+    })
+}
+
+/// [`resolve_in`], with the emulator inspection injected.
+///
+/// The seam [`resolve_with`] already has, carried up to the sources that fill
+/// a cache first: a runtime extracted out of a fixture tarball carries a shell
+/// script where the emulator belongs, so the catalogue plumbing — the cache
+/// key, the provenance, the claim check — is reachable on a machine with no
+/// cross-built `beam.smp` on it.
+///
+/// # Errors
+///
+/// As [`resolve_in`].
+pub fn resolve_in_with(
+    spec: &ErtsSourceSpec,
+    requested: &Target,
+    ctx: &SourceContext<'_>,
+    inspect: impl Fn(&Path) -> Result<ElfFacts, ElfError>,
+) -> Result<ResolvedErts, ErtsError> {
+    match spec {
+        // The two sources that need no cache resolve exactly as they did
+        // before this milestone, through the one function that reads a root.
+        ErtsSourceSpec::Host | ErtsSourceSpec::Dir(_) => resolve_with(spec, requested, inspect),
+        ErtsSourceSpec::Catalog => resolve_catalog(requested, ctx, inspect),
+        ErtsSourceSpec::Tarball(archive) => {
+            let root = crate::catalog::ensure_tarball(archive, ctx.cache_root, ctx.diag)?;
+            let otp = crate::otp::inspect_root(&root)?;
+            let read = read_emulator(&otp, requested, &inspect)?;
+            // A tarball makes no claim of its own, so the emulator is held
+            // straight to the target being built.
+            if read.target != *requested {
+                return Err(ErtsError::TargetMismatch {
+                    path: otp.root.clone(),
+                    requested: *requested,
+                    actual: read.target,
+                });
+            }
+            Ok(read.resolved(otp, spec.label()))
+        }
+        // The same constant `ErtsSourceSpec::milestone` answers with, so the
+        // sentence a build prints and the row `ginary doctor` prints cannot
+        // name two different milestones for one value.
+        ErtsSourceSpec::Docker(_) => Err(ErtsError::NotYetAvailable {
+            spec: spec.label(),
+            milestone: IMAGE_MILESTONE,
+        }),
+    }
+}
+
+/// The catalogue arm: choose an entry, fill the cache, and check every claim.
+///
+/// The order matters. The entry is chosen and extracted first, and *then* its
+/// own `beam.smp` is read; nothing the catalogue said is believed until the
+/// emulator has agreed with it, and where the two differ the build stops with
+/// [`ErtsError::CatalogClaim`] naming both sides.
+fn resolve_catalog(
+    requested: &Target,
+    ctx: &SourceContext<'_>,
+    inspect: impl Fn(&Path) -> Result<ElfFacts, ElfError>,
+) -> Result<ResolvedErts, ErtsError> {
+    let loaded = crate::catalog::Catalog::load(ctx.catalog_paths)?;
+    let origin = loaded.origin.label();
+    let selected =
+        loaded
+            .catalog
+            .select(ctx.otp_version, &requested.name(), ctx.variant, &origin)?;
+    for warning in &selected.warnings {
+        ctx.diag.kv("catalog", &[("warning", warning)]);
+    }
+    let warnings = selected.warnings.clone();
+
+    let entry = catalog_provenance(selected.version, selected.target, selected.variant);
+    let root = crate::catalog::ensure_otp(
+        &selected,
+        &EnsureContext {
+            cache_root: ctx.cache_root,
+            catalog_dir: loaded.origin.dir(),
+            net: ctx.net,
+            diag: ctx.diag,
+        },
+    )?;
+
+    let otp = crate::otp::inspect_root(&root)?;
+    let read = read_emulator(&otp, requested, &inspect)?;
+
+    // The catalogue is an index and the emulator is the evidence.
+    let claim = |field: &'static str, claimed: String, actual: String| ErtsError::CatalogClaim {
+        entry: entry.clone(),
+        field,
+        claimed,
+        actual,
+        path: read.emulator.clone(),
+    };
+    if selected.target != read.target.name() {
+        return Err(claim(
+            "target",
+            selected.target.to_owned(),
+            read.target.name(),
+        ));
+    }
+    if selected.entry.linkage != read.linkage.as_str() {
+        return Err(claim(
+            "linkage",
+            selected.entry.linkage.clone(),
+            read.linkage.as_str().to_owned(),
+        ));
+    }
+    let libc = match read.linkage {
+        // A fully static emulator resolves nothing at load time, so `none` is
+        // the only honest claim about its C library.
+        Linkage::Static => "none",
+        Linkage::Dynamic => read.libc_kind.unwrap_or("none"),
+    };
+    if selected.entry.libc.kind != libc {
+        return Err(claim(
+            "libc",
+            selected.entry.libc.kind.clone(),
+            libc.to_owned(),
+        ));
+    }
+
+    // The recorder got a copy above, and a copy is not a report: the sentence
+    // travels on the resolved runtime so that `bundle` can put it where a user
+    // actually reads one.
+    Ok(read.resolved(otp, entry).warning_with(warnings))
+}
+
+/// What the trust anchor read out of one runtime's emulator.
+struct EmulatorRead {
+    /// The emulator that was read.
+    emulator: PathBuf,
+    /// The target it is really for.
+    target: Target,
+    /// How it is linked.
+    linkage: Linkage,
+    /// The C library its own interpreter named, absent for a static build.
+    libc_kind: Option<&'static str>,
+    /// The lowest glibc it will load against, for a dynamic gnu runtime.
+    libc_min: Option<String>,
+}
+
+impl EmulatorRead {
+    /// The runtime this read describes, under one provenance.
+    fn resolved(self, otp: OtpInfo, provenance: String) -> ResolvedErts {
+        ResolvedErts {
+            otp,
+            target: self.target,
+            linkage: self.linkage,
+            libc_min: self.libc_min,
+            nif_loading: self.linkage.loads_nifs(),
+            provenance,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// Reads one runtime's emulator and holds it to the target being built.
+///
+/// The same three steps [`resolve_with`] makes, factored out because the two
+/// sources this milestone adds reach them through a cache rather than through a
+/// configured directory.
+fn read_emulator(
+    otp: &OtpInfo,
+    requested: &Target,
+    inspect: &impl Fn(&Path) -> Result<ElfFacts, ElfError>,
+) -> Result<EmulatorRead, ErtsError> {
+    let emulator = emulator_path(otp);
+    let facts = inspect(&emulator).map_err(|error| ErtsError::NotAnElfRuntime {
+        path: emulator.clone(),
+        reason: error.to_string(),
+    })?;
+
+    let Some(elf) = Target::from_elf(&facts.machine, facts.interp.as_deref()) else {
+        return Err(ErtsError::UnknownRuntimeTarget {
+            path: emulator,
+            machine: facts.machine,
+            interp: facts.interp.unwrap_or_else(|| NO_INTERPRETER.to_owned()),
+        });
+    };
+    let linkage = linkage_of(elf, &facts.needed);
+    let target = elf.resolve(requested.libc);
+
+    Ok(EmulatorRead {
+        emulator,
+        target,
+        linkage,
+        libc_kind: elf.target().map(|read| match read.libc {
+            Libc::Gnu => "gnu",
+            Libc::Musl => "musl",
+            Libc::None => "none",
+        }),
+        libc_min: match (elf.target().map(|read| read.libc), linkage) {
+            (Some(Libc::Gnu), Linkage::Dynamic) => facts.glibc_max.clone(),
+            _ => None,
+        },
+    })
 }

@@ -61,6 +61,7 @@ use crate::beam::{self, BeamError};
 use crate::elf::{self, ElfError, ElfInfo, ElfKind};
 use crate::otp::OtpInfo;
 use crate::process::{self, ProcessError};
+use crate::target::Target;
 
 /// The program that strips an ELF file.
 pub const STRIP_PROGRAM: &str = "strip";
@@ -567,6 +568,42 @@ fn strip_elf(
 
     if natives.is_empty() {
         return Ok(ElfOutcome::NothingToStrip);
+    }
+
+    // A cross build stages binaries for another machine, and `strip` on this
+    // one cannot read them: binutils is built for a set of architectures and
+    // answers `Unable to recognise the format of the input file` for anything
+    // outside it. Left alone and *said* rather than attempted, because a
+    // failure here would stop a build over files that upstream already ships
+    // stripped.
+    let host = Target::host().arch.as_str();
+    let foreign = natives
+        .iter()
+        .filter(|(_, info, _)| info.machine != host)
+        .count();
+    if foreign == natives.len() {
+        return Ok(ElfOutcome::Skipped {
+            reason: format!(
+                "{foreign} native {} for another machine than this one ({}), and `strip` here \
+                 reads {host}; they were left as the runtime shipped them",
+                if foreign == 1 { "file is" } else { "files are" },
+                natives
+                    .iter()
+                    .map(|(_, info, _)| info.machine.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        });
+    }
+    if foreign > 0 {
+        warnings.push(format!(
+            "{foreign} native {} for another machine and `strip` here reads {host}, so they were \
+             left as the runtime shipped them",
+            if foreign == 1 { "file is" } else { "files are" }
+        ));
+        natives.retain(|(_, info, _)| info.machine == host);
     }
 
     let Some(program) = process::find_in_path(STRIP_PROGRAM, std::env::var_os("PATH").as_deref())

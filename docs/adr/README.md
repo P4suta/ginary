@@ -27,3 +27,5 @@ only partly built, the record says so under `Consequences`.
   the artifact
 - [0012](0012-stub-identity-and-feature-split.md) — A stub says what it is, and the `cli` feature
   is what makes one
+- [0013](0013-local-first-otp-catalog.md) — The OTP catalog is local first, and nothing is
+  published

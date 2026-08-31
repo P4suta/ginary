@@ -391,6 +391,96 @@ What that rests on:
 A staging root that holds a file its own listing does not name is an error rather than a choice
 between packing something the index does not describe and dropping it silently.
 
+## The OTP catalog: `catalog.json`
+
+The catalog is not part of an artifact. It is the index a *build* reads to find a prebuilt BEAM
+runtime for a machine it is not running on, and it is specified here for the same reason the
+payload is: ginary reads bytes somebody else may have written, and a reader that guesses is a
+reader that lies. See `docs/adr/0013-local-first-otp-catalog.md` for why it lives locally.
+
+One JSON document, three levels below the root — version, target, variant:
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-31T00:00:00Z",
+  "otp": {
+    "29.0.5": {
+      "erts_vsn": "17.0.5",
+      "otp_release": 29,
+      "targets": {
+        "linux-x86_64-musl": {
+          "variants": {
+            "static": {
+              "url": "otp-29.0.5-linux-x86_64-musl-static.tar.zst",
+              "sha256": "aaaa…",
+              "size": 41943040,
+              "linkage": "static",
+              "nif_loading": false,
+              "libc": { "kind": "none" },
+              "openssl": "3.5.4",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-x64.tar.gz",
+                "sha256": "0000…"
+              },
+              "built_at": "2026-08-31T00:00:00Z"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+| field | meaning |
+| --- | --- |
+| `schema_version` | 1. Read *before* the rest of the document, so another schema is reported as one rather than as a list of missing fields. |
+| `generated_at` | when the document was written, RFC 3339 in UTC. |
+| `otp.<version>.erts_vsn` | the ERTS version inside, which is the `erts-<vsn>` directory the assembly looks for. |
+| `otp.<version>.otp_release` | the release a compiled module is compatible with; the version rule compares it with the host's. |
+| `…variants.<name>.url` | where the tarball is. **A URL with no scheme is resolved against the directory the catalog itself was read from**, which is what makes a committed `dist/otp/catalog.json` work in a checkout with the tarballs beside it. |
+| `sha256`, `size` | what the tarball must hash to and how long it must be. Checked whether the file was fetched or found on disk. |
+| `linkage` | `static` or `dynamic`, as the emulator is linked. Checked against the emulator's own header. |
+| `nif_loading` | whether a NIF can be loaded into this runtime. A fully static emulator `dlopen`s nothing. |
+| `libc` | `{ "kind": "gnu" \| "musl" \| "none", "version"?, "min"? }`. `min` is the lowest glibc a dynamic gnu runtime loads against, and it is what chooses the oldest image the artifact runs on. |
+| `openssl` | the OpenSSL the `crypto` application was built against, read out of the tree; empty when a dynamically linked `crypto` resolves it on the machine that runs the artifact. |
+| `jit` | whether the emulator carries BeamAsm, read out of the emulator's own bytes. |
+| `excluded_apps` | applications the repack left out entirely. Empty for every entry the pipeline writes today: ginary's own closure selects applications at build time, so a repack only strips the fat. |
+| `upstream` | where the bytes came from before ginary touched them: the repository, the release tag, the asset file name, and the digest the release API reported for it. |
+| `built_at` | when the tarball was repacked, RFC 3339 in UTC, from `SOURCE_DATE_EPOCH` when it is set. |
+
+**Unknown keys survive.** Every level captures the keys this ginary does not know and writes them
+back out, so a catalog written by a newer ginary is readable by an older one and a round trip
+loses nothing.
+
+**The catalog is an index, never evidence.** Two checks stand between an entry and an artifact:
+the tarball is held to `sha256` and `size`, and the extracted runtime is then held to its own
+`erts-*/bin/beam.smp` — the machine, the interpreter and the `DT_NEEDED` set decide the target,
+the linkage and the libc, and a disagreement with the entry stops the build naming both sides.
+
+**The tarball itself.** One zstd stream over a tar written in path order, with `uid`/`gid` 0,
+`mtime` 0 and the mode reduced to `0644`/`0755` — the payload's rules from
+[Determinism](#determinism), for the same reason and with the same
+`HeaderMode::Deterministic`-then-`set_mtime(0)` caveat. Two repacks of one upstream asset are the
+same bytes, which is what lets `sha256` in a catalog entry be reproduced rather than trusted.
+
+**The cache it fills.** A verified tarball extracts to
+`<cache>/otp/<version>-<target>[-<variant>]`, and a user-supplied `tarball:` source extracts to
+`<cache>/otp/tarball-<sha256>`. A directory is complete when it holds `.meta.json`, which is
+written into the temporary directory before it is renamed into place, so a reader never sees a
+half-extracted runtime. Filling one is held under an exclusive `flock` on
+`<cache>/otp/.locks/<entry>/.lock` — beside the entry rather than inside it, because the entry
+directory does not exist until the rename that finishes it — so two builds racing for one runtime
+produce one download and one extraction and the loser finds the entry complete. The extraction
+follows the payload's rules: regular files and directories only, no absolute or escaping path, and
+no symlink at all — which is possible because the repack dereferences every one of them and
+asserts that none remains.
+
 ## Versioning
 
 The trailer version (byte 7 of the magic) and the manifest `format_version` move independently.
@@ -529,6 +619,16 @@ is a change to a *released* format: v1 has not shipped.
   artifact and does not read the copy; nothing but a reader of the directory does.
   A bare host build, which writes `build/ginary/<app>`, writes no copy: one artifact in a
   directory is its own manifest.
+
+### v1, milestone C3 — the OTP catalog
+
+- **The catalog is a format ginary reads, and it is specified above.** It is not part of an
+  artifact and does not touch `format_version`: nothing in a payload, a trailer or a manifest
+  changes because a runtime came out of a catalog rather than off this machine. What it changes
+  is the `otp.source` string a manifest records, which is now
+  `catalog:<version>/<target>/<variant>` for a catalog entry and `tarball:<path>` for an archive.
+- **`schema_version` is read before the document.** A catalog of another schema is refused by a
+  message naming both versions, rather than by a list of fields this ginary could not find.
 
 ### v1, milestone C2 — the stub identity marker
 

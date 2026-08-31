@@ -35,10 +35,13 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::assemble::{AssembleError, Category, StageOptions};
+use crate::catalog::{CatalogPaths, OtpReq};
 use crate::closure::{self, AppSet, ClosureError};
 use crate::config::{BuildOptions, ConfigError};
 use crate::diag::Diag;
+use crate::download::Net;
 use crate::error::LauncherError;
+use crate::erts_source::{ErtsSourceSpec, SourceContext};
 use crate::gleam::{self, GleamError, ProjectDir};
 use crate::manifest::{AppRef, LaunchSpec, Manifest, ManifestError, OtpProvenance};
 use crate::otp::OtpError;
@@ -237,8 +240,9 @@ pub struct BuildReport {
     /// What the build could not do, having produced the artifact anyway.
     ///
     /// Empty on an ordinary build. A work directory that could not be removed
-    /// is the one entry there is: the artifact is complete and the project
-    /// tree is not as the build found it, and both halves have to be said.
+    /// is one entry, and a catalogue runtime whose release is further ahead of
+    /// this machine's than ginary has tested is another: the artifact is
+    /// complete and something about it still has to be said out loud.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// The accounts `--explain` asked for.
@@ -577,10 +581,11 @@ fn resolve_stubs(
 
 /// Refuses a cross target whose runtime nothing names.
 ///
-/// The catalogue that would fetch one arrives with a later milestone, so
-/// today a target other than the host has to be told where its runtime is.
-/// Checked before the export for the same reason the stub is: it is a fault
-/// in `gleam.toml`, and finding it after `gleam export` would cost minutes.
+/// A target other than the host has to be told where its runtime comes from:
+/// `erts = "catalog"` to take it out of the prebuilt-OTP catalogue, or a
+/// directory or a tarball for one somebody unpacked. Checked before the export
+/// for the same reason the stub is: it is a fault in `gleam.toml`, and finding
+/// it after `gleam export` would cost minutes.
 ///
 /// The question is whether the target names an `erts`, not whether it has a
 /// sub-table: three of that table's four keys — `otp_variant`, `native` and
@@ -644,6 +649,97 @@ fn erts_spec_for(
     })
 }
 
+/// What the catalogue and tarball sources need, gathered once per build.
+///
+/// [`None`] when every target's runtime comes from a directory or from this
+/// machine's own OTP: resolving a cache root and asking `erl` which release it
+/// is would then be work for an answer nothing reads, and a machine with no
+/// writable cache would fail a build that needs no cache.
+struct RuntimeSources {
+    /// Where a catalogue may be read from.
+    catalog_paths: CatalogPaths,
+    /// The root of the OTP cache.
+    cache_root: PathBuf,
+    /// Whether this build may fetch, and where the bases point.
+    net: Net,
+    /// The release the shipment is compiled by.
+    host_release: u32,
+    /// Which version of OTP the build asks the catalogue for.
+    otp_version: OtpReq,
+}
+
+/// Gathers [`RuntimeSources`] when at least one target needs a cache.
+///
+/// The host release comes from the OTP that will compile the shipment, because
+/// that is what the version rule is about: a runtime older than the compiler
+/// cannot load the modules the compiler produced. It is read once, and only
+/// when a catalogue is actually going to be consulted.
+///
+/// # Errors
+///
+/// [`BundleError::CacheDir`] when nothing says where the cache is, and
+/// [`BundleError::Otp`] when the host installation cannot be found.
+fn runtime_sources(
+    opts: &BuildOptions,
+    stubs: &[TargetStub],
+) -> Result<Option<RuntimeSources>, BundleError> {
+    let mut needed = false;
+    for entry in stubs {
+        if opts.otp_root.is_none()
+            && matches!(
+                opts.erts_spec(entry.target),
+                Ok(ErtsSourceSpec::Catalog | ErtsSourceSpec::Tarball(_))
+            )
+        {
+            needed = true;
+        }
+    }
+    if !needed {
+        return Ok(None);
+    }
+
+    let dirs = crate::cache_dir::resolve(&crate::cache_dir::EnvSnapshot::from_env())?;
+    let host_release = crate::otp::discover(None)?.release;
+    let cache_root = crate::catalog::cache_root(&dirs.path);
+    Ok(Some(RuntimeSources {
+        catalog_paths: CatalogPaths {
+            explicit: std::env::var_os(crate::catalog::CATALOG_ENV_VAR)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            cache: Some(cache_root.join(crate::catalog::CATALOG_FILE)),
+        },
+        cache_root,
+        net: Net::from_vars(false, &Net::env_vars()),
+        host_release,
+        otp_version: OtpReq::Host(host_release),
+    }))
+}
+
+/// The installation whose `bin/erl` strips the staged modules.
+///
+/// [`None`] when the bundled runtime's own is the right one, which is every
+/// build for this machine. A `.beam` is portable and an emulator is not: a
+/// runtime cross-built for another target cannot run
+/// `beam_lib:strip_files/1` here — its `bin/erl` execs an emulator this kernel
+/// will not load — so the *host's* installation strips the modules, which
+/// produces the same bytes because the modules are the same modules.
+///
+/// # Errors
+///
+/// [`BundleError::Otp`] when the runtime is for another target and the host
+/// has no usable installation to strip with. A build that got this far has
+/// already run `gleam export`, so an `erl` that cannot be found here is a
+/// machine that changed under the build rather than a configuration to work
+/// around.
+fn beam_stripper(
+    erts: &crate::erts_source::ResolvedErts,
+) -> Result<Option<crate::otp::OtpInfo>, BundleError> {
+    if erts.target == Target::host() {
+        return Ok(None);
+    }
+    Ok(Some(crate::otp::discover(None)?))
+}
+
 /// Builds one artifact per target and folds them into one report.
 ///
 /// The report's own `strip`, `size_report`, `manifest` and `explain` are the
@@ -652,9 +748,12 @@ fn erts_spec_for(
 /// for each, in the order the targets were named. [`BuildReport::warnings`] is
 /// the exception and is every target's: a warning is something a build could
 /// not do, and dropping the second target's would be the silent skip
-/// `CLAUDE.md` forbids. A build with more than one target prefixes each
-/// warning with the target that raised it, so a line naming a runtime file
-/// says which artifact is missing it.
+/// `CLAUDE.md` forbids. A runtime's own warnings —
+/// [`crate::erts_source::ResolvedErts::warnings`], which carries the version
+/// guard's "further ahead than ginary has tested" — join them there rather
+/// than stopping at the recorder. A build with more than one target prefixes
+/// each warning with the target that raised it, so a line naming a runtime
+/// file says which artifact is missing it.
 ///
 /// Sequential, and every target stages into the same work root: the tree one
 /// target staged is packed and measured before the next replaces it, which is
@@ -678,13 +777,32 @@ fn build_each_target(
     let mut rows: Vec<TargetBuild> = Vec::with_capacity(stubs.len());
     let mut warnings: Vec<String> = Vec::new();
     let attributed = stubs.len() > 1;
+    let sources = runtime_sources(opts, stubs)?;
 
     for entry in stubs {
         let target = &entry.target;
         let spec = erts_spec_for(opts, *target)?;
         let erts = {
             let _phase = diag.phase("erts");
-            crate::erts_source::resolve(&spec, target)?
+            match &sources {
+                Some(sources) => crate::erts_source::resolve_in(
+                    &spec,
+                    target,
+                    &SourceContext {
+                        catalog_paths: &sources.catalog_paths,
+                        cache_root: &sources.cache_root,
+                        net: &sources.net,
+                        host_release: sources.host_release,
+                        otp_version: &sources.otp_version,
+                        variant: opts
+                            .target_config
+                            .get(&target.name())
+                            .and_then(|config| config.otp_variant.as_deref()),
+                        diag,
+                    },
+                )?,
+                None => crate::erts_source::resolve(&spec, target)?,
+            }
         };
         diag.kv(
             "erts",
@@ -712,6 +830,11 @@ fn build_each_target(
             set: &set,
         };
         let mut report = assemble_and_write(opts, &job, &entry.path, entry.len, work, diag)?;
+        // The runtime's own warnings are this target's warnings. They go in
+        // ahead of the ones the assembly raised, because a runtime a user was
+        // warned about is what every later line is about, and they take the
+        // same target attribution as everything else below.
+        report.warnings.splice(0..0, erts.warnings.iter().cloned());
         rows.extend(report.targets.iter().cloned());
         warnings.extend(
             std::mem::take(&mut report.warnings)
@@ -789,9 +912,10 @@ fn assemble_and_write(
     // payload is packed from.
     let warnings = stage_runtime_files(opts, &mut staged, diag)?;
 
+    let stripper = beam_stripper(erts)?;
     let strip_report = {
         let _phase = diag.phase("strip");
-        crate::strip::strip(staged.root(), otp, &opts.strip)?
+        crate::strip::strip(staged.root(), stripper.as_ref().unwrap_or(otp), &opts.strip)?
     };
 
     // Measured against the listing staging wrote, which still holds the
@@ -1216,9 +1340,10 @@ pub enum BundleError {
     /// runtime instead would produce an artifact that cannot start on the
     /// machine it names.
     #[error(
-        "no runtime is configured for {target}: this ginary has no OTP catalogue yet, so a \
-         cross build needs `[tools.ginary.target.\"{target}\"] erts = \"dir:<a runtime root \
-         for {target}>\"` in gleam.toml (or `tarball:<file>`, or `--otp-root`)"
+        "no runtime is configured for {target}: a cross build needs \
+         `[tools.ginary.target.\"{target}\"] erts = \"catalog\"` in gleam.toml, with a \
+         catalog that holds {target} (see `ginary otp list`), or the same table with \
+         `erts = \"dir:<a runtime root for {target}>\"`, or `tarball:<file>`, or `--otp-root`"
     )]
     CrossErtsNotConfigured {
         /// The target with no runtime named for it.

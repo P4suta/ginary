@@ -126,9 +126,17 @@ pub const EXTRA_BIN_REASON: &str =
 #[cfg(feature = "cli")]
 pub const DEFAULT_TARGETS: [&str; 1] = ["host"];
 
-/// The two values `[tools.ginary.target.<name>] otp_variant` accepts.
+/// The values `[tools.ginary.target.<name>] otp_variant` accepts.
+///
+/// The *catalogue's* variant namespace, not a linkage: `static` and `dynamic`
+/// are what a musl target's two runtimes are called, and `default` is
+/// [`crate::catalog::DEFAULT_VARIANT`], the name a target with one unnamed
+/// variant carries and the key the glibc runtimes are filed under. Every name
+/// [`crate::catalog::upstream_asset`] maps to an asset has to be one a
+/// `gleam.toml` may write down, or `CatalogError::AmbiguousVariant` would name
+/// a remedy the manifest reader refuses.
 #[cfg(feature = "cli")]
-pub const OTP_VARIANTS: [&str; 2] = ["static", "dynamic"];
+pub const OTP_VARIANTS: [&str; 3] = ["default", "dynamic", "static"];
 
 /// Why `host` and `all` may not name a per-target sub-table.
 #[cfg(feature = "cli")]
@@ -156,7 +164,10 @@ pub struct TargetConfig {
     /// Where this target's runtime comes from; see
     /// [`crate::erts_source::ErtsSourceSpec`].
     pub erts: Option<String>,
-    /// `static` or `dynamic`; recorded, and read by the catalogue milestone.
+    /// The catalogue variant this target's runtime is filed under.
+    ///
+    /// One of [`OTP_VARIANTS`], passed to `Catalog::select` by
+    /// [`crate::bundle`].
     pub otp_variant: Option<String>,
     /// Native objects this target overrides, by shipment-relative path.
     pub native: BTreeMap<String, String>,
@@ -466,6 +477,16 @@ impl ToolsConfig {
         }
         Ok(())
     }
+}
+
+/// [`OTP_VARIANTS`] as the list an error lists them in.
+#[cfg(feature = "cli")]
+fn variant_list() -> String {
+    OTP_VARIANTS
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// [`TARGET_KEYS`] as the comma-separated list an error lists them in.
@@ -1420,10 +1441,10 @@ pub enum ConfigError {
         /// What [`SpecError`] said.
         reason: String,
     },
-    /// `otp_variant` is neither `static` nor `dynamic`.
+    /// `otp_variant` is not one of [`OTP_VARIANTS`].
     #[error(
-        "{path}: [tools.ginary.target.{target}] otp_variant must be `static` or `dynamic`, not \
-         `{value}`"
+        "{path}: [tools.ginary.target.{target}] otp_variant must be one of {}, not `{value}`",
+        variant_list()
     )]
     OtpVariant {
         /// The file the value is in.

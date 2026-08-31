@@ -53,6 +53,20 @@ pub const SHARED_LOCK_BUDGET: Duration = Duration::from_millis(500);
 /// How often [`SharedLock::acquire`] retries inside [`SHARED_LOCK_BUDGET`].
 const SHARED_LOCK_POLL: Duration = Duration::from_millis(10);
 
+/// How long [`wait_exclusive`] keeps trying before it gives up.
+///
+/// Long, because what holds the lock is another process filling the same cache
+/// entry, and filling one means fetching forty megabytes and unpacking it. A
+/// caller that gave up after a few seconds would start a second download of
+/// the file it is waiting for, which is the outcome the lock exists to
+/// prevent. Bounded all the same: a holder that died without releasing — which
+/// `flock` makes impossible for a process that exits, and possible for one
+/// that hangs — must not hang every build on the machine for ever.
+pub const FILL_LOCK_BUDGET: Duration = Duration::from_secs(900);
+
+/// How often [`wait_exclusive`] retries inside [`FILL_LOCK_BUDGET`].
+const FILL_LOCK_POLL: Duration = Duration::from_millis(25);
+
 /// `<entry>/.lock`, the file both locks are taken on.
 pub fn lock_path(entry: &Path) -> PathBuf {
     entry.join(LOCK_NAME)
@@ -157,6 +171,39 @@ pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
     // locked long after the pruning that took it had finished.
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
     Some(ExclusiveLock { file, path })
+}
+
+/// Takes `LOCK_EX` on `<entry>/.lock`, waiting up to `budget` for it.
+///
+/// [`try_exclusive`] is the pruning side, where a lock that cannot be taken
+/// means "leave this entry alone". This is the filling side, where it means
+/// "somebody else is doing the work you were about to do": the right answer is
+/// to wait for them and then look again, not to skip and not to race.
+///
+/// Never blocks in the kernel. `flock` is taken with `LOCK_NB` and retried, so
+/// the budget is honoured on a machine whose holder never lets go.
+///
+/// # Errors
+///
+/// Whatever the open or the last `flock` failed with, and
+/// [`std::io::ErrorKind::WouldBlock`] when `budget` ran out with the lock
+/// still held elsewhere.
+pub fn wait_exclusive(entry: &Path, budget: Duration) -> std::io::Result<ExclusiveLock> {
+    let path = lock_path(entry);
+    let file = open_lock(&path)?;
+    let deadline = Instant::now() + budget;
+    loop {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(ExclusiveLock { file, path }),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("{} is held by another process: {error}", path.display()),
+                ));
+            }
+            Err(_) => std::thread::sleep(FILL_LOCK_POLL),
+        }
+    }
 }
 
 /// Opens `<entry>/.lock`, creating it if this is the first lock on the entry.

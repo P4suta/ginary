@@ -546,7 +546,9 @@ fn the_stub_errors_name_the_file_and_the_remedy() {
         StubError::Missing { path: path.clone() },
         StubError::NotAFile {
             path: path.clone(),
-            found: "a directory".to_owned(),
+            // The wording `describe_file_type` produces, so the snapshot is
+            // the sentence a user reads and not one this test invented.
+            found: "a directory rather than a file".to_owned(),
         },
         StubError::TooLarge {
             path: path.clone(),

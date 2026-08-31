@@ -129,7 +129,7 @@ LOG_LEVEL = "info"
 
 [tools.ginary.target.linux-aarch64-musl]   # one sub-table per target
 erts = "catalog"               # host | catalog | dir:PATH | tarball:PATH | docker:IMAGE
-otp_variant = "static"         # static | dynamic, for the musl runtimes
+otp_variant = "static"         # the catalog variant: static | dynamic | default
 ```
 
 A key ginary does not know is an error naming the key and the file: a setting the user believes
@@ -154,16 +154,18 @@ table. `--target` is repeatable and replaces the list rather than adding to it. 
 `host`, `all` — every target ginary models — or a canonical `<os>-<arch>[-<libc>]` name, and a
 target named twice is built once.
 
-**A cross build needs two things, and one of them is still manual.** The artifact for another
-machine is that machine's *stub* — a ginary of this exact version, cross-compiled — with the
-payload appended to it, and the payload holds a BEAM runtime for that machine too. The stub half
-works: see "Stubs" below. The runtime half has no catalogue yet, so a target other than the host
-has to be told where its runtime is, with `[tools.ginary.target.<name>] erts = "dir:PATH"` or a
-`tarball:`; a build that is not told refuses and quotes the table to write. An `erts` of
-`catalog` or `docker:` parses now and is refused at build time, naming the milestone it arrives
-with. A relative `dir:` or `tarball:` path is relative to the project, as `vm_args` and
-`sys_config` are. An entry of `targets` that names no target is refused where the manifest is
-read, so `ginary doctor` reports the list rather than printing a row for a build nobody can run.
+**A cross build needs two things.** The artifact for another machine is that machine's *stub* — a
+ginary of this exact version, cross-compiled — with the payload appended to it, and the payload
+holds a BEAM runtime for that machine too. The stub half is "Stubs" below; the runtime half is
+"Cross-building" below, and a target other than the host has to say which of them it wants with
+`[tools.ginary.target.<name>] erts = ...`: `catalog` to take it out of the prebuilt-OTP catalog,
+`dir:PATH` for a runtime root somebody unpacked, or `tarball:PATH` for an archive of one. A build
+that is not told refuses and quotes the table to write. An `erts` of `docker:` parses now and is
+refused at build time, naming the container-image milestone it arrives with — the same milestone
+`ginary doctor` prints for it, because both read it off the same value. A relative `dir:` or
+`tarball:` path is relative to the project, as `vm_args` and `sys_config` are. An entry of
+`targets` that names no target is refused where the manifest is read, so `ginary doctor` reports
+the list rather than printing a row for a build nobody can run.
 
 Whatever a source claims, the bundled `beam.smp` itself is read: the target, the linkage and the
 minimum glibc come out of that file, and a runtime for another target fails the build naming
@@ -210,7 +212,7 @@ target other than this machine looks for one in this order:
 4. `<cache>/stubs/<version>/<target>`, where a fetched stub will be kept.
 
 A target with no stub anywhere is refused with every path that was tried and how to make one.
-Downloading a stub from a release arrives with the catalogue milestone.
+Downloading a stub from a release is not implemented; `mise run stubs:build` is how one is made.
 
 Building them is one task, and it needs `cross` and a Docker daemon:
 
@@ -231,6 +233,68 @@ Whatever the stub came from, it has to pass every gate before a payload is appen
 identity marker, this ginary's version, this payload format, the target that was asked for, an
 ELF or PE header that agrees with the marker, and no trailer of its own — a file that already
 carries a payload is an artifact, not a stub.
+
+### Cross-building: the OTP catalog
+
+A runtime for another machine comes out of the *catalog*: one JSON document naming, per OTP
+version, per target, per variant, a `.tar.zst` with its SHA-256, its length, and the facts a
+build cannot read until it has unpacked it — the linkage, whether a NIF can be loaded, the libc
+floor. `docs/format.md` specifies the schema.
+
+**The catalog is local first.** There is no hosted one and nothing is published: the pipeline is
+`ginary otp repack`, and it runs here. One task builds the three Linux runtimes this
+repository is tested against, into `dist/otp` (roughly 130 MB of downloads, once):
+
+```console
+$ mise run stubs:build                  # once: target/stubs/ginary-stub-<version>-<target>
+$ export GINARY_STUB_DIR=$PWD/target/stubs
+$ mise run otp:repack                   # once: dist/otp/catalog.json and its tarballs
+$ ginary otp list --catalog dist/otp/catalog.json
+version  target              variant  linkage  nifs  size      cached
+29.0.5   linux-aarch64-musl  static   static   no    13.0 MiB  no
+29.0.5   linux-x86_64-gnu    default  dynamic  yes   13.1 MiB  no
+29.0.5   linux-x86_64-musl   static   static   no    12.5 MiB  no
+```
+
+Then point a target at it and build:
+
+```toml
+# gleam.toml
+[tools.ginary.target."linux-aarch64-musl"]
+erts = "catalog"
+```
+
+```console
+$ GINARY_CATALOG=$PWD/dist/otp/catalog.json ginary build --target linux-aarch64-musl
+$ docker run --rm --network none --platform linux/arm64 \
+    -v "$PWD/build/ginary/worker-linux-aarch64-musl:/app:ro" alpine:3.20 /app
+```
+
+`--catalog PATH` and `GINARY_CATALOG` name a catalog; without either, ginary reads the one
+`ginary otp update` installed at `<cache>/otp/catalog.json`, and without that the embedded one,
+which is empty and says so. The five commands are `ginary otp list`, `fetch`, `path`, `update`
+and `repack`; `list` and `path` never reach the network, and `path` prints where a runtime is or
+says which `fetch` would put it there rather than quietly downloading forty megabytes.
+
+**The static musl runtime cannot load a NIF.** Upstream publishes three Linux builds per
+architecture and the default variant for a musl target is the fully static one, which runs on any
+Linux — Alpine, a distroless image, a scratch container — because it needs no loader at all. That
+is exactly why it cannot `dlopen` anything: an application whose dependencies include a NIF (a
+`priv/lib/*.so`) needs the dynamic build, `otp_variant = "dynamic"` for a musl target or the
+`linux-*-gnu` target, and the artifact's manifest records `nif_loading` either way so that
+`ginary inspect` answers the question before a user's program does.
+
+One runtime is fetched and extracted once, however many builds ask for it at the same time: the
+fill is held under an exclusive `flock` on `<cache>/otp/.locks/<entry>/.lock`, so a second build
+waits for the first rather than racing it into the same directory.
+
+**The trust model is that nothing is taken on trust.** Every tarball is held to the `sha256` and
+the `size` its catalog entry states, whether it was fetched over HTTPS or found beside the
+catalog on disk; the upstream asset a repack starts from is held to the digest the release API
+reported for it, and that digest is recorded in the entry. And the catalog's *claims* — the
+target, the linkage, the libc — are checked against the extracted runtime's own `beam.smp` before
+anything is packaged: an entry that says `linux-aarch64-musl` and unpacks to an x86-64 emulator
+stops the build naming both sides. A catalog is an index, never evidence.
 
 ### The runtime settings
 

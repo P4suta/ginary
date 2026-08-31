@@ -30,7 +30,7 @@ build side
   gleam.rs         (A4) runs `gleam export erlang-shipment`
   otp.rs           (A1a) discovers the host OTP root, release, ERTS version
   erts_source.rs   host | directory | tarball | catalogue | docker
-  catalog.rs       the signed prebuilt-OTP catalogue
+  catalog.rs       the prebuilt-OTP catalogue, its cache and `otp repack`
   download.rs      HTTPS fetch with checksum, retry and atomic rename
   appfile.rs       (A1a) a subset of Erlang terms, enough to read a .app file
   closure.rs       (A1b) transitive closure of `applications` -> AppSet
@@ -113,9 +113,22 @@ That is the finished shape. A4 implemented the host half of it — `erts_source:
 `build/ginary/<app>` with no target suffix; see "One build, end to end" below. C2 finished the
 stub half for every target: `stub::locate` searches `--stub`, `$GINARY_STUB_DIR`, the running
 executable and the cache, and `stub::verify` proves the file is a ginary of this version, for
-this target, that reads this payload format and carries no payload of its own. The runtime half
-of a cross build is still manual — a target other than the host must name its `erts` — and
-`bundle` refuses one that does not, before the export.
+this target, that reads this payload format and carries no payload of its own. C3 finished the
+runtime half: `catalog` and `tarball:PATH` resolve through `erts_source::resolve_in`, which is
+given the cache root, the catalogue sources and the network policy that `resolve` has not, and
+`catalog.rs` fills that cache from a `catalog.json` whose entries are verified by digest and then
+checked against the emulator they unpack to. Filling one entry is held under the same advisory
+`flock` `cache.rs` takes around the payload cache — `<cache>/otp/.locks/<entry>/.lock`, beside the
+entry because the entry directory does not exist until the rename that completes it — so two
+builds racing for one runtime produce one download and one extraction. A target other than the
+host still has to *name* its `erts` — there is no default that would guess where a runtime for
+another machine comes from —
+and `bundle` refuses one that does not, before the export.
+
+`catalog.rs` also holds the pipeline that produces a catalogue, `ginary otp repack`. It is
+deliberately local: nothing is published, `dist/otp/catalog.json` is committed and the tarballs it
+names are not, and a URL with no scheme resolves against the catalogue's own directory. See
+[ADR 0013](../adr/0013-local-first-otp-catalog.md).
 
 `process.rs` exists because two callers need the same bounded child process and
 neither may hang: `doctor` probes four tools, `otp` asks `erl` for its code root.

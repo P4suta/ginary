@@ -52,6 +52,13 @@
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
+| `tests/download.rs` | one HTTPS fetch against a hand-rolled loopback server: the body written and the part file gone, a checksum and a length mismatch naming both values, a 500 retried and a 404 asked exactly once, a truncated body retried, three failures exhausting the attempts, the offline refusal that opens no socket, and the policy — the part file's name, the backoff schedule, the retryable statuses, one spelling of a digest, the base overrides and the two environment variables; and the same six questions asked of `get_text`, the release-API reader — a body back verbatim under the GitHub accept header, a 500 retried, a 404 asked once, a body over `MAX_TEXT_BYTES` refused rather than read into memory, the offline refusal naming no file, and a read that goes through the base override |
+| `tests/catalog.rs` | the catalog: every field of schema 1 and an unknown key surviving at two levels, the schema and parse errors, the three sources with first-found winning the whole file, the selection rules — the host release, an exact version, the musl default, a named variant, ambiguity and each miss listing what is there — the version guard inside `select`, URL resolution against the catalog's own directory, and the cache: the completion marker, a warm cache needing no network, the whole cold path, a markerless extraction thrown away, the offline error travelling, a tarball keyed by its own digest, and the strict extractor's four refusals over hand-built archives — a symlink, a `..` path, an absolute path and a device node, each named and each leaving no runtime behind |
+| `tests/otp_repack.rs` | the local pipeline: the six-row upstream asset table and four combinations it has none for, the selector grammar, the tag-to-version rule, the prune list against components rather than substrings, the dereference and the assertion that guards the strict extractor, and the pipeline itself over a fake upstream asset — the entry's fields, `SOURCE_DATE_EPOCH`, URLs relative to the catalog, a mislabelled asset refused before anything is written, and the injected ELF reader's error travelling; and the release API driven against a scripted server through `Net`'s base override — the digest it reported pinned into the entry, a body that does not match it refused, an asset carrying no digest refused rather than pinned to nothing, a release holding another architecture's asset, and a document that is not a release |
+| `tests/erts_source_catalog.rs` | the two sources C3 adds, driven through the injected ELF reader: a catalog entry resolved out of a warm cache with its provenance, a claim about the machine and a claim about the linkage each denied by the emulator and named on both sides, the offline error crossing both layers, a selection error surfacing as itself, and a tarball extracted under its own digest |
+| `tests/otp_cli.rs` | `ginary otp`: the list table and its `--target` and `--json` forms, an empty catalog explaining itself, `path` printing one line and never fetching, `fetch` refusing offline and naming what the catalog does hold, `update` copying bytes only after validating them, `GINARY_CATALOG`, and `repack --help` |
+| `tests/e2e_cross.rs` | four-way gated: a real cross build out of the committed catalog for `linux-x86_64-musl`, `linux-aarch64-musl` and `linux-x86_64-gnu`, each artifact run in a container with no Erlang and no network, the aarch64 row behind a binfmt probe and the glibc row on the oldest Debian its own catalog entry allows |
+| `tests/smoke_matrix.rs` | the C3 scaffolding held against the repository: the smoke-matrix script committed, executable, probing before it installs a binfmt handler and printing a PASS/FAIL table; the two mise tasks; `git check-ignore` proving the catalog committed and the tarballs not; and the four documents — the ADR and its index entry, the catalog schema in `docs/format.md`, the README's quickstart and caveats, and this table |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
@@ -114,6 +121,8 @@ reason:
 | `tests/crashdump.rs` | one `erl` run that writes a real `erl_crash.dump`, so the parser is held against a file its author did not write | gated on `require_tools(&["erl"])`; the recipe is `erl -noshell -env ERL_CRASH_DUMP <tmp>/dump -eval 'spawn(fun() -> exit(kaboom) end), timer:sleep(100), erlang:halt("kaboom", [{flush,true}]).'`, which exits 1 and leaves a whole dump ending in `=end` |
 | `tests/doctor.rs`, `tests/verify.rs` | the host OTP's `crypto` NIF, and one real `ginary build` verified end to end | both gated on `require_tools`; `tests/verify.rs` also reads a shipment named by `GINARY_TEST_ARTIFACT` when one is set, and reports a skip when it is not |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
+| `tests/e2e_cross.rs` | the real `gleam` and `erl` through `ginary build --target`, and `docker run` for three images | gated four ways, each absence a printed skip naming the task that produces it: `require_tools(&["gleam", "erl", "docker"])`, `dist/otp/catalog.json` (`mise run otp:repack`), a cross-built stub (`mise run stubs:build`), and for the aarch64 row a `docker run --platform linux/arm64` probe. The build runs under `BUILD_BUDGET` (900 s) and each container under `RUN_BUDGET` (180 s), with `--network none` so an artifact that fetched anything at run time would fail rather than pass |
+| `tests/smoke_matrix.rs` | `git check-ignore`, and nothing else | gated on `require_tools(&["git"])`; every other test in the file reads committed files |
 | `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure too. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
@@ -353,6 +362,44 @@ Windows toolchain here, and the only fields `check_object` reads out of a PE are
 the COFF machine. `cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
 a real cross-built stub, and it follows the `require_tools` rule: a printed skip, unless
 `GINARY_REQUIRE_TOOLCHAIN=1` says the file was supposed to be there.
+
+`tests/common/http.rs` is one of the two C3 added, and it exists because four of the claims about
+`src/download.rs` are properties of a *server* and none of them can be written down as a file: a
+body that hashes to the wrong digest, a 500 that becomes a 200 on the second ask, a 404 that must
+*not* be asked again, and a connection that dies mid-body. `TestServer::start` takes a map of path
+to a list of `Reply` values, answers them in order and then repeats the last one for ever, and
+records every request — so a test asserts on *how many times* the client asked as readily as on
+what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has three
+shapes: `Body` with a status and a `Content-Length` that matches, `Truncated` with a
+`Content-Length` that promises more than is written before the close, and `Hangup`, which accepts
+the connection and writes nothing. It binds `127.0.0.1:0` and reports the port it was given, so
+any number of tests run in parallel without agreeing on anything, and `wait_for_requests` is
+bounded by `WAIT_BUDGET` (10 s) so a stalled client is a failed assertion rather than a hung test
+binary. It is hand-rolled rather than a dependency and it is the smallest server those claims
+need: HTTP/1.1, `GET` only, one connection at a time, no chunking, no ranges, no keep-alive — and
+**no read timeout**, so a client that connects and never sends a request line stalls the serving
+thread until the test binary exits. Nothing ginary sends does that; a helper that grew one would
+need one.
+
+`tests/common/catalog.rs` is the other, and it builds the three fixtures the catalogue half needs.
+`CatalogBuilder` assembles a `catalog.json` out of the schema types and serialises it with
+`serde_json` — deliberately **not** through `Catalog::to_json`, because a test that wrote its
+fixture with the writer it is checking would pass whatever the writer did; it is the same rule
+`tests/common/payload.rs` follows when it writes tar headers by hand. `static_variant` and
+`gnu_variant` are the two filled-in entries, taking the digest and the length from the caller
+because those have to be the tarball's real ones for anything downstream to verify.
+`runtime_tarball` packs a `FakeOtp` root as one zstd stream, which is what `ensure_otp` is handed;
+the pipeline's own packing rules — path order, `mtime` 0, `uid`/`gid` 0 — are asserted against
+`catalog::pack_runtime` itself in
+`tests/regressions/c3_a_repacked_runtime_carried_a_non_zero_mtime.rs` rather than reproduced in
+the fixture. `FakeUpstream` is what `ginary otp repack` reads: a `FakeOtp` tree wrapped in a
+top-level directory and gzipped, which is the shape `gleam-community/erlang-linux-builds`
+publishes, with `extras` for planting the fat a prune is supposed to strip. `plant_cached_otp` is
+the other end — an extraction that already happened, `.meta.json` and all — so a test can assert
+that a warm cache is used rather than re-fetched. The runtime inside every one of them is a
+`FakeOtp`, whose `beam.smp` is a shell script, which is exactly the shape the *unseamed*
+inspection refuses and is why the catalogue tests drive `resolve_in_with` and `repack_with` with
+the ELF reader injected.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,

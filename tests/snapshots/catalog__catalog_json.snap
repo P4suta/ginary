@@ -1,0 +1,65 @@
+---
+source: tests/catalog.rs
+expression: text
+---
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-31T00:00:00Z",
+  "otp": {
+    "29.0.5": {
+      "erts_vsn": "17.0.5",
+      "otp_release": 29,
+      "targets": {
+        "linux-x86_64-gnu": {
+          "variants": {
+            "default": {
+              "url": "otp-29.0.5-linux-x86_64-gnu.tar.zst",
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "size": 40000000,
+              "linkage": "dynamic",
+              "nif_loading": true,
+              "libc": {
+                "kind": "gnu",
+                "min": "2.31"
+              },
+              "openssl": "3.5.4",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-x64-glibc.tar.gz",
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+              },
+              "built_at": "2026-08-31T00:00:00Z"
+            }
+          }
+        },
+        "linux-x86_64-musl": {
+          "variants": {
+            "static": {
+              "url": "otp-29.0.5-linux-x86_64-musl-static.tar.zst",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "size": 41943040,
+              "linkage": "static",
+              "nif_loading": false,
+              "libc": {
+                "kind": "none"
+              },
+              "openssl": "3.5.4",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-x64.tar.gz",
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "built_at": "2026-08-31T00:00:00Z"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "generated_at": "2025-08-31T00:00:00Z",
+  "otp": {
+    "29.0.5": {
+      "erts_vsn": "17.0.5",
+      "otp_release": 29,
+      "targets": {
+        "linux-aarch64-musl": {
+          "variants": {
+            "static": {
+              "url": "otp-29.0.5-linux-aarch64-musl-static.tar.zst",
+              "sha256": "81cf66a7ccbae9439f15710d1091f9f97a646ab3a0f788198cbf9323acdd3a9f",
+              "size": 13639037,
+              "linkage": "static",
+              "nif_loading": false,
+              "libc": {
+                "kind": "none"
+              },
+              "openssl": "3.5.7",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-arm64.tar.gz",
+                "sha256": "ff1a998edfc55b6924d0757aaf38feb37c1a48c50d7c10f236e782cbdc3cfcdf"
+              },
+              "built_at": "2025-08-31T00:00:00Z"
+            }
+          }
+        },
+        "linux-x86_64-gnu": {
+          "variants": {
+            "default": {
+              "url": "otp-29.0.5-linux-x86_64-gnu-default.tar.zst",
+              "sha256": "a482a56aad9aeb95d058825e28d9887a2fc894beb58e326c88bc13671fc00e56",
+              "size": 13727025,
+              "linkage": "dynamic",
+              "nif_loading": true,
+              "libc": {
+                "kind": "gnu",
+                "min": "2.36"
+              },
+              "openssl": "3.0.20",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-x64-glibc.tar.gz",
+                "sha256": "f4cb8e47e5243185702e1a76b5d5114269db9965d4b6599d3c3e810ab349ed4d"
+              },
+              "built_at": "2025-08-31T00:00:00Z"
+            }
+          }
+        },
+        "linux-x86_64-musl": {
+          "variants": {
+            "static": {
+              "url": "otp-29.0.5-linux-x86_64-musl-static.tar.zst",
+              "sha256": "de29d75d4c8ec1dc55d2655d7bf4358fc12b812b0945671a8c4de2d6dbbb68b1",
+              "size": 13155283,
+              "linkage": "static",
+              "nif_loading": false,
+              "libc": {
+                "kind": "none"
+              },
+              "openssl": "3.5.7",
+              "jit": true,
+              "excluded_apps": [],
+              "upstream": {
+                "repo": "gleam-community/erlang-linux-builds",
+                "tag": "OTP-29.0.5",
+                "file": "erlang-29.0.5-x64.tar.gz",
+                "sha256": "1f7d07cbc92d68cbd0233b0cdb175c66ff47281e9b3496209623b273a1962a94"
+              },
+              "built_at": "2025-08-31T00:00:00Z"
+            }
+          }
+        }
+      }
+    }
+  }
+}

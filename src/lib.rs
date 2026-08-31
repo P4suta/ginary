@@ -99,6 +99,13 @@
 //! - [`stub`] — where the stub for a target comes from, and the gates it has
 //!   to pass before a payload is appended to it.
 //!
+//! Milestone C3 adds the two modules a cross-target build gets its runtime
+//! from, and the local pipeline that fills them:
+//!
+//! - [`download`] — one HTTPS fetch, hashed, retried and renamed into place;
+//! - [`catalog`] — the prebuilt-OTP catalogue, the cache it fills, and
+//!   `ginary otp repack`, which produces both without publishing anything.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -117,6 +124,8 @@ pub mod cache;
 pub mod cache_dir;
 pub mod cache_lock;
 #[cfg(feature = "cli")]
+pub mod catalog;
+#[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "cli")]
 pub mod closure;
@@ -126,6 +135,8 @@ pub mod crashdump;
 pub mod diag;
 #[cfg(feature = "cli")]
 pub mod doctor;
+#[cfg(feature = "cli")]
+pub mod download;
 #[cfg(feature = "cli")]
 pub mod elf;
 pub mod error;

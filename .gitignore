@@ -1,7 +1,13 @@
 /target/
 /.cache/
 /build/
-/dist/
+# The repack pipeline writes 40 MB tarballs and one small catalog into dist/otp.
+# The catalog is the reproducible record of what the pipeline produced and is
+# committed; the tarballs it names, and everything else under dist/, are not.
+/dist/*
+!/dist/otp/
+/dist/otp/*
+!/dist/otp/catalog.json
 erl_crash.dump
 tests/fixtures/*/build/
 *.log

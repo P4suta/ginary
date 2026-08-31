@@ -937,6 +937,28 @@ fn probe_target(
     };
     let erts = spec.label();
 
+    // A catalogue entry and a tarball resolve, and both are *described* here
+    // rather than performed, for the reason a `dir:` is: consulting a catalogue
+    // means a cache and possibly a fetch, and `doctor` describes the machine
+    // rather than performing half of a build.
+    if let ErtsSourceSpec::Catalog | ErtsSourceSpec::Tarball(_) = spec {
+        return TargetProbe {
+            name,
+            detail: Some(match &spec {
+                ErtsSourceSpec::Tarball(path) => {
+                    format!("read from {} at build time", path.display())
+                }
+                _ => "read from the OTP catalog at build time; `ginary otp list` says what it \
+                      holds"
+                    .to_owned(),
+            }),
+            erts,
+            resolvable: true,
+            linkage: None,
+            libc_min: None,
+        };
+    }
+
     if let Some(milestone) = spec.milestone() {
         return TargetProbe {
             name,

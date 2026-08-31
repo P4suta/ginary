@@ -197,44 +197,43 @@ fn the_label_of_a_source_is_the_spelling_it_was_written_as() {
     );
 }
 
-// ------------------------------------------- the three that are not here --
+// ------------------------- the two that need a context, and the one that --
+// ---------------------------------------------------------- is not here --
 
 #[test]
-fn a_tarball_source_is_refused_and_names_the_milestone_it_arrives_with() {
+fn a_tarball_source_resolved_without_a_context_says_it_needs_one() {
     let dir = tempdir();
     let spec = ErtsSourceSpec::Tarball(dir.path().join("otp.tar.zst"));
 
     let error = resolve_facts(&spec, &Target::host(), gnu_facts())
-        .expect_err("a tarball is not readable yet");
+        .expect_err("a tarball fills a cache, and this entry point has no cache root");
 
     assert!(
-        matches!(
-            &error,
-            ErtsError::NotYetAvailable { spec: written, milestone }
-                if written == &spec.label() && *milestone == "catalog"
-        ),
+        matches!(&error, ErtsError::NeedsContext { spec: written } if written == &spec.label()),
         "{error:?}"
     );
     assert!(
-        error
-            .to_string()
-            .contains("arrives with the catalog milestone"),
-        "the sentence has to say which milestone: {error}"
+        error.to_string().contains("needs a cache root"),
+        "the sentence says what is missing rather than naming a milestone: {error}"
+    );
+    assert!(
+        spec.milestone().is_none(),
+        "and the source is not one that is still to come"
     );
 }
 
 #[test]
-fn a_catalog_source_is_refused_and_names_the_milestone_it_arrives_with() {
+fn a_catalog_source_resolved_without_a_context_says_it_needs_one() {
     let error = resolve_facts(&ErtsSourceSpec::Catalog, &Target::host(), gnu_facts())
-        .expect_err("the catalogue is not here yet");
+        .expect_err("the catalogue needs a catalogue, which this entry point has not got");
 
     assert!(
-        matches!(
-            &error,
-            ErtsError::NotYetAvailable { spec, milestone }
-                if spec == "catalog" && *milestone == "catalog"
-        ),
+        matches!(&error, ErtsError::NeedsContext { spec } if spec == "catalog"),
         "{error:?}"
+    );
+    assert!(
+        !error.to_string().contains("milestone"),
+        "a source that shipped does not arrive with a milestone: {error}"
     );
 }
 
@@ -248,9 +247,24 @@ fn a_docker_source_is_refused_and_names_the_milestone_it_arrives_with() {
     assert!(
         matches!(
             &error,
-            ErtsError::NotYetAvailable { spec: written, .. } if written == "docker:erlang:29-alpine"
+            ErtsError::NotYetAvailable { spec: written, milestone }
+                if written == "docker:erlang:29-alpine" && *milestone == "container image"
         ),
-        "{error:?}"
+        "one milestone, and it is the one `milestone()` reports: {error:?}"
+    );
+    assert_eq!(
+        spec.milestone(),
+        Some("container image"),
+        "which is what `ginary doctor` prints for the same value"
+    );
+    let sentence = error.to_string();
+    assert!(
+        sentence.contains("arrives with the container image milestone"),
+        "the rendered sentence names it: {sentence}"
+    );
+    assert!(
+        sentence.contains("`tarball:PATH` and `catalog` are available today"),
+        "and does not say the two sources C3 shipped are still to come: {sentence}"
     );
 }
 

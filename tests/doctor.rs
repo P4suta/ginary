@@ -539,9 +539,9 @@ fn sample_probes() -> Vec<TargetProbe> {
         },
         TargetProbe {
             name: "linux-aarch64-musl".to_owned(),
-            erts: "catalog".to_owned(),
+            erts: "docker:erlang:29-alpine".to_owned(),
             resolvable: false,
-            detail: Some("arrives with the catalog milestone".to_owned()),
+            detail: Some("arrives with the container image milestone".to_owned()),
             linkage: None,
             libc_min: None,
         },
@@ -571,6 +571,7 @@ fn resolved_host_runtime() -> ResolvedErts {
         libc_min: Some("2.38".to_owned()),
         nif_loading: true,
         provenance: "host:/opt/otp-29".to_owned(),
+        warnings: Vec::new(),
     }
 }
 
@@ -628,6 +629,40 @@ fn a_host_whose_own_installation_cannot_be_read_is_a_row_that_says_not_yet() {
 
 #[test]
 fn a_target_whose_source_is_not_here_yet_is_a_row_that_says_so() {
+    // `docker:` is the one source still to come. It was `catalog` until C3
+    // implemented that one; the claim is the same claim, held to a source that
+    // is still ahead rather than to one that has arrived.
+    let mut config = BTreeMap::new();
+    config.insert(
+        "linux-aarch64-musl".to_owned(),
+        TargetConfig {
+            erts: Some("docker:erlang:29-alpine".to_owned()),
+            ..TargetConfig::default()
+        },
+    );
+
+    let probes = doctor::probe_targets(&["linux-aarch64-musl".parse().expect("a target")], &config);
+
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(probes[0].erts, "docker:erlang:29-alpine");
+    assert!(
+        !probes[0].resolvable,
+        "a runtime out of a container image is not here yet: {probes:?}"
+    );
+    assert!(
+        probes[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("milestone")),
+        "the row says when it will resolve: {probes:?}"
+    );
+}
+
+#[test]
+fn a_catalog_target_is_a_row_that_resolves_without_the_catalog_being_read() {
+    // The rule a `dir:` follows, for the same reason: consulting a catalogue
+    // means a cache and possibly a forty-megabyte fetch, and `doctor`
+    // describes the machine rather than performing half of a build.
     let mut config = BTreeMap::new();
     config.insert(
         "linux-aarch64-musl".to_owned(),
@@ -642,15 +677,19 @@ fn a_target_whose_source_is_not_here_yet_is_a_row_that_says_so() {
     assert_eq!(probes.len(), 1, "{probes:?}");
     assert_eq!(probes[0].erts, "catalog");
     assert!(
-        !probes[0].resolvable,
-        "the catalogue is not here yet: {probes:?}"
+        probes[0].resolvable,
+        "C3 implemented the catalog, so the row may not say `not yet`: {probes:?}"
     );
     assert!(
         probes[0]
             .detail
             .as_deref()
-            .is_some_and(|detail| detail.contains("catalog milestone")),
-        "the row says when it will resolve: {probes:?}"
+            .is_some_and(|detail| detail.contains("otp list")),
+        "and it names the command that says what the catalog holds: {probes:?}"
+    );
+    assert_eq!(
+        probes[0].linkage, None,
+        "nothing was read, so nothing says how it is linked: {probes:?}"
     );
 }
 

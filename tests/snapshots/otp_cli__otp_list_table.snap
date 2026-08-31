@@ -1,0 +1,7 @@
+---
+source: tests/otp_cli.rs
+expression: stdout
+---
+version  target             variant  linkage  nifs  size      cached
+29.0.5   linux-x86_64-gnu   default  dynamic  yes   38.0 MiB  no
+29.0.5   linux-x86_64-musl  static   static   no    40.0 MiB  yes

@@ -14,10 +14,13 @@ pub mod bounded;
 #[cfg(feature = "cli")]
 pub mod built;
 pub mod cachefs;
+#[cfg(feature = "cli")]
+pub mod catalog;
 pub mod erl;
 #[cfg(feature = "cli")]
 pub mod fake_otp;
 pub mod fixture;
+pub mod http;
 pub mod payload;
 pub mod project;
 pub mod repack;

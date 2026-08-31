@@ -180,9 +180,15 @@ pub fn locate(target: &Target, opts: &StubOpts) -> Result<(PathBuf, StubSource),
 /// Two answers rather than a list, because the caller's `metadata` follows
 /// symlinks: what is left after "a directory" is a device, a socket or a fifo,
 /// and naming which one would not change what the reader has to do about it.
+///
+/// Each answer carries its own clause rather than sharing one. A directory is
+/// a kind of thing, so it contrasts with a file — "a directory rather than a
+/// file"; the other answer is already the contrast, and appending the same
+/// clause to it produced "not a regular file rather than a file", which says
+/// one thing twice and reads as a contradiction.
 fn describe_file_type(kind: &std::fs::FileType) -> &'static str {
     if kind.is_dir() {
-        "a directory"
+        "a directory rather than a file"
     } else {
         "not a regular file"
     }
@@ -430,7 +436,10 @@ pub enum StubError {
     NotAFile {
         /// The path, as it was given.
         path: PathBuf,
-        /// What it is instead, as the tail of a sentence.
+        /// What it is instead, as the whole tail of the sentence that follows
+        /// `the stub <path> is` — the contrast with a regular file belongs to
+        /// this string rather than to the sentence around it, because only one
+        /// of the two answers needs it.
         found: String,
     },
     /// The file is larger than [`MAX_STUB_BYTES`].
@@ -551,7 +560,7 @@ impl fmt::Display for StubError {
             ),
             Self::NotAFile { path, found } => write!(
                 f,
-                "the stub {} is {found} rather than a file; `--stub` names the stub binary itself",
+                "the stub {} is {found}; `--stub` names the stub binary itself",
                 path.display()
             ),
             Self::TooLarge { path, len, cap } => write!(

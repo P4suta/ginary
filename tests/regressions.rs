@@ -128,6 +128,9 @@ mod c1_a_non_utf8_output_path_lost_its_suffix;
 #[path = "regressions/c1_a_runtime_that_could_not_be_read_still_resolved.rs"]
 mod c1_a_runtime_that_could_not_be_read_still_resolved;
 #[cfg(feature = "cli")]
+#[path = "regressions/c2_a_special_file_stub_said_not_a_regular_file_rather_than_a_file.rs"]
+mod c2_a_special_file_stub_said_not_a_regular_file_rather_than_a_file;
+#[cfg(feature = "cli")]
 #[path = "regressions/c2_a_stub_that_was_a_directory_was_not_there.rs"]
 mod c2_a_stub_that_was_a_directory_was_not_there;
 #[cfg(feature = "cli")]
@@ -139,3 +142,30 @@ mod c2_the_artifact_never_had_to_use_the_stub;
 #[cfg(feature = "cli")]
 #[path = "regressions/c2_the_pe_gate_was_never_exercised.rs"]
 mod c2_the_pe_gate_was_never_exercised;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_catalog_release_warning_reached_only_the_trace.rs"]
+mod c3_a_catalog_release_warning_reached_only_the_trace;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_docker_source_named_the_catalog_milestone.rs"]
+mod c3_a_docker_source_named_the_catalog_milestone;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_foreign_native_left_the_strip_report_silent.rs"]
+mod c3_a_foreign_native_left_the_strip_report_silent;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_hard_wrapped_message_ran_its_words_together.rs"]
+mod c3_a_hard_wrapped_message_ran_its_words_together;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_repacked_runtime_carried_a_non_zero_mtime.rs"]
+mod c3_a_repacked_runtime_carried_a_non_zero_mtime;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_a_variant_the_catalog_names_was_refused_by_the_config.rs"]
+mod c3_a_variant_the_catalog_names_was_refused_by_the_config;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_otp_update_truncated_the_catalog_it_replaced.rs"]
+mod c3_otp_update_truncated_the_catalog_it_replaced;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_the_not_cached_remedy_dropped_the_flags_it_was_given.rs"]
+mod c3_the_not_cached_remedy_dropped_the_flags_it_was_given;
+#[cfg(feature = "cli")]
+#[path = "regressions/c3_the_otp_cache_was_filled_without_a_lock.rs"]
+mod c3_the_otp_cache_was_filled_without_a_lock;
