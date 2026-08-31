@@ -18,6 +18,7 @@ pub mod fake_otp;
 pub mod fixture;
 pub mod payload;
 pub mod project;
+pub mod repack;
 pub mod script;
 pub mod snapshot;
 pub mod tools;

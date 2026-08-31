@@ -1,0 +1,17 @@
+---
+source: tests/verify.rs
+expression: report.render_text()
+---
+payload:  ok
+files:    9 checked against the index
+objects:  1
+
+path                     machine  class  glibc  needed
+lib/hello/priv/bin/tool  x86_64   64     2.38   libc.so.6, libssl.so.3
+
+issues:
+  lib/hello/priv/lib/nif.so: built for aarch64, and the artifact targets x86_64
+  lib/hello/priv/bin/tool: needs `libssl.so.3`, which the artifact does not carry
+  lib/hello/priv/greeting.txt: sha256 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc, and the index says bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  lib/hello/ebin/extra.beam: in the payload and not in the index
+  lib/hello/ebin/gone.beam: in the index and not in the payload

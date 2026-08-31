@@ -174,6 +174,10 @@ fn the_json_report_describes_the_file_that_is_actually_on_disk() {
         Some(1),
         "the schema names its own version: {report}"
     );
+    assert!(
+        report.get("sbom").is_none(),
+        "a build that was not asked for a bill of materials names none: {report}"
+    );
     let number = |key: &str| {
         report
             .get(key)

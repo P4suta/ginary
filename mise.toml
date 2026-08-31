@@ -3,6 +3,10 @@
 [tools]
 gleam = "1.18.1"
 erlang = "29.0.5"
+# Only `mise run formal` needs it: TLC is a Java program, and the alternative
+# to declaring the JDK here is a model-checking task that works on whichever
+# machine happens to have one.
+java = "temurin-25"
 
 [tasks.fmt]
 description = "Format all Rust sources"
@@ -127,6 +131,47 @@ cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
 rm -rf "$work/hello_ffi/build"
 cd "$work/hello_ffi"
 cargo run --quiet --manifest-path "$MISE_PROJECT_ROOT/Cargo.toml" -- build
+"""
+
+[tasks.formal]
+description = "Model-check formal/Cache.tla with TLC"
+# `tla2tools.jar` is not something mise installs, so the task fetches it once
+# into `.cache/tla/` and checks it against a pinned digest before it runs a
+# line of it: a jar fetched over the network without a digest is a jar nobody
+# checked. Removing the file is how you take a new version — the digest below
+# has to move with it.
+#
+# TLC's `-deadlock` flag *disables* deadlock checking ("if specified DO NOT
+# CHECK FOR DEADLOCK"), so it is deliberately not passed: this model has no
+# terminal state — every phase a launcher can be in has an action out of it,
+# and a holding pruner always has its removal — and turning the check off
+# would be giving up an invariant rather than adding one.
+#
+# `-metadir` keeps TLC's state directory out of `formal/`, which holds the
+# model and its configuration and nothing else.
+run = """
+set -eu
+root="${MISE_PROJECT_ROOT:-$PWD}"
+cache="$root/.cache/tla"
+jar="$cache/tla2tools.jar"
+url="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+sha256="936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+
+mkdir -p "$cache"
+if [ ! -f "$jar" ]; then
+  echo "formal: fetching $url"
+  curl -sSfL --retry 3 -o "$jar.part" "$url"
+  mv "$jar.part" "$jar"
+fi
+printf '%s  %s\\n' "$sha256" "$jar" | sha256sum -c - > /dev/null || {
+  echo "formal: $jar is not the pinned build; delete it and run again" >&2
+  exit 1
+}
+
+java -XX:+UseParallelGC -jar "$jar" \
+  -workers auto \
+  -metadir "$cache/states" \
+  "$root/formal/Cache.tla"
 """
 
 [tasks.check]

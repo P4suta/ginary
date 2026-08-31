@@ -15,7 +15,7 @@ nothing today.
 | `GINARY_SUPERVISE=1` | implemented | Spawns the runtime and waits instead of calling `execve`, which is the code path Windows will use anyway. The exit code is mirrored; a child killed by a signal exits `128 + signo`. Records the exit status, the signal and the elapsed time, and if an `erl_crash.dump` appeared during the run, prints its `Slogan` line. |
 | `GINARY_CMD=<command>` | implemented | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags, and one of five values. `directory` prints the cache entry the artifact would use and creates nothing; `extract-only` extracts and prints the entry without launching; `inspect` prints the manifest, the payload geometry and the digest as one JSON object; `selftest` extracts, preflights and starts the runtime with `-eval erlang:halt(0)` and no `-extra`, printing `extract:`, `preflight:` and `run:` with `PASS` or `FAIL` and exiting 0 or 1; `uninstall` removes every cache entry of this application that nobody holds, prints what it removed and what it kept and why, and exits 0 even when it kept something. Any other value is a usage error and exits 2. |
 | `GINARY_ERL_FLAGS` | implemented | Extra emulator flags for one run, split on ASCII whitespace and placed after the manifest's own flags and before `-eval`. |
-| `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `launcher:panic` (panic on the launcher path, so the panic hook has something to catch), `pack:fail` (the *builder* stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact). |
+| `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `before-lock` (the cache entry is removed between the preflight and the shared lock, which is what a prune that won the race leaves behind), `launcher:panic` (panic on the launcher path, so the panic hook has something to catch), `pack:fail` (the *builder* stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact). |
 | `GINARY_PRUNE_DAYS=<n>` | implemented | How many days an unused cache entry of the running application may live before the next launch prunes it. Defaults to 14; `0` turns pruning off for that run. A value that is not a count of days falls back to the default rather than failing a launch: a misspelt housekeeping preference must not stop an application from starting. |
 | `GINARY_OFFLINE=1` | planned | The builder refuses to reach the network and lists what it would have fetched. |
 | `GINARY_REQUIRE_TOOLCHAIN=1` | implemented (convention) | Turns a skipped toolchain-gated test into a failure. See [testing.md](testing.md). |
@@ -96,16 +96,45 @@ $ ginary doctor
 host target: linux-x86_64-gnu
 rustc/cargo: not required (neither ginary nor its artifacts need a Rust toolchain)
 cache dir: /home/user/.cache/ginary (from HOME)
+cache writable: yes
+cache executable: yes
 gleam: 1.18.1 (/usr/local/bin/gleam)
 erl: OTP 29, erts 17.0.5 (/usr/local/bin/erl)
 strip: 2.42 (/usr/bin/strip)
 docker: not found
+otp: 29.0.5 (release 29, erts 17.0.5)
+otp root: /opt/otp/lib/erlang
+crypto: /opt/otp/lib/erlang/lib/crypto-5.9.2/priv/lib/crypto.so
+crypto needs: libc.so.6
+crypto note: nothing beyond a C runtime, so this OTP's OpenSSL is linked in statically; ...
+
+project: my_gleam_app 1.0.0 (/home/user/src/my_gleam_app)
+shipment: /home/user/src/my_gleam_app/build/erlang-shipment (412 seconds old)
+[tools.ginary]: read
 ```
 
+Three of those lines are the ones a failing machine is diagnosed from.
+
+- **`cache writable` and `cache executable`** are a real probe, not a permission check: `doctor`
+  creates a file in the resolved cache directory, chmods it 0755 and tries to spawn it, then
+  removes it. `access(2)` reports the mode bits and says nothing about the mount, and a cache on
+  a `noexec` filesystem is the failure users actually hit — it is exit code 125 at run time. A
+  failure prints what the operating system said, verbatim, and the `GINARY_CACHE_DIR` hint.
+- **`crypto needs`** is the portability floor of every artifact built on this machine. An OTP
+  built against a *static* OpenSSL leaves a `crypto.so` that needs nothing but a C runtime, and
+  that is what lets an artifact start on a machine with no `libssl` of its own. One that needs
+  `libcrypto.so.3` produces artifacts that will not start without it.
+- **The project block** appears only when `doctor` is run inside a Gleam project. It reports the
+  name and version, the exported shipment and its age, whether `[tools.ginary]` parses — the
+  parser's own message, verbatim, because serde names the key and a paraphrase would lose it —
+  and a table of every ELF under the shipment's `priv` directories, flagged when its machine is
+  not this host's.
+
 `ginary doctor --json` prints the same information as an object with `format_version`,
-`host_target`, `rustc_required`, `cache_dir`, `cache_dir_source`, `cache_dir_error` and a
-`tools` array of `{name, found, version, path}`. Each probe is killed after ten seconds, so a
-hung `docker` cannot hang `doctor`; the tool is then reported as found with no version.
+`host_target`, `rustc_required`, `cache_dir`, `cache_dir_source`, `cache_dir_error`,
+`cache_probe`, `otp` (with its `crypto`), `project` and a `tools` array of
+`{name, found, version, path}`. Each tool probe is killed after ten seconds, so a hung `docker`
+cannot hang `doctor`; the tool is then reported as found with no version.
 
 `doctor` never fails. A missing tool is information, not an error, and the exit status stays 0.
 
@@ -275,11 +304,96 @@ To keep the intermediate tree instead:
 $ ginary stage --out /tmp/stage ...
 ```
 
-## Reading a crash dump (planned)
+## Reading a crash dump
 
 The launcher points `ERL_CRASH_DUMP` at the application's cache directory unless the user set
-it, so a crash never litters the working directory. `ginary crashdump <path>` summarises the
-`Slogan`, the system version and the largest processes.
+it, so a crash never litters the working directory. `ginary crashdump <path>` summarises it.
+
+```console
+$ ginary crashdump ~/.cache/ginary/my_gleam_app/erl_crash.dump
+dump version:    0.5
+date:            Mon Aug 31 11:52:30 2026
+slogan:          kaboom
+system version:  Erlang/OTP 29 [erts-17.0.5] [source] [64-bit] [smp:8:8] [jit:ns]
+taints:          crypto, asn1rt_nif
+processes:       43
+truncated:       no
+
+heap  pid       name                    initial call
+6772  <0.44.0>  -                       erlang:apply/2
+4185  <0.45.0>  application_controller  application_controller:start/1
+```
+
+The `slogan` is why the runtime died and is the first thing to read. `taints` lists the NIFs and
+drivers that were loaded, which is where to look when the answer is a segfault rather than an
+Erlang error. The table is the five largest processes by heap, in words, which is where to look
+when the answer is memory.
+
+Two properties of the reader matter when the dump is a real one. It is never read into memory —
+a dump from a runtime that died of memory exhaustion is routinely larger than the machine it is
+being read on, so the file is streamed a line at a time, a single line contributes at most 64 KB
+to any value, and the top processes are kept in a list of five rather than collected and sorted.
+And a dump that stops mid-section is summarised rather than refused: a runtime killed while
+writing its dump leaves exactly that, it is the case a reader most needs, and `truncated: yes`
+says so. `--json` gives the same fields as an object.
+
+## `verify`, and how it differs from `inspect --verify`
+
+`ginary inspect --verify` streams the payload past a hasher and compares the result with the
+trailer. That is the check the launcher itself makes, it costs one pass, and it answers exactly
+one question: are these the bytes ginary wrote?
+
+`ginary verify` is the deep check, and it exists because a payload whose digest matches can
+still be wrong.
+
+```console
+$ ginary inspect --verify ./my_gleam_app
+...
+verify: ok
+$ ginary verify ./my_gleam_app
+payload:  ok
+files:    248 checked against the index
+objects:  6
+...
+issues:
+  lib/hello/priv/lib/nif.so: needs `libssl.so.3`, which the artifact does not carry
+$ echo $?
+1
+```
+
+It streams the payload a second time and, per file:
+
+- hashes it against `ginary.index.json` — *every* file, not only the native ones, so an artifact
+  whose index does not describe what it carries is a finding rather than a surprise at run time
+  (`IndexMismatch`), as is a file the index does not name (`IndexOrphan`) or an index row naming
+  nothing (`IndexMissing`);
+- reads it into memory only when its first bytes are the ELF magic, and only up to 100 MB, and
+  then asks `src/elf.rs` what it is: a machine that is not the one the manifest targets is
+  `MachineMismatch`, and a `DT_NEEDED` outside the allowlist in `src/verify.rs` is
+  `UnexpectedNeeded` — a library the artifact expects a stranger's machine to already have. A
+  file that begins with the magic and does not parse as an ELF is `UnreadableObject`, because a
+  file that looks like native code and is not readable as native code is the reader's decision
+  and not the verifier's.
+
+It also checks *where each entry lands* and what it *is*, which are the two rules
+`payload::unpack` applies and a report has to apply too. An entry whose name is absolute, holds
+`..`, or normalises to nothing is `UnsafePath` — `payload::destined_path` is the shared rule —
+and it is raised before the index is consulted, so an escaping entry counts towards neither
+`files_checked` nor `IndexOrphan`. The kind check is by position rather than by name:
+`ginary.json` and `ginary.index.json` are entries 0 and 1; an entry after them landing on either
+name — as the name itself or as a directory holding a file — is `ReservedEntry`, which is the
+payload `payload::unpack` refuses outright. An entry that is neither a regular file nor a
+directory is `UnsupportedEntry`, naming what it is instead. A directory entry is the one thing
+passed over: `docs/format.md` permits one and `ginary.index.json` lists files only, so there is
+nothing to check it against.
+
+Nothing is extracted and nothing is run, so `verify` is safe to point at an artifact somebody
+else built. It exits 0 when there is nothing to say and 1 with the table above otherwise;
+`--json` carries the whole report, including the object table.
+
+When the payload digest itself does not match, `verify` stops there and says so: every entry
+past the damage is bytes nobody wrote, and a table of findings about them would describe the
+damage rather than the artifact.
 
 ## Exit codes
 

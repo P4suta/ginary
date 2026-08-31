@@ -581,20 +581,34 @@ fn check_entry_path<R: Read>(
     let Ok(path) = entry.path() else {
         return Err(unsafe_path());
     };
+    destined_path(&path).ok_or_else(unsafe_path)
+}
+
+/// The path an entry lands on, relative to the extracted root, or `None` when
+/// it does not stay under that root.
+///
+/// The rule itself, without an entry and without an error, so that a reader
+/// that does not extract anything can apply it too: `ginary verify` reports an
+/// escaping entry as [`crate::verify::Issue::UnsafePath`] and carries on
+/// through the rest of the archive, where [`unpack`] refuses the payload. Both
+/// have to agree about what escapes, and they agree by calling this.
+///
+/// The answer is the `/`-joined `Normal` components. A `..`, a leading `/`, a
+/// drive prefix, or a path that is nothing but `.` components has no answer;
+/// everything else does.
+pub fn destined_path(path: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
             Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
             Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(unsafe_path());
-            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
     if parts.is_empty() {
-        Err(unsafe_path())
+        None
     } else {
-        Ok(parts.join("/"))
+        Some(parts.join("/"))
     }
 }
 
@@ -605,7 +619,7 @@ fn check_entry_path<R: Read>(
 /// *directory* named `ginary.json` is refused with the file it would hold: the
 /// tar crate creates the parents of every entry, so `ginary.json/nested.txt`
 /// occupies the manifest's path just as surely as a repeat of the name does.
-fn reserved_first_component(path: &str) -> Option<usize> {
+pub fn reserved_first_component(path: &str) -> Option<usize> {
     let first = path.split('/').next().unwrap_or(path);
     RESERVED_NAMES
         .into_iter()

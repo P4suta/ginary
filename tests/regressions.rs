@@ -79,3 +79,15 @@ mod b1_the_entry_could_vanish_between_the_preflight_and_the_lock;
 mod b1_the_prune_trace_named_nothing_it_removed;
 #[path = "regressions/b1_uninstall_removed_the_crash_dump.rs"]
 mod b1_uninstall_removed_the_crash_dump;
+#[path = "regressions/b2_a_directory_entry_was_an_index_orphan.rs"]
+mod b2_a_directory_entry_was_an_index_orphan;
+#[path = "regressions/b2_a_file_that_was_not_a_dump_echoed_its_bytes.rs"]
+mod b2_a_file_that_was_not_a_dump_echoed_its_bytes;
+#[path = "regressions/b2_a_reserved_name_past_the_front_matter_was_skipped.rs"]
+mod b2_a_reserved_name_past_the_front_matter_was_skipped;
+#[path = "regressions/b2_a_section_on_the_second_line_was_dropped.rs"]
+mod b2_a_section_on_the_second_line_was_dropped;
+#[path = "regressions/b2_an_escaping_entry_verified_clean.rs"]
+mod b2_an_escaping_entry_verified_clean;
+#[path = "regressions/b2_build_sbom_out_hid_the_artifact_it_had_written.rs"]
+mod b2_build_sbom_out_hid_the_artifact_it_had_written;

@@ -21,8 +21,8 @@ and must never look at `argv`.
 
 ## Module map
 
-Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)* or *(B1)*
-exist; the rest are the plan.
+Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)* or
+*(B2)* exist; the rest are the plan.
 
 ```
 build side
@@ -45,7 +45,8 @@ build side
   trailer.rs       (A3a) the 64-byte trailer
   stub.rs          finds and validates the target's ginary binary
   sign_macos.rs    Mach-O section injection and ad-hoc signing
-  verify.rs        re-hash, list dynamic dependencies, report issues
+  verify.rs        (B2) the deep check: every file against the index, every ELF
+  sbom.rs          (B2) the SPDX 2.3 bill of materials for one artifact
   bundle.rs        (A4) orchestrates the above
   inspect.rs       (A4) reads a packaged application from the outside
 
@@ -61,7 +62,9 @@ launcher side
 shared
   target.rs        (A0) <os>-<arch>[-<libc>]
   cache_dir.rs     (A0) the build side's view of `cache::resolve`
-  doctor.rs        (A0) toolchain and environment probing
+  doctor.rs        (A0) toolchain and environment probing; (B2) the cache probe,
+                   the project context and the crypto NIF
+  crashdump.rs     (B2) streams an erl_crash.dump and summarises it
   cli.rs           (A0) clap definitions and dispatch
   process.rs       (A1a) PATH search and a child process under a timeout
   error.rs         (A3b) LauncherError and the exit codes 121 to 125

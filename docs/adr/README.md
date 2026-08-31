@@ -23,3 +23,5 @@ only partly built, the record says so under `Consequences`.
   block of their own
 - [0010](0010-cache-locking-and-pruning.md) — A cache entry is locked for the life of the
   runtime, and pruning honours the lock
+- [0011](0011-verify-and-sbom.md) — What `verify` checks, and how the SBOM stays a function of
+  the artifact

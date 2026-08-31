@@ -85,6 +85,24 @@ pub fn point(name: &str) -> Option<&'static str> {
 /// assert the whole of it rather than a prefix.
 pub const PANIC_MESSAGE: &str = "GINARY_FAULT=launcher:panic";
 
+/// Every fault point this crate carries, in the order the module table lists
+/// them.
+///
+/// The table above, `docs/dev/debugging.md` and `docs/dev/testing.md` all claim
+/// to enumerate the points, and three prose lists drift the moment a point is
+/// added. This constant is the one the tests hold the other lists against: a
+/// new [`point`] call site whose name is not here fails
+/// `every_call_site_is_a_listed_point`, and a point missing from either
+/// document fails `both_documents_list_every_point`.
+pub const FAULT_POINTS: [&str; 6] = [
+    "after-extract",
+    "rename",
+    "unpack",
+    "before-lock",
+    "launcher",
+    "pack",
+];
+
 /// The actions a point may be armed with.
 ///
 /// A closed set, because [`point`] answers with a `&'static str` and because an
@@ -234,5 +252,93 @@ mod tests {
         // assertion holds whatever `GINARY_FAULT` this process was started
         // with, feature on or off.
         assert_eq!(point("a-point-this-build-does-not-have"), None);
+    }
+
+    /// The crate's own sources, minus this module: the call sites the table
+    /// claims to enumerate.
+    fn call_site_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("`src/` is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_some_and(|ext| ext == "rs")
+                && path.file_name().is_some_and(|name| name != "fault.rs")
+            {
+                let text = std::fs::read_to_string(&path).expect("a readable source file");
+                out.push((path.display().to_string(), text));
+            }
+        }
+        assert!(!out.is_empty(), "no sources found next to `fault.rs`");
+        out
+    }
+
+    #[test]
+    fn every_call_site_is_a_listed_point() {
+        // The direction that catches a point added to the code and to neither
+        // the module table nor the documents.
+        for (path, text) in call_site_sources() {
+            for tail in text.split("fault::point(\"").skip(1) {
+                let name = tail.split('"').next().expect("a terminated string literal");
+                assert!(
+                    FAULT_POINTS.contains(&name),
+                    "`{path}` arms `{name}`, which `FAULT_POINTS` does not list"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_listed_point_has_a_call_site() {
+        // And the direction that catches a point removed from the code but left
+        // in the lists, which would document a fault a test can never trigger.
+        let sources = call_site_sources();
+        for name in FAULT_POINTS {
+            let needle = format!("fault::point(\"{name}\")");
+            assert!(
+                sources.iter().any(|(_, text)| text.contains(&needle)),
+                "`FAULT_POINTS` lists `{name}`, which nothing arms"
+            );
+        }
+    }
+
+    #[test]
+    fn both_documents_list_every_point() {
+        // `docs/dev/debugging.md` and `docs/dev/testing.md` both say "the
+        // points are", so both are wrong the moment one is missing. Matching on
+        // the backticked name covers `after-extract:pause` as well as a bare
+        // `before-lock`, which is how a point whose action is `on` reads.
+        for doc in ["docs/dev/debugging.md", "docs/dev/testing.md"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(doc);
+            let text = std::fs::read_to_string(&path).expect("a readable document");
+            for name in FAULT_POINTS {
+                assert!(
+                    text.contains(&format!("`{name}`")) || text.contains(&format!("`{name}:")),
+                    "`{doc}` does not list the `{name}` fault point"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_document_lists_a_point_this_build_does_not_have() {
+        // A backticked `<point>:<action>` whose action this build implements is
+        // an enumeration entry, so its point must be one of ours: this is what
+        // catches a renamed point left behind in the prose.
+        for doc in ["docs/dev/debugging.md", "docs/dev/testing.md"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(doc);
+            let text = std::fs::read_to_string(&path).expect("a readable document");
+            for tail in text.split('`').skip(1).step_by(2) {
+                let Some((name, action)) = tail.split_once(':') else {
+                    continue;
+                };
+                if !ACTIONS.contains(&action) {
+                    continue;
+                }
+                assert!(
+                    FAULT_POINTS.contains(&name),
+                    "`{doc}` names the `{name}` fault point, which this build does not have"
+                );
+            }
+        }
     }
 }

@@ -1,0 +1,81 @@
+=erl_crash_dump:0.5
+Mon Aug 31 11:52:30 2026
+Slogan: kaboom
+System version: Erlang/OTP 29 [erts-17.0.5] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [jit:ns]
+Taints: crypto,asn1rt_nif
+Atoms: 10272
+Calling Thread: scheduler:7
+=memory
+total: 34595632
+processes: 1174928
+=proc:<0.0.0>
+State: Waiting
+Name: init
+Spawned as: erl_init:start/2
+Spawned by: []
+Message queue length: 0
+Reductions: 5347
+Stack+heap: 987
+OldHeap: 1598
+Memory: 21640
+=proc:<0.1.0>
+State: Waiting
+Name: erts_code_purger
+Spawned as: erts_code_purger:start/0
+Spawned by: <0.0.0>
+Message queue length: 0
+Reductions: 12
+Stack+heap: 233
+OldHeap: 0
+Memory: 2856
+=proc:<0.44.0>
+State: Running
+Spawned as: erlang:apply/2
+Spawned by: <0.43.0>
+Message queue length: 0
+Reductions: 402
+Stack+heap: 6772
+OldHeap: 0
+Memory: 55160
+=proc:<0.45.0>
+State: Waiting
+Name: application_controller
+Spawned as: application_controller:start/1
+Spawned by: <0.43.0>
+Message queue length: 0
+Reductions: 1044
+Stack+heap: 4185
+OldHeap: 2586
+Memory: 41288
+=proc:<0.46.0>
+State: Waiting
+Spawned as: proc_lib:init_p/5
+Spawned by: <0.45.0>
+Message queue length: 0
+Reductions: 87
+Stack+heap: 1598
+OldHeap: 0
+Memory: 15920
+=proc:<0.47.0>
+State: Waiting
+Name: code_server
+Spawned as: erlang:apply/2
+Spawned by: <0.46.0>
+Message queue length: 0
+Reductions: 21987
+Stack+heap: 2586
+OldHeap: 6772
+Memory: 76392
+=proc:<0.48.0>
+State: Garbing
+Spawned as: proc_lib:init_p/5
+Spawned by: <0.45.0>
+Message queue length: 3
+Reductions: 55
+Stack+heap: 376
+OldHeap: 0
+Memory: 4544
+=ets:<0.47.0>
+Slot: 0
+Table: code
+=end

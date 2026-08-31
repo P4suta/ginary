@@ -43,6 +43,11 @@
 | `tests/inspect.rs` | the text report and the launch plan over a hand-built `ArtifactInfo`, and a `SyntheticArtifact` opened, verified, and damaged in the two ways that matter |
 | `tests/e2e_hello.rs` | toolchain-gated: `ginary build` in a copy of the `hello_ffi` fixture, and everything that follows — running the artifact with no Erlang on the machine, the warm cache, byte-identical rebuilds under `SOURCE_DATE_EPOCH`, `--report json` against the artifact's own size on disk, `--explain`, `-v` beside `GINARY_TRACE`, `inspect --verify`, `GINARY_CMD`, and the work directory |
 | `tests/regressions.rs` | one module per fixed bug, `#[path]`-included from `tests/regressions/`; see the README there |
+| `tests/verify.rs` | the deep check: a clean `SyntheticArtifact` raising nothing, the four index findings over a payload laid out by hand so the index can disagree with the tree, a real ELF's object row, a machine mismatch, the allowlist and its injected-empty seam, an object refused by the injected size bound, a file that begins with the ELF magic and is not one, the rendered table, the command's two exit codes, and a gated run over a real `ginary build` |
+| `tests/sbom.rs` | the SPDX 2.3 document: the namespace derived from the payload digest, the whole document as a snapshot, the fields SPDX requires, the two relationship kinds, hex against `NOASSERTION`, a Gleam `manifest.toml` read, one refused and one absent, determinism over two runs, the command's `--out`, and two gated builds pinning `ginary build --sbom` and `--sbom-out` down to the report's last line |
+| `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
+| `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host |
+| `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
 timeout runner moved there in A1a, because `otp::discover` needs the same
@@ -101,6 +106,8 @@ reason:
 | `tests/gleam.rs`, `tests/e2e_hello.rs` | the real `gleam`, and through `ginary build` the real `erl` and `strip` | every one of those tests is gated on `require_tools`; the build runs under `built::BUILD_BUDGET` (900 s) and each run of the artifact under `built::RUN_BUDGET` (120 s), and the artifact itself is run with `env_clear()` and an empty-directory `PATH`, so nothing ambient reaches the packaged application |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
 | `tests/cache_lock.rs`, `tests/launcher.rs`, `tests/regressions.rs` | util-linux `flock(1)`, and `sleep(1)` for the ADR 0010 proof | every one of those tests is gated on `require_tools(&["flock"])` — the lock has to be observed by a program that is not ginary, or it proves nothing about the kernel — and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure, which is how CI keeps them from quietly not running |
+| `tests/crashdump.rs` | one `erl` run that writes a real `erl_crash.dump`, so the parser is held against a file its author did not write | gated on `require_tools(&["erl"])`; the recipe is `erl -noshell -env ERL_CRASH_DUMP <tmp>/dump -eval 'spawn(fun() -> exit(kaboom) end), timer:sleep(100), erlang:halt("kaboom", [{flush,true}]).'`, which exits 1 and leaves a whole dump ending in `=end` |
+| `tests/doctor.rs`, `tests/verify.rs` | the host OTP's `crypto` NIF, and one real `ginary build` verified end to end | both gated on `require_tools`; `tests/verify.rs` also reads a shipment named by `GINARY_TEST_ARTIFACT` when one is set, and reports a skip when it is not |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
@@ -198,6 +205,21 @@ damage the payload sixteen bytes before the end, past both front entries, which 
 shortening the file from its end takes the trailer with it, and `docs/format.md` rule 2 makes
 what is left the ginary command line tool rather than a damaged artifact. The fault worth a test
 is the one that still carries a trailer and no longer matches it.
+
+`tests/common/repack.rs` is what B2 added, and it is the one helper that writes a tar archive
+itself rather than calling `payload::pack`. It has to: `pack` computes `ginary.index.json` from
+the same walk it packs, so an index that disagrees with the tree it describes cannot be produced
+by the code that writes both, and those disagreements are exactly what `ginary verify` exists to
+find. `repack::build` stages the same tree `SyntheticArtifact` does, builds the same index, takes
+the digests, and only then applies `RepackOptions`: `corrupt` rewrites a file's bytes behind the
+index, `drop_from_index` deletes a row and leaves the file, `ghost_index_rows` invents a row for a
+file nobody packed, `appended` writes entries the packer never would — a second `ginary.json`, a
+directory entry, a symlink — and `target` makes the manifest claim another architecture. What
+comes out is a whole artifact whose *trailer digest matches its payload*, which is the point:
+`inspect --verify` passes on every one of them. It also carries the real ELF the synthetic tree
+deliberately has not got — `with_native_object` copies this test run's own binary in at
+`NATIVE_PATH`, and `patch_elf_machine` rewrites two bytes of its header so a test on one
+architecture has a binary for another with no cross toolchain.
 
 `tests/common/cachefs.rs` is what B1 added, and it exists because pruning turns on two things a
 test cannot fake for itself: how old an entry is, and whether anybody is using it. `plant_entry`
@@ -711,8 +733,8 @@ assertion.
 ## Planned infrastructure
 
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
-`fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs` and
-`cachefs.rs`, described above. Still to come:
+`fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
+`cachefs.rs` and `repack.rs`, described above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache
@@ -746,12 +768,17 @@ Planned test categories:
   `--features fault-injection`. The points are `after-extract:pause` (sleep with the temporary
   tree on disk, so a test can `SIGKILL` the process and assert the next run sweeps it),
   `rename:eexist` (the losing side of the extraction race), `unpack:corrupt` (a payload that
-  changes under the reader) and `launcher:panic` (a panic on the launcher path). The first three
-  are about *timing*, which is why no artifact a test can build reaches them, and each is paired
-  with an assertion that the **next** run recovers: a fault that is only shown to fail is half a
-  test. The fourth is about a promise: `main` installs a panic hook so that a bug in ginary is
-  one attributed line and exit 121 rather than a Rust backtrace, and a hook nothing can trigger
-  is a hook no test can check.
+  changes under the reader), `before-lock` (the cache entry is removed between the preflight and
+  the shared lock, which is what a prune that won the race leaves behind), `launcher:panic` (a
+  panic on the launcher path) and `pack:fail` (the *builder* stops between the stub and the
+  payload). The first four are about *timing*, which is why no artifact a test can build reaches
+  them, and each is paired with an assertion that the **next** run recovers: a fault that is only
+  shown to fail is half a test. `launcher:panic` is about a promise: `main` installs a panic hook
+  so that a bug in ginary is one attributed line and exit 121 rather than a Rust backtrace, and a
+  hook nothing can trigger is a hook no test can check. `pack:fail` is the one point on the build
+  side, and it is there so that a test can assert that a failed build leaves neither a work
+  directory nor a half-written artifact. `FAULT_POINTS` in `src/fault.rs` is the list both this
+  document and `debugging.md` are held against by unit test, so the three cannot drift apart.
 - **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job.
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table

@@ -77,6 +77,14 @@
 //! - [`bundle`] — the whole build, from a project to one executable;
 //! - [`inspect`] — reading a packaged application from the outside.
 //!
+//! Milestone B2 adds the three modules that answer questions *about* a
+//! finished artifact, rather than producing one:
+//!
+//! - [`verify`] — the deep check: every file against the index, every ELF
+//!   against the target and the allowlist;
+//! - [`sbom`] — the SPDX 2.3 bill of materials;
+//! - [`crashdump`] — the summary of an `erl_crash.dump`.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -93,6 +101,7 @@ pub mod cache_lock;
 pub mod cli;
 pub mod closure;
 pub mod config;
+pub mod crashdump;
 pub mod diag;
 pub mod doctor;
 pub mod elf;
@@ -107,7 +116,9 @@ pub mod otp;
 pub mod payload;
 pub mod process;
 pub mod report;
+pub mod sbom;
 pub mod selfexe;
 pub mod strip;
 pub mod target;
 pub mod trailer;
+pub mod verify;

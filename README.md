@@ -55,6 +55,52 @@ every later run finds the entry already there. `ginary inspect ./my_gleam_app` s
 inside one, `--verify` re-hashes its payload, and `--launch-plan` prints the argument vector and
 environment the launcher would use.
 
+## Reading an artifact
+
+Four commands read a packaged application from the outside. None of them extracts anything and
+none of them runs it, so all four are safe to point at a file somebody else built.
+
+```console
+$ ginary inspect ./my_gleam_app --verify   # what is in it, and does the payload still hash
+$ ginary verify ./my_gleam_app             # the deep check: every file, and every binary
+$ ginary sbom ./my_gleam_app               # an SPDX 2.3 bill of materials beside it
+$ ginary crashdump ./erl_crash.dump        # why a packaged application died
+```
+
+`inspect --verify` re-hashes the payload against the trailer and stops there. `verify` streams
+it a second time and answers four more questions: whether every file is the one
+`ginary.index.json` describes, whether every entry is one a launcher would extract at all,
+whether every native binary in it was built for the machine the artifact targets, and whether
+any of them needs a shared library the artifact does not carry. It exits 1 with a table when it
+finds something, and `--json` gives the whole report.
+
+```console
+$ ginary verify ./my_gleam_app
+payload:  ok
+files:    248 checked against the index
+objects:  6
+
+path                                        machine  class  glibc  needed
+erts-17.0.5/bin/beam.smp                    x86_64   64     2.38   libc.so.6, libm.so.6
+lib/crypto-5.9.2/priv/lib/crypto.so         x86_64   64     2.34   libc.so.6
+...
+```
+
+`ginary build --sbom` writes the same document a build produces, as `<app>.spdx.json` beside the
+artifact, or wherever `--sbom-out` says. It is a function of the artifact and of the project's
+`manifest.toml`: the document namespace comes from the payload's SHA-256 rather than from a
+random UUID and a clock, so a reproducible build has a reproducible bill of materials. A package
+whose origin the shipment does not record is `NOASSERTION` rather than a guess.
+
+`ginary crashdump` reads an `erl_crash.dump` as a stream — a dump can be larger than the machine
+it is read on — and prints the slogan, the system version, the taints and the five largest
+processes by heap. A dump the runtime was killed while writing is summarised rather than
+refused, and says so.
+
+`ginary doctor` answers the other half: whether *this* machine can build, whether the cache
+directory can be written to and executed out of (a `noexec` mount is the failure users actually
+hit), what project it is standing in, and what the host OTP's `crypto` NIF needs.
+
 ## Configuration
 
 Settings live in the project's `gleam.toml`, under `[tools.ginary]`, which the Gleam compiler
@@ -235,8 +281,8 @@ forwarding, and the application receives its arguments exactly as typed.
   first run; ginary does not link the emulator into the executable.
 - Hot code upgrades are not supported. `releases/` is not shipped and `release_handler` is not
   available.
-- Native code (NIFs, port programs) must match the target being packaged, and nothing is
-  recorded about it in the manifest yet.
+- Native code (NIFs, port programs) must match the target being packaged. `ginary verify` says
+  when it does not, but the build does not yet refuse it.
 - Artifacts are not small. A trimmed runtime plus a small application is roughly 7.5 MB.
 
 ## Documentation
@@ -245,6 +291,7 @@ forwarding, and the application receives its arguments exactly as typed.
 - [docs/dev/architecture.md](docs/dev/architecture.md) — module map and data flow.
 - [docs/dev/testing.md](docs/dev/testing.md) — test infrastructure and toolchain gating.
 - [docs/dev/debugging.md](docs/dev/debugging.md) — diagnostic environment variables.
+- [docs/dev/formal.md](docs/dev/formal.md) — the TLA+ model of the cache protocol.
 - [docs/adr/](docs/adr/) — architecture decision records.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the TDD workflow and the local gates.
 

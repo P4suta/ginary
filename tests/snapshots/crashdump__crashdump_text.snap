@@ -1,0 +1,18 @@
+---
+source: tests/crashdump.rs
+expression: synthetic().render_text()
+---
+dump version:    0.5
+date:            Mon Aug 31 11:52:30 2026
+slogan:          kaboom
+system version:  Erlang/OTP 29 [erts-17.0.5] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [jit:ns]
+taints:          crypto, asn1rt_nif
+processes:       7
+truncated:       no
+
+heap  pid       name                    initial call
+6772  <0.44.0>  -                       erlang:apply/2
+4185  <0.45.0>  application_controller  application_controller:start/1
+2586  <0.47.0>  code_server             erlang:apply/2
+1598  <0.46.0>  -                       proc_lib:init_p/5
+987   <0.0.0>   init                    erl_init:start/2

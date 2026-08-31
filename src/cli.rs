@@ -22,6 +22,7 @@ use crate::closure::{self, AppSet};
 use crate::config::{
     BuildFlags, BuildOptions, MAX_COMPRESSION_LEVEL, MIN_COMPRESSION_LEVEL, ProjectConfig,
 };
+use crate::crashdump::{self, CrashDump};
 use crate::diag::{self, Diag};
 use crate::doctor;
 use crate::elf::{self, ElfInfo};
@@ -29,8 +30,10 @@ use crate::gleam;
 use crate::inspect::{self, InspectReport, LaunchPlanReport};
 use crate::otp;
 use crate::report::{self, SizeReport};
+use crate::sbom::{self, SbomDocument};
 use crate::strip::{self, StripOptions, StripReport};
 use crate::target::Target;
+use crate::verify::{self, VerifyReport};
 
 /// Version of the `version --json` schema.
 pub const VERSION_FORMAT_VERSION: u32 = 1;
@@ -184,6 +187,12 @@ pub enum Command {
         /// Print the closure and staging accounts before the report.
         #[arg(long)]
         explain: bool,
+        /// Write an SPDX 2.3 bill of materials beside the artifact.
+        #[arg(long)]
+        sbom: bool,
+        /// Where the bill of materials goes. Implies `--sbom`.
+        #[arg(long = "sbom-out", value_name = "PATH")]
+        sbom_out: Option<PathBuf>,
         /// Say what each phase is doing, on standard error.
         #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
         verbose: u8,
@@ -199,6 +208,43 @@ pub enum Command {
         /// Print the argument vector and environment the launcher would use.
         #[arg(long)]
         launch_plan: bool,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a packaged application deeply: every file, and every binary.
+    ///
+    /// `inspect --verify` re-hashes the payload against the trailer and stops
+    /// there. This streams the payload a second time, checks every file
+    /// against `ginary.index.json`, and inspects every native binary in it:
+    /// the machine it was built for and the libraries it expects the target
+    /// machine to already have. Exits 1 when it finds anything.
+    Verify {
+        /// The artifact to check.
+        #[arg(value_name = "EXE")]
+        path: PathBuf,
+        /// Print a JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write an SPDX 2.3 bill of materials for a packaged application.
+    Sbom {
+        /// The artifact to describe.
+        #[arg(value_name = "EXE")]
+        path: PathBuf,
+        /// Where to write the document. Defaults to `<app>.spdx.json` beside
+        /// the artifact.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Summarise an `erl_crash.dump`.
+    ///
+    /// The slogan, the system version and the largest processes, read as a
+    /// stream: a crash dump can be larger than the machine's memory.
+    Crashdump {
+        /// The dump to read.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
         /// Print a JSON object instead of a table.
         #[arg(long)]
         json: bool,
@@ -669,6 +715,8 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             sys_config,
             report,
             explain,
+            sbom,
+            sbom_out,
             verbose,
         } => write_build(
             &BuildFlags {
@@ -690,6 +738,10 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 verbose: *verbose,
             },
             *report,
+            &SbomRequest {
+                wanted: *sbom || sbom_out.is_some(),
+                out: sbom_out.clone(),
+            },
             out,
         ),
         Command::Inspect {
@@ -698,6 +750,12 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
             launch_plan,
             json,
         } => write_inspect(path, *verify, *launch_plan, *json, out),
+        Command::Verify { path, json } => write_verify(path, *json, out),
+        Command::Sbom {
+            path,
+            out: destination,
+        } => write_sbom(path, destination.as_deref(), out),
+        Command::Crashdump { path, json } => write_crashdump(path, *json, out),
         Command::Appfile {
             command: AppfileCommand::Parse { paths, json },
         } => write_appfile(paths, *json, out),
@@ -1307,12 +1365,23 @@ pub struct BuildJsonReport {
     /// What the build produced.
     #[serde(flatten)]
     pub report: BuildReport,
+    /// Where the bill of materials was written, when one was asked for.
+    ///
+    /// Absent when neither `--sbom` nor `--sbom-out` was given, and absent
+    /// when the document could not be written — in which case the command
+    /// fails and says why on standard error. The text report's last line is
+    /// `sbom: <path>`, so both forms name every file the command produced and
+    /// a machine consumer never has to re-derive `<out dir>/<app>.spdx.json`
+    /// or remember what it passed to `--sbom-out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sbom: Option<String>,
 }
 
 /// Finds the project, merges the flags over its configuration, and builds.
 fn write_build(
     flags: &BuildFlags,
     report: ReportFormat,
+    sbom_request: &SbomRequest,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     let project = gleam::find_project(&flags.start)?;
@@ -1328,18 +1397,55 @@ fn write_build(
     }
     let diag = Diag::from_env(&env);
 
-    let built = bundle::build(&options, &diag)?;
+    // Before the build and not after it: a `--sbom-out` in a directory that
+    // does not exist is a mistake in the command line, and a build is minutes
+    // of work to spend discovering one.
+    if let Some(destination) = sbom_request.out.as_deref() {
+        check_sbom_destination(destination)?;
+    }
 
+    let built = bundle::build(&options, &diag)?;
+    let artifact = built.out.clone();
+
+    // The document is written before the report, so that the report can name
+    // it: `--report json` is one JSON document and a path appended after it
+    // would not be in it. An artifact that is on disk still has to be named on
+    // standard output whatever happens next, though — a caller that saw only
+    // `cannot write the SBOM` could not tell this run from a build that
+    // produced nothing — so a failure emits the report without the SBOM member
+    // first and returns the error after.
+    let written = if sbom_request.wanted {
+        match write_sbom_for(&artifact, Some(project.root()), sbom_request.out.as_deref()) {
+            Ok(written) => Some(written),
+            Err(error) => {
+                write_build_report(report, built, None, out)?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    write_build_report(report, built, written.as_deref(), out)
+}
+
+/// Writes one build's report in `report`'s form, naming `sbom` when there is
+/// one.
+fn write_build_report(
+    report: ReportFormat,
+    built: BuildReport,
+    sbom: Option<&Path>,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
     if report == ReportFormat::Json {
         return write_json(
             out,
             &BuildJsonReport {
                 format_version: BUILD_FORMAT_VERSION,
                 report: built,
+                sbom: sbom.map(|path| path.display().to_string()),
             },
         );
     }
-
     let mut text = String::new();
     if let Some(explain) = &built.explain {
         text.push_str(&explain.closure);
@@ -1351,8 +1457,32 @@ fn write_build(
     if let Some(staging) = &built.staging {
         text.push_str(&format!("staging: {}\n", staging.display()));
     }
+    if let Some(sbom) = sbom {
+        text.push_str(&format!("sbom: {}\n", sbom.display()));
+    }
     out.write_all(text.as_bytes())
         .context("cannot write the build report to standard output")
+}
+
+/// Refuses a `--sbom-out` whose directory is not there.
+///
+/// Only the parent, and only its existence: everything else a write can fail
+/// on — a permission, a full disk, a name that is already a directory — is
+/// found by the write itself, and by then the build report has been printed.
+fn check_sbom_destination(destination: &Path) -> anyhow::Result<()> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent
+        && !parent.is_dir()
+    {
+        anyhow::bail!(
+            "cannot write the SBOM to {}: {} is not a directory",
+            destination.display(),
+            parent.display()
+        );
+    }
+    Ok(())
 }
 
 /// Reads one artifact and prints what it says about itself.
@@ -1442,6 +1572,84 @@ fn write_inspect(
         );
     }
     Ok(())
+}
+
+/// Whether `ginary build` was asked for a bill of materials, and where.
+struct SbomRequest {
+    /// Whether `--sbom` or `--sbom-out` was given.
+    wanted: bool,
+    /// The `--sbom-out` value, when there was one.
+    out: Option<PathBuf>,
+}
+
+/// The payload of `ginary verify --json`.
+#[derive(Debug, Serialize)]
+pub struct VerifyJsonReport {
+    /// The report, whose own `format_version` versions this schema.
+    #[serde(flatten)]
+    pub report: VerifyReport,
+}
+
+/// Checks one artifact deeply and writes what it found.
+///
+/// A finding is not an error until the report has been printed: the point of
+/// the command is the table, and a caller that only saw the exit code would
+/// not know which file was wrong.
+fn write_verify(path: &Path, json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let report = verify::verify(path)?;
+
+    if json {
+        write_json(
+            out,
+            &VerifyJsonReport {
+                report: report.clone(),
+            },
+        )?;
+    } else {
+        out.write_all(report.render_text().as_bytes())
+            .context("cannot write the verification to standard output")?;
+    }
+
+    if report.ok() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}: {} issue(s) found", path.display(), report.issues.len())
+    }
+}
+
+/// Writes an artifact's bill of materials and says where it went.
+fn write_sbom(path: &Path, destination: Option<&Path>, out: &mut impl Write) -> anyhow::Result<()> {
+    let written = write_sbom_for(path, None, destination)?;
+    writeln!(out, "sbom: {}", written.display())
+        .context("cannot write the SBOM path to standard output")
+}
+
+/// Builds the document for `artifact` and writes it, returning where it went.
+fn write_sbom_for(
+    artifact: &Path,
+    project: Option<&Path>,
+    destination: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let document: SbomDocument = sbom::for_artifact(artifact, project)?;
+    let path = match destination {
+        Some(path) => path.to_path_buf(),
+        // The application's name, not the document's: the document is named
+        // `<app>-<version>` and the file beside the artifact is named after
+        // the artifact.
+        None => sbom::out_path(artifact, sbom::application_name(&document)),
+    };
+    sbom::write(&document, &path)?;
+    Ok(path)
+}
+
+/// Summarises one crash dump and writes it in the requested form.
+fn write_crashdump(path: &Path, json: bool, out: &mut impl Write) -> anyhow::Result<()> {
+    let dump: CrashDump = crashdump::read(path)?;
+    if json {
+        return write_json(out, &dump);
+    }
+    out.write_all(dump.render_text().as_bytes())
+        .context("cannot write the crash dump summary to standard output")
 }
 
 fn write_json(out: &mut impl Write, value: &impl Serialize) -> anyhow::Result<()> {
@@ -1587,8 +1795,10 @@ mod tests {
             cache_dir: Some(std::path::PathBuf::from("/home/u/.cache/ginary")),
             cache_dir_source: Some("HOME"),
             cache_dir_error: None,
+            cache_probe: None,
             otp: None,
             otp_error: Some("`erl` is not on PATH".to_owned()),
+            project: None,
             tools: ["gleam", "erl", "strip", "docker"]
                 .into_iter()
                 .map(|name| doctor::ToolReport {

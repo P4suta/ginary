@@ -11,12 +11,15 @@
 //! error, so `doctor` always exits 0 and the caller reads the report.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cache_dir::{self, EnvSnapshot};
+use crate::config::ProjectConfig;
+use crate::elf::{self, ElfKind};
 use crate::otp;
 use crate::process::{NULL_DEVICE, run_with_timeout};
 use crate::target::Target;
@@ -121,6 +124,8 @@ pub struct OtpReport {
     pub erts_vsn: String,
     /// The full version, for example `29.0.5`.
     pub otp_version: String,
+    /// What `crypto`'s NIF needs, when the installation has one.
+    pub crypto: Option<CryptoReport>,
 }
 
 impl OtpReport {
@@ -131,6 +136,7 @@ impl OtpReport {
             release: info.release,
             erts_vsn: info.erts_vsn.clone(),
             otp_version: info.otp_version.clone(),
+            crypto: crypto_report(&info.root),
         }
     }
 
@@ -143,6 +149,653 @@ impl OtpReport {
             self.erts_vsn,
             self.root.display()
         )
+    }
+}
+
+/// The hint a cache directory that cannot be used earns.
+pub const CACHE_DIR_HINT: &str = "set GINARY_CACHE_DIR to a directory this user can write to on a filesystem that is not \
+     mounted `noexec`";
+
+/// What a cache directory turned out to allow.
+///
+/// A packaged application does two things with its cache and both can be
+/// forbidden separately: it writes an extracted runtime there, and it execs
+/// programs out of it. A `noexec` mount, a read-only home and a full disk are
+/// three different diagnoses, and a `doctor` that only reported the resolved
+/// path would name none of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CacheProbe {
+    /// Whether a file could be created in the directory.
+    pub writable: bool,
+    /// Whether a file created there could then be executed.
+    pub executable: bool,
+    /// What the operating system said, when either half failed.
+    pub detail: Option<String>,
+}
+
+impl CacheProbe {
+    /// Renders the two `cache` lines, and the hint when one of them failed.
+    ///
+    /// ```text
+    /// cache writable: yes
+    /// cache executable: no (mounted noexec?)
+    /// hint: set GINARY_CACHE_DIR to a directory this user can write to ...
+    /// ```
+    pub fn render(&self) -> String {
+        let mut text = format!("cache writable: {}\n", yes_no(self.writable));
+        text.push_str(&format!(
+            "cache executable: {}\n",
+            match (self.writable, self.executable) {
+                (_, true) => "yes",
+                (true, false) => "no (mounted noexec?)",
+                // Nothing could be written, so nothing was run: saying
+                // `noexec` here would send a reader to the mount table for a
+                // problem that is in the directory's permissions.
+                (false, false) => "no (nothing could be written to run)",
+            }
+        ));
+        if let Some(detail) = &self.detail {
+            text.push_str(&format!("cache detail: {detail}\n"));
+        }
+        if !self.writable || !self.executable {
+            text.push_str(&format!("hint: {CACHE_DIR_HINT}\n"));
+        }
+        text
+    }
+}
+
+/// The probe program: the smallest thing a kernel will exec.
+const PROBE_PROGRAM: &[u8] = b"#!/bin/sh\nexit 0\n";
+
+/// The mode the probe file is given, which is the mode the cache gives every
+/// program under an extracted bindir.
+const PROBE_MODE: u32 = 0o755;
+
+/// How long a probe is retried while the kernel answers `ETXTBSY`.
+///
+/// The probe writes a program and immediately execs it, which is the race
+/// `src/process.rs` documents for its own test helper: a `fork` on another
+/// thread inherits the write descriptor this one is holding, and every exec of
+/// that inode fails with `ETXTBSY` until the forked child execs. The window is
+/// microseconds long, and it is not a `noexec` mount — reporting it as one
+/// would send a reader to the mount table for a problem that is not there.
+const PROBE_BUSY_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long the probe waits between attempts while the kernel says `ETXTBSY`.
+const PROBE_BUSY_POLL: Duration = Duration::from_millis(2);
+
+/// How many probes this process has run, so that two cannot share a name.
+static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// The name of the file the probe creates.
+///
+/// A dot-file, so a cache directory a user looks at is not littered by a
+/// `doctor` that was killed between creating the file and removing it. The pid
+/// keeps two `doctor` *processes* over one directory from removing each
+/// other's, and `sequence` keeps two probes of one process apart: `doctor`
+/// probes once, but its tests run in threads of one binary and a pid alone is
+/// not unique between them.
+fn probe_file_name(pid: u32, sequence: u64) -> String {
+    format!(".ginary-doctor-probe-{pid}-{sequence}")
+}
+
+/// Creates a file in `dir`, makes it executable and tries to run it.
+///
+/// The probe is the only honest answer: `access(2)` reports the permission
+/// bits and says nothing about the mount, and `noexec` is the failure that
+/// actually reaches users. Whatever it creates is removed again.
+///
+/// The directory itself is created when it is not there, because that is what
+/// a launch would do: a `doctor` that reported "not writable" for a cache
+/// nobody has used yet would be reporting its absence rather than a problem.
+pub fn probe_cache_dir(dir: &Path) -> CacheProbe {
+    let refused = |detail: std::io::Error| CacheProbe {
+        writable: false,
+        executable: false,
+        detail: Some(detail.to_string()),
+    };
+
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        return refused(error);
+    }
+    let path = dir.join(probe_file_name(
+        std::process::id(),
+        PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    ));
+    if let Err(error) = write_probe(&path) {
+        let _ = std::fs::remove_file(&path);
+        return refused(error);
+    }
+
+    let outcome = run_probe(&path);
+    // Removed before the answer is returned, whatever the answer is: a probe
+    // that left an executable behind in a cache directory would be a probe
+    // nobody should run twice.
+    let _ = std::fs::remove_file(&path);
+
+    match outcome {
+        Ok(()) => CacheProbe {
+            writable: true,
+            executable: true,
+            detail: None,
+        },
+        Err(error) => CacheProbe {
+            writable: true,
+            executable: false,
+            detail: Some(error.to_string()),
+        },
+    }
+}
+
+/// Writes the probe program and makes it executable.
+fn write_probe(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, PROBE_PROGRAM)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(PROBE_MODE))?;
+    }
+    Ok(())
+}
+
+/// Runs the probe program and reports whether the kernel would start it.
+///
+/// A program that starts and exits non-zero still proves the mount allows
+/// execution, which is the whole question; only a failure to *start* it is an
+/// answer of `no`.
+///
+/// `ETXTBSY` is not such a failure. It says some process still holds a write
+/// descriptor on the file this function just wrote, which is a race against
+/// `doctor` itself rather than anything about the directory, so it is retried
+/// for [`PROBE_BUSY_BUDGET`] and only then reported.
+fn run_probe(path: &Path) -> std::io::Result<()> {
+    let deadline = Instant::now() + PROBE_BUSY_BUDGET;
+    loop {
+        let outcome = std::process::Command::new(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match outcome {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(PROBE_BUSY_POLL);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// `yes` or `no`.
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// What `crypto`'s NIF needs from the machine.
+///
+/// The one library whose linkage decides whether a packaged application is
+/// portable: an OTP built against a *static* OpenSSL leaves a `crypto.so` that
+/// needs nothing but libc, and that is the guarantee ginary's artifacts rest
+/// on. One that needs a `libssl.so.3` is an artifact that will not start on a
+/// machine without that exact soname.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CryptoReport {
+    /// The NIF, under `<root>/lib/crypto-<vsn>/priv/lib/`.
+    pub path: PathBuf,
+    /// Its `DT_NEEDED` entries, in the order the dynamic section lists them.
+    pub needed: Vec<String>,
+    /// Whether it needs nothing beyond a C runtime.
+    pub statically_linked_openssl: bool,
+}
+
+impl CryptoReport {
+    /// Renders the `crypto:` line and, when it is static, why that matters.
+    pub fn render(&self) -> String {
+        let mut text = format!("crypto: {}\n", self.path.display());
+        text.push_str(&format!(
+            "crypto needs: {}\n",
+            if self.needed.is_empty() {
+                "-".to_owned()
+            } else {
+                self.needed.join(", ")
+            }
+        ));
+        text.push_str(if self.statically_linked_openssl {
+            "crypto note: nothing beyond a C runtime, so this OTP's OpenSSL is linked in \
+             statically; that is what lets an artifact built here start on a machine with no \
+             libssl of its own\n"
+        } else {
+            "crypto note: a machine running an artifact built from this OTP must already carry \
+             the libraries above, which is the portability floor of everything built with it\n"
+        });
+        text
+    }
+}
+
+/// The libraries every glibc program links against, whatever it does.
+///
+/// A `crypto.so` that needs only these is one whose OpenSSL was linked in
+/// statically. Anything else — a `libcrypto.so.3`, a `libssl.so.3` — is a file
+/// the target machine has to supply.
+const C_RUNTIME_LIBRARIES: [&str; 6] = [
+    "libc.so.6",
+    "libm.so.6",
+    "libdl.so.2",
+    "libpthread.so.0",
+    "librt.so.1",
+    "libgcc_s.so.1",
+];
+
+/// The prefix of the application directory `crypto`'s NIF lives under.
+const CRYPTO_APP_PREFIX: &str = "crypto-";
+
+/// The NIF, relative to the `crypto` application directory.
+const CRYPTO_NIF: &str = "priv/lib/crypto.so";
+
+/// Finds `crypto.so` under an OTP root and reads what it needs.
+///
+/// `None` when the installation carries no `crypto` application, which a
+/// runtime assembled from ERTS binaries alone legitimately does not, and also
+/// when the file is there and is not an ELF this build can read: `doctor`
+/// never fails, and a NIF nothing can parse is named by `ginary verify` on the
+/// artifact that carries it rather than guessed at here.
+pub fn crypto_report(otp_root: &Path) -> Option<CryptoReport> {
+    let path = crypto_nif(otp_root)?;
+    let info = elf::inspect(&path).ok()?;
+    let statically_linked_openssl = info
+        .needed
+        .iter()
+        .all(|needed| C_RUNTIME_LIBRARIES.contains(&needed.as_str()));
+    Some(CryptoReport {
+        path,
+        needed: info.needed,
+        statically_linked_openssl,
+    })
+}
+
+/// `<root>/lib/crypto-<vsn>/priv/lib/crypto.so`, found by prefix.
+///
+/// The version is not known here and is not worth discovering separately: the
+/// directory is the only `crypto-*` an installation has, and reading
+/// `OTP_VERSION` to learn a number that is already in the path would be a
+/// second source of truth. The highest name wins if an installation somehow
+/// holds two, so the answer does not depend on directory order.
+fn crypto_nif(otp_root: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(otp_root.join("lib"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with(CRYPTO_APP_PREFIX))
+        })
+        .map(|path| path.join(CRYPTO_NIF))
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+/// What `[tools.ginary]` said, or why it could not be read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConfigStatus {
+    /// The project declares no `[tools.ginary]` table.
+    Absent,
+    /// The table parsed.
+    Ok,
+    /// The table did not parse, and this is what the parser said.
+    Error {
+        /// The message, verbatim: an unknown key is named by serde and a
+        /// paraphrase would lose the key.
+        message: String,
+    },
+}
+
+/// The shipment a project has already exported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ShipmentReport {
+    /// `<project>/build/erlang-shipment`.
+    pub path: PathBuf,
+    /// How old it is, in seconds.
+    pub age_secs: u64,
+}
+
+/// One native object found under a shipment's `priv`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NativeObject {
+    /// The path, relative to the shipment and `/`-separated.
+    pub path: String,
+    /// The machine, as [`crate::elf::ElfInfo::machine`] spells it.
+    pub machine: String,
+    /// What kind of object the file is.
+    pub kind: crate::elf::ElfKind,
+    /// Its `DT_NEEDED` entries.
+    pub needed: Vec<String>,
+    /// Whether its machine is the one this host runs.
+    pub matches_host: bool,
+}
+
+/// What `doctor` says when it is run inside a Gleam project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectReport {
+    /// The directory holding `gleam.toml`.
+    pub root: PathBuf,
+    /// The project name.
+    pub name: String,
+    /// The project version, when the manifest declares one.
+    pub version: Option<String>,
+    /// The exported shipment, when there is one.
+    pub shipment: Option<ShipmentReport>,
+    /// What `[tools.ginary]` said.
+    pub config: ConfigStatus,
+    /// Every ELF under the shipment's `priv`, in path order.
+    pub native: Vec<NativeObject>,
+}
+
+impl ProjectReport {
+    /// Renders the project block: name, shipment, configuration, and the
+    /// native table when there is native code.
+    ///
+    /// ```text
+    /// project: notify 3.1.4 (/w/notify)
+    /// shipment: /w/notify/build/erlang-shipment (3600 seconds old)
+    /// [tools.ginary]: unknown field `not_a_key`
+    ///
+    /// path                    machine  kind           host  needed
+    /// notify/priv/lib/nif.so  aarch64  shared object  no    libc.so.6
+    /// ```
+    pub fn render(&self) -> String {
+        let mut text = format!(
+            "project: {} {} ({})\n",
+            self.name,
+            self.version.as_deref().unwrap_or(DASH),
+            self.root.display()
+        );
+        text.push_str(&match &self.shipment {
+            Some(shipment) => format!(
+                "shipment: {} ({} seconds old)\n",
+                shipment.path.display(),
+                shipment.age_secs
+            ),
+            None => "shipment: none exported yet\n".to_owned(),
+        });
+        text.push_str(&match &self.config {
+            ConfigStatus::Absent => "[tools.ginary]: absent\n".to_owned(),
+            ConfigStatus::Ok => "[tools.ginary]: read\n".to_owned(),
+            // Verbatim: serde names the key that is wrong, and a paraphrase
+            // would lose the one word the reader has to search their manifest
+            // for.
+            ConfigStatus::Error { message } => format!("[tools.ginary]: {message}\n"),
+        });
+
+        if self.native.is_empty() {
+            return text;
+        }
+        let rows: Vec<[String; 5]> = self
+            .native
+            .iter()
+            .map(|object| {
+                [
+                    object.path.clone(),
+                    object.machine.clone(),
+                    kind_label(object.kind),
+                    yes_no(object.matches_host).to_owned(),
+                    if object.needed.is_empty() {
+                        DASH.to_owned()
+                    } else {
+                        object.needed.join(", ")
+                    },
+                ]
+            })
+            .collect();
+        text.push('\n');
+        text.push_str(&crate::closure::render_table(
+            ["path", "machine", "kind", "host", "needed"],
+            &rows,
+        ));
+        text
+    }
+}
+
+/// What a missing value prints as.
+const DASH: &str = "-";
+
+/// The word one [`ElfKind`] prints as.
+fn kind_label(kind: ElfKind) -> String {
+    match kind {
+        ElfKind::Relocatable => "relocatable".to_owned(),
+        ElfKind::Executable => "executable".to_owned(),
+        ElfKind::SharedObject => "shared object".to_owned(),
+        ElfKind::Core => "core".to_owned(),
+        ElfKind::Other(value) => format!("e_type {value}"),
+    }
+}
+
+/// The directory component under which an application keeps its native code.
+const PRIV_DIR: &str = "priv";
+
+/// The largest file under a `priv` directory that is read to be inspected.
+///
+/// The same bound [`crate::verify`] applies, for the same reason: an ELF
+/// header says nothing about how large the file behind it is, and `doctor` may
+/// not be the command that runs a machine out of memory.
+const MAX_NATIVE_BYTES: u64 = crate::verify::MAX_OBJECT_BYTES;
+
+/// How deep the shipment walk goes.
+///
+/// A shipment is `<app>/<ebin|priv>/…`, so five levels is already more than a
+/// real one uses and twelve is generous rather than exact: a NIF under
+/// `priv/lib/<arch>/<abi>/` is still found, and nothing a Gleam project
+/// produces goes deeper. The bound is against a cycle somebody put in a build
+/// directory, not against a deep project.
+const MAX_SHIPMENT_DEPTH: usize = 12;
+
+/// A `gleam.toml` as `doctor` reads it, before any rule is applied.
+///
+/// [`ProjectConfig`] refuses a manifest with an unknown `[tools.ginary]` key,
+/// which is exactly the case this report exists to *describe*: the identity of
+/// the project has to survive a `[tools.ginary]` that does not parse, so the
+/// name and the version are read here and the table's status is read
+/// separately.
+#[derive(Debug, Default, Deserialize)]
+struct RawManifest {
+    /// The project name.
+    #[serde(default)]
+    name: Option<String>,
+    /// The project version.
+    #[serde(default)]
+    version: Option<String>,
+    /// The `[tools]` table, when there is one.
+    #[serde(default)]
+    tools: Option<RawTools>,
+}
+
+/// The `[tools]` table of a `gleam.toml`, as far as `doctor` reads it.
+#[derive(Debug, Default, Deserialize)]
+struct RawTools {
+    /// Whether `[tools.ginary]` is there at all, whatever is in it.
+    #[serde(default)]
+    ginary: Option<serde::de::IgnoredAny>,
+}
+
+/// Reads the project `start` is in, when it is in one.
+///
+/// `None` when no `gleam.toml` is found at or above `start`, which is the
+/// ordinary case for `ginary doctor` run anywhere else. `now` is passed in
+/// rather than read so that the shipment's age is a pure function.
+pub fn project_context(start: &Path, now: SystemTime) -> Option<ProjectReport> {
+    let project = crate::gleam::find_project(start).ok()?;
+    let manifest = project.manifest();
+    let text = std::fs::read_to_string(&manifest).ok()?;
+    let raw: RawManifest = toml::from_str(&text).unwrap_or_default();
+
+    let name = raw.name.unwrap_or_else(|| {
+        project.root().file_name().map_or_else(
+            || DASH.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    });
+
+    let shipment_dir = project.shipment();
+    let shipment = shipment_report(&shipment_dir, now);
+    let native = if shipment.is_some() {
+        native_objects(&shipment_dir)
+    } else {
+        Vec::new()
+    };
+
+    Some(ProjectReport {
+        root: project.root().to_path_buf(),
+        name,
+        version: raw.version,
+        shipment,
+        config: config_status(&text, &manifest, raw.tools.and_then(|tools| tools.ginary)),
+        native,
+    })
+}
+
+/// What `[tools.ginary]` said, or why it could not be read.
+///
+/// The table's *presence* and its *validity* are two questions, and only the
+/// raw read answers the first: [`ProjectConfig`] fills in the defaults for a
+/// project that declares no table at all, so a manifest with no `[tools.ginary]`
+/// and one with an empty `[tools.ginary]` parse identically.
+fn config_status(
+    text: &str,
+    manifest: &Path,
+    declared: Option<serde::de::IgnoredAny>,
+) -> ConfigStatus {
+    match ProjectConfig::from_toml(text, manifest) {
+        Ok(_) if declared.is_some() => ConfigStatus::Ok,
+        Ok(_) => ConfigStatus::Absent,
+        Err(error) => ConfigStatus::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+/// The exported shipment and its age, when a project has one.
+fn shipment_report(shipment: &Path, now: SystemTime) -> Option<ShipmentReport> {
+    let modified = std::fs::metadata(shipment)
+        .ok()
+        .filter(|metadata| metadata.is_dir())?;
+    let age_secs = modified
+        .modified()
+        .ok()
+        .and_then(|when| now.duration_since(when).ok())
+        .map_or(0, |age| age.as_secs());
+    Some(ShipmentReport {
+        path: shipment.to_path_buf(),
+        age_secs,
+    })
+}
+
+/// Every ELF under the shipment's `priv` directories, in path order.
+///
+/// The magic decides and never the extension: a `.so` that is really a shell
+/// wrapper is not native code, and a NIF under `priv/lib` may be called
+/// anything. A file whose first bytes *are* the magic and which does not parse
+/// as an ELF is not listed — there is nothing this table could say about it —
+/// and `ginary verify` names it on the artifact that carries it.
+fn native_objects(shipment: &Path) -> Vec<NativeObject> {
+    let host = Target::host().arch.as_str();
+    let mut found = Vec::new();
+    walk_shipment(shipment, shipment, 0, &mut |relative, path| {
+        if !relative.split('/').any(|component| component == PRIV_DIR) {
+            return;
+        }
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return;
+        };
+        if !metadata.is_file() || metadata.len() > MAX_NATIVE_BYTES {
+            return;
+        }
+        // The magic first and the whole file only after it: a `priv` directory
+        // holds assets as well as objects, and a ninety-megabyte one that is
+        // not an ELF must not be read into memory to learn that it is not.
+        if !begins_with_elf_magic(path) {
+            return;
+        }
+        let Ok(info) = elf::inspect(path) else {
+            return;
+        };
+        found.push(NativeObject {
+            path: relative.to_owned(),
+            machine: info.machine.clone(),
+            kind: info.kind,
+            needed: info.needed,
+            matches_host: info.machine == host,
+        });
+    });
+    found.sort_by(|left, right| left.path.cmp(&right.path));
+    found
+}
+
+/// Whether the first bytes of `path` are [`elf::ELF_MAGIC`].
+///
+/// Four bytes, and nothing else is read. `false` for a file that cannot be
+/// opened or that is shorter than the magic, both of which are files this
+/// table has nothing to say about.
+fn begins_with_elf_magic(path: &Path) -> bool {
+    use std::io::Read as _;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; elf::ELF_MAGIC.len()];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => return false,
+            Ok(read) => filled = filled.saturating_add(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    elf::is_elf(&head)
+}
+
+/// Calls `visit` for every regular file under `dir`, with its path relative to
+/// `root`.
+///
+/// Depth-bounded by [`MAX_SHIPMENT_DEPTH`], because a `build/` directory is a
+/// place other tools write and a loop in it must not become a `doctor` that
+/// does not return. A directory symlink is therefore never descended into: a
+/// symlink is followed only when it resolves to a regular *file*, which is how
+/// a NIF installed as a link reaches the table, and a symlink to a directory,
+/// to nothing, or to a device is passed over.
+fn walk_shipment(root: &Path, dir: &Path, depth: usize, visit: &mut impl FnMut(&str, &Path)) {
+    if depth >= MAX_SHIPMENT_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let Ok(kind) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if kind.is_dir() {
+            walk_shipment(root, &path, depth + 1, visit);
+            continue;
+        }
+        // `metadata` rather than `symlink_metadata`: this is where a symlink
+        // is followed, and only a symlink whose target is a regular file gets
+        // past it.
+        if !std::fs::metadata(&path).is_ok_and(|target| target.is_file()) {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        visit(&relative.to_string_lossy().replace('\\', "/"), &path);
     }
 }
 
@@ -161,6 +814,8 @@ pub struct Report {
     pub cache_dir_source: Option<&'static str>,
     /// Why the cache root could not be resolved, when it could not.
     pub cache_dir_error: Option<String>,
+    /// What the cache root turned out to allow, when there was one to probe.
+    pub cache_probe: Option<CacheProbe>,
     /// One entry per probed program: `gleam`, `erl`, `strip`, `docker`, in that
     /// order.
     pub tools: Vec<ToolReport>,
@@ -174,6 +829,8 @@ pub struct Report {
     /// failing is a reported decision, never a silent one, so it is `None`
     /// exactly when [`Report::otp`] is `Some`.
     pub otp_error: Option<String>,
+    /// The Gleam project `doctor` was run inside, when it was run in one.
+    pub project: Option<ProjectReport>,
 }
 
 impl Report {
@@ -192,6 +849,9 @@ impl Report {
             otp::discover(None)
                 .map(|info| OtpReport::of(&info))
                 .map_err(|error| error.to_string()),
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| project_context(&cwd, SystemTime::now())),
         )
     }
 
@@ -206,6 +866,7 @@ impl Report {
         path_var: Option<&OsStr>,
         env: &EnvSnapshot,
         otp: Result<OtpReport, String>,
+        project: Option<ProjectReport>,
     ) -> Self {
         let (otp, otp_error) = match otp {
             Ok(report) => (Some(report), None),
@@ -220,6 +881,7 @@ impl Report {
             Ok(resolved) => (Some(resolved.path), Some(resolved.source.variable()), None),
             Err(error) => (None, None, Some(error.to_string())),
         };
+        let cache_probe = cache_dir.as_deref().map(probe_cache_dir);
 
         Self {
             format_version: FORMAT_VERSION,
@@ -228,9 +890,11 @@ impl Report {
             cache_dir,
             cache_dir_source,
             cache_dir_error,
+            cache_probe,
             tools,
             otp,
             otp_error,
+            project,
         }
     }
 
@@ -250,15 +914,37 @@ impl Report {
                 ),
             },
         ];
+        if let Some(probe) = &self.cache_probe {
+            lines.extend(block(&probe.render()));
+        }
         lines.extend(self.tools.iter().map(ToolReport::render));
         lines.push(match (&self.otp, &self.otp_error) {
             (Some(otp), _) => otp.render(),
             (None, Some(reason)) => format!("otp: unusable ({reason})"),
             (None, None) => "otp: not found".to_owned(),
         });
+        if let Some(crypto) = self.otp.as_ref().and_then(|otp| otp.crypto.as_ref()) {
+            lines.extend(block(&crypto.render()));
+        }
+        if let Some(project) = &self.project {
+            lines.push(String::new());
+            lines.extend(block(&project.render()));
+        }
         lines.push(String::new());
         lines.join("\n")
     }
+}
+
+/// One rendered block, as the lines [`Report::render_text`] joins.
+///
+/// Every `render` in this module ends its last line with a newline, which is
+/// what makes each one usable on its own; the report joins lines instead, so
+/// the terminator is taken off here rather than each block being written twice.
+fn block(text: &str) -> Vec<String> {
+    text.trim_end_matches('\n')
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Looks a program up on `PATH` and, if present, asks it for its version.
@@ -452,8 +1138,10 @@ mod tests {
             cache_dir: Some(PathBuf::from("/home/u/.cache/ginary")),
             cache_dir_source: Some("HOME"),
             cache_dir_error: None,
+            cache_probe: None,
             otp: None,
             otp_error: None,
+            project: None,
             tools: vec![ToolReport {
                 name: "gleam".to_owned(),
                 found: false,
@@ -480,6 +1168,7 @@ mod tests {
             None,
             &cache_snapshot("/srv/ginary-cache"),
             Err("`/opt/broken` has no `erts-*` directory".to_owned()),
+            None,
         );
         assert_eq!(report.otp, None);
         assert_eq!(
@@ -506,7 +1195,9 @@ mod tests {
                 release: 29,
                 erts_vsn: "17.0.5".to_owned(),
                 otp_version: "29.0.5".to_owned(),
+                crypto: None,
             }),
+            None,
         );
         assert_eq!(report.otp_error, None);
         let text = report.render_text();
@@ -526,8 +1217,10 @@ mod tests {
             cache_dir: None,
             cache_dir_source: None,
             cache_dir_error: Some("no HOME".to_owned()),
+            cache_probe: None,
             otp: None,
             otp_error: None,
+            project: None,
             tools: Vec::new(),
         };
         assert!(
@@ -557,6 +1250,7 @@ mod tests {
             Some(&path_var),
             &cache_snapshot("/srv/ginary-cache"),
             Err("no OTP was looked for".to_owned()),
+            None,
         );
 
         assert!(!report.rustc_required);
@@ -574,6 +1268,7 @@ mod tests {
             None,
             &cache_snapshot("/srv/ginary-cache"),
             Err("no OTP was looked for".to_owned()),
+            None,
         );
         assert_eq!(report.cache_dir, Some(PathBuf::from("/srv/ginary-cache")));
         assert_eq!(report.cache_dir_source, Some("GINARY_CACHE_DIR"));
@@ -583,8 +1278,13 @@ mod tests {
 
     #[test]
     fn gathering_records_why_the_cache_directory_is_unresolved() {
-        let report =
-            Report::gather_from(&[], None, &EnvSnapshot::default(), Err("no OTP".to_owned()));
+        let report = Report::gather_from(
+            &[],
+            None,
+            &EnvSnapshot::default(),
+            Err("no OTP".to_owned()),
+            None,
+        );
         assert_eq!(report.cache_dir, None);
         assert_eq!(report.cache_dir_source, None);
         assert!(report.cache_dir_error.is_some(), "{report:?}");
