@@ -118,8 +118,24 @@ pub fn no_payload_line(target: crate::target::Target) -> String {
 /// never fall through to the command line and answer with ginary's help text.
 pub fn mode() -> Result<Option<(File, PathBuf, Trailer)>, LauncherError> {
     let (exe, exe_path) = crate::selfexe::open_self()?;
-    match Trailer::read_from(&exe)? {
-        Some(trailer) => Ok(Some((exe, exe_path, trailer))),
+    // `payload::locate` tries the end-of-file trailer first, so a Linux or
+    // Windows artifact is recognised exactly as before this existed; a
+    // macOS one, which carries its payload in a `__GINARY,__payload`
+    // section instead, is recognised too, once a darwin build of this
+    // launcher exists to read it. Rebuilding a `Trailer` from the answer is
+    // what lets every step past this one — `dispatch`, `ensure_extracted`,
+    // the crash-dump plan — stay written against the one struct they always
+    // were, unaware which container the payload actually came from.
+    match crate::payload::locate(&exe)? {
+        Some(loc) => Ok(Some((
+            exe,
+            exe_path,
+            Trailer {
+                payload_offset: loc.offset,
+                payload_len: loc.len,
+                payload_sha256: loc.sha256,
+            },
+        ))),
         None => Ok(None),
     }
 }

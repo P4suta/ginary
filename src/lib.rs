@@ -120,6 +120,16 @@
 //!   Windows, which stays resident because there is no `execve` to hand the
 //!   process over with.
 //!
+//! Milestone D3 adds macOS packaging, to the limit of what a Linux host can
+//! prove:
+//!
+//! - [`macho`] — read-only inspection of Mach-O binaries: `cputype`, whether
+//!   the file is fat, whether it carries a code signature, and where a named
+//!   section is; not gated behind the `cli` feature, because a launched
+//!   macOS artifact locates its own payload through it;
+//! - [`sign_macos`] — writing the `__GINARY,__payload` section into a Mach-O
+//!   stub and applying an ad-hoc code signature.
+//!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
 //! `docs/format.md` for the payload format the launcher will read.
 
@@ -174,6 +184,7 @@ pub mod launch;
 #[cfg(windows)]
 pub mod launch_windows;
 pub mod launcher;
+pub mod macho;
 pub mod manifest;
 #[cfg(feature = "cli")]
 pub mod native;
@@ -186,6 +197,8 @@ pub mod report;
 #[cfg(feature = "cli")]
 pub mod sbom;
 pub mod selfexe;
+#[cfg(feature = "cli")]
+pub mod sign_macos;
 #[cfg(feature = "cli")]
 pub mod strip;
 #[cfg(feature = "cli")]

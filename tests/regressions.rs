@@ -218,3 +218,10 @@ mod d2_the_launcher_opened_a_path_it_had_not_written;
 mod d2_the_windows_prune_could_not_rename_what_it_locked;
 #[path = "regressions/d2_the_windows_shared_lock_created_the_file_it_shared.rs"]
 mod d2_the_windows_shared_lock_created_the_file_it_shared;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/d3_macho_section_addr_was_never_shifted.rs"]
+mod d3_macho_section_addr_was_never_shifted;
+#[cfg(feature = "cli")]
+#[path = "regressions/d3_macho_segment_vmaddr_and_vmsize_were_wrong.rs"]
+mod d3_macho_segment_vmaddr_and_vmsize_were_wrong;

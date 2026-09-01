@@ -55,6 +55,65 @@ missing magic means "this is the tool"; a broken magic means "this is a broken a
 The cache key is the first eight bytes of `sha256`, in lower-case hexadecimal: sixteen
 characters, `Trailer::cache_key`.
 
+### Mach-O section container
+
+Appending bytes after a Mach-O's `__LINKEDIT` segment — which the layout above does for ELF and
+PE — breaks `codesign --strict`, and the arm64 kernel refuses to map a page whose signature it
+cannot verify at all, not merely one whose signature disagrees. So a macOS artifact carries its
+payload a different way: a dedicated `__GINARY,__payload` section, written by `sign_macos.rs`
+and read back by `macho.rs`, with an ad-hoc `CodeDirectory` applied over the whole file
+afterwards. See `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for why a section and
+not a different offset within the file.
+
+```
++-----------------------------------------------+
+|  stub (a ginary Mach-O, unmodified)            |
+|    ... its own segments and sections ...       |
+|  __GINARY,__payload section                    |
+|  +-------------------------------------------+ |  section offset 0
+|  |  trailer (64 bytes, payload_offset = 64)   | |
+|  +-------------------------------------------+ |  section offset 64
+|  |  payload (zstd stream)                     | |
+|  +-------------------------------------------+ |  section offset 64 + payload_len
+|  ... an LC_CODE_SIGNATURE load command and its |
+|      CodeDirectory, appended after signing ... |
++-------------------------------------------------+
+```
+
+The section's first 64 bytes are the same trailer struct the table above describes, with one
+field read differently: `payload_offset` is relative to the *section's* first byte rather than
+to the file's, and this format fixes it at exactly 64 — the payload immediately follows the
+trailer, and nothing else is in the section. `payload::locate` converts that to an absolute file
+offset as `section_file_offset + 64` before handing a `(file, offset, len)` stream to any reader,
+which is why nothing downstream of it — the launcher, `ginary inspect`, `ginary verify`,
+`cache::ensure_extracted` — has to know which container produced it.
+
+Validation, over the section's raw bytes:
+
+1. `payload::locate` tries the end-of-file trailer first, unconditionally, for every target: an
+   ELF or a PE artifact is answered exactly as before this format existed, and a Mach-O is only
+   read as a section when the last 64 bytes of the file are not a trailer.
+2. If the file does not begin with a Mach-O magic (thin or fat), there is no section to look
+   up and the answer is the same `Ok(None)` a plain ginary command-line binary gets.
+3. A fat Mach-O carries more than one architecture and therefore no single section:
+   `TrailerError::Fat`.
+4. If the file is thin and carries no `__GINARY,__payload` section, the answer is `Ok(None)`:
+   it is a plain macOS ginary stub or command-line binary.
+5. If the section is smaller than 64 bytes, or its first 64 bytes do not carry the trailer
+   magic, the section cannot hold a trailer at all: `TrailerError::Section`.
+6. Otherwise the 64 bytes are read as a trailer with the section's own size, plus the 64-byte
+   trailer length, in place of the file length the end-of-file case checks against: a
+   `payload_offset` or `payload_len` that does not make `64 + payload_len` equal the section's
+   size is `TrailerError::Geometry`, the same variant and the same message a truncated or
+   appended-to ELF or PE gets.
+
+Only the artifact itself, the outermost Mach-O, has to be signed for the kernel to load it: an
+inner object inside the payload (a NIF, a port program) carries no such requirement. `macho.rs`
+can already read such an object's `cputype`, target and `LC_CODE_SIGNATURE` presence the same
+way it reads the artifact's own; giving `ginary verify`'s native-object scan that same awareness
+for a Mach-O, the way it already has it for an ELF, is recorded in `docs/dev/log/D3.md` as scoped
+out of this milestone rather than done partway.
+
 ## Payload
 
 The payload is a single zstd stream. Decompressed it is a tar archive whose entries are written

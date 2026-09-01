@@ -92,6 +92,27 @@ pub enum TrailerError {
     /// The last 64 bytes could not be read.
     #[error("reading the last {TRAILER_LEN} bytes of the artifact failed")]
     Io(#[from] std::io::Error),
+    /// The file begins with a Mach-O magic and is a fat (universal) binary.
+    ///
+    /// A fat binary carries more than one architecture, so there is no
+    /// single `__GINARY,__payload` section to find without first choosing
+    /// which slice is meant; see [`crate::payload::locate`].
+    #[error(
+        "this is a fat Mach-O carrying more than one architecture, so its payload cannot be \
+         located without choosing an architecture"
+    )]
+    Fat,
+    /// The file begins with a Mach-O magic, but its `__GINARY,__payload`
+    /// section — when it has one — could not be read.
+    ///
+    /// The reason travels as text rather than as [`crate::macho::MachoError`]
+    /// itself, so that this module, which every target's artifact reads,
+    /// stays free of a dependency only macOS needs.
+    #[error("the Mach-O `__GINARY,__payload` section could not be read: {message}")]
+    Section {
+        /// What [`crate::macho`] said.
+        message: String,
+    },
 }
 
 impl Trailer {
@@ -191,9 +212,11 @@ impl Trailer {
 /// `pread(2)`, which is what the launcher needs here: `main` reads the trailer
 /// out of the running executable and then hands the same open file to the
 /// payload reader, so a read that moved the cursor would be a read the next
-/// stage has to undo.
+/// stage has to undo. `pub(crate)` rather than private: [`crate::payload::locate`]
+/// reuses it for the same reason, to read a Mach-O section's inner trailer
+/// without disturbing the file's own cursor.
 #[cfg(unix)]
-fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt as _;
 
     file.read_exact_at(buffer, offset)
@@ -208,7 +231,7 @@ fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result
 /// full has hit the end of the file, and 64 bytes that are not there are not a
 /// trailer.
 #[cfg(windows)]
-fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt as _;
 
     let mut filled = 0usize;

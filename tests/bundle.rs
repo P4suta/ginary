@@ -337,6 +337,27 @@ fn a_build_for_a_target_whose_stub_is_not_there_is_refused() {
 }
 
 #[test]
+fn a_macos_build_with_no_darwin_stub_gets_the_honest_stub_search_error() {
+    // There is no macOS toolchain on this host, so there is never a stub to
+    // find for a darwin target without `--stub` or `GINARY_STUB_DIR`. This is
+    // the one honest end state a darwin build reaches here: the same
+    // `BundleError::Stub` refusal every other unstubbed cross target gets,
+    // naming every path `stub::locate` tried — see `docs/dev/log/D3.md` for
+    // what only a macOS CI runner can carry this further.
+    let project = TempProject::named("hello");
+    let macos: Target = "macos-aarch64".parse().expect("a target name");
+    let options = build_options_for(&project, &[macos]);
+
+    let error = bundle::build_with_stub(&options, &ginary_bin(), &Diag::disabled())
+        .expect_err("no darwin stub exists on this host");
+
+    assert!(
+        matches!(&error, BundleError::Stub { target, .. } if *target == macos),
+        "expected BundleError::Stub for {macos}, got {error:?}"
+    );
+}
+
+#[test]
 fn a_cross_target_is_refused_before_the_project_is_exported() {
     // The same rule `BundleError::BundledStub` follows: the remedy is a
     // different command line, and a build that exported and staged a whole

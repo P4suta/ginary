@@ -497,21 +497,73 @@ fn a_packaged_application_is_not_a_stub() {
     );
 }
 
+/// A hand-fabricated Mach-O for `cpu_type`, with `marker` appended.
+///
+/// Appending is safe for the same reason it is for an ELF: nothing in a
+/// Mach-O's own headers describes bytes past the last load command's data,
+/// which is the property [`stub_copy`] relies on for ELF and this relies on
+/// here.
+fn darwin_stub_bytes(cpu_type: u32, marker: &[u8; 128]) -> Vec<u8> {
+    let mut bytes = common::macho::thin_header(cpu_type, common::macho::MH_EXECUTE);
+    bytes.extend_from_slice(marker);
+    bytes
+}
+
 #[test]
-fn a_darwin_stub_cannot_be_checked_here_yet() {
+fn a_darwin_stub_with_a_matching_cputype_and_marker_is_accepted() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let macos: Target = "macos-aarch64".parse().expect("a target name");
-    let path = stub_copy(dir.path(), "darwin", &Marker::for_target(&macos).bytes());
-
-    let error = stub::verify(&path, &macos).expect_err("Mach-O is not read yet");
-
-    assert!(
-        matches!(&error, StubError::NotYetSupported { target } if *target == macos),
-        "expected StubError::NotYetSupported, got {error:?}"
+    let bytes = darwin_stub_bytes(
+        common::macho::CPU_TYPE_ARM64,
+        &Marker::for_target(&macos).bytes(),
     );
+    let path = stubfile::write_executable(dir.path(), "darwin", &bytes);
+
+    let id = stub::verify(&path, &macos)
+        .expect("an arm64 Mach-O whose marker names macos-aarch64 should verify");
+
+    assert_eq!(id, expected_id(macos, Flavor::Full));
+}
+
+#[test]
+fn a_darwin_stub_whose_cputype_disagrees_with_its_marker_is_refused_by_the_header() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let macos: Target = "macos-aarch64".parse().expect("a target name");
+    // The marker says arm64; the Mach-O header itself is x86_64.
+    let bytes = darwin_stub_bytes(
+        common::macho::CPU_TYPE_X86_64,
+        &Marker::for_target(&macos).bytes(),
+    );
+    let path = stubfile::write_executable(dir.path(), "darwin", &bytes);
+
+    let error = stub::verify(&path, &macos)
+        .expect_err("the header disagrees with the marker it sits behind");
+
     assert!(
-        error.to_string().contains("release build"),
-        "the message says where a darwin stub comes from: {error}"
+        matches!(&error, StubError::ObjectMismatch { want, .. } if *want == macos),
+        "expected StubError::ObjectMismatch, got {error:?}"
+    );
+}
+
+#[test]
+fn a_darwin_stub_that_already_carries_a_payload_section_is_refused() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let macos: Target = "macos-aarch64".parse().expect("a target name");
+    let built = common::macho::with_payload_section(
+        common::macho::CPU_TYPE_ARM64,
+        b"already a packaged application",
+        [0u8; 32],
+    );
+    let mut bytes = built.bytes;
+    bytes.extend_from_slice(&Marker::for_target(&macos).bytes());
+    let stub_path = stubfile::write_executable(dir.path(), "darwin", &bytes);
+
+    let error = stub::verify(&stub_path, &macos)
+        .expect_err("a stub that already carries a __GINARY,__payload section is an artifact");
+
+    assert!(
+        matches!(&error, StubError::Sectioned { path } if *path == stub_path),
+        "expected StubError::Sectioned, got {error:?}"
     );
 }
 

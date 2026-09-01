@@ -28,6 +28,7 @@
 //! completeness is judged by — is written last, once the digest has matched.
 
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -35,6 +36,7 @@ use sha2::{Digest, Sha256};
 
 use crate::assemble::{LISTING_NAME, StageListing};
 use crate::manifest::{INDEX_NAME, Index, IndexError, MANIFEST_NAME, Manifest, ManifestError};
+use crate::trailer::{TRAILER_LEN, Trailer, TrailerError};
 
 /// The largest `ginary.json` or `ginary.index.json` a reader will hold in
 /// memory.
@@ -64,6 +66,167 @@ pub struct Packed {
     /// The SHA-256 of exactly those bytes.
     pub sha256: [u8; 32],
 }
+
+/// How [`locate`] found a [`PayloadLoc`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadVia {
+    /// The 64-byte trailer at the end of the file — every ELF, every PE, and
+    /// every artifact this crate wrote before its D3 milestone.
+    EofTrailer,
+    /// The `__GINARY,__payload` Mach-O section: a macOS artifact, whose
+    /// payload cannot be appended after the file's own `__LINKEDIT` without
+    /// breaking code signing. See `docs/format.md`.
+    MachOSection,
+}
+
+/// Where a packaged application's payload is, however its container found
+/// it: appended at the end of the file, or held inside a Mach-O section.
+///
+/// This is the one abstraction the launcher, `ginary inspect`, `ginary
+/// verify` and `cache::ensure_extracted` read the payload through; none of
+/// them has to know which of the two containers produced it; each is handed
+/// a plain `(file, offset, len)` stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayloadLoc {
+    /// The absolute offset of the payload's first byte.
+    pub offset: u64,
+    /// The payload's length in bytes.
+    pub len: u64,
+    /// SHA-256 of exactly [`PayloadLoc::len`] payload bytes.
+    pub sha256: [u8; 32],
+    /// How this location was found.
+    pub via: PayloadVia,
+}
+
+/// Finds where `file`'s payload is.
+///
+/// The end-of-file trailer is tried first, which is what every ELF, every PE
+/// and every artifact this crate wrote before D3 already carries: reading it
+/// is unchanged, so nothing that already locates a payload this way has to
+/// know this function exists. Only when the last 64 bytes are not a trailer,
+/// and only when the file begins with a Mach-O magic, does `locate` look up
+/// the `__GINARY,__payload` section through [`crate::macho`]: its first 64
+/// bytes are the same trailer struct, with `payload_offset` relative to the
+/// section's own start rather than to the file, which this function converts
+/// to an absolute offset.
+///
+/// Returns [`None`] when `file` carries no payload at all: it is the ginary
+/// command line tool, or a Mach-O with no `__GINARY,__payload` section.
+///
+/// # Errors
+///
+/// [`TrailerError`] when a trailer is found — at the end of the file, or
+/// inside the Mach-O section — and its bytes do not add up;
+/// [`TrailerError::Fat`] when the file is a fat Mach-O, which carries no
+/// single section to look the payload up in; and [`TrailerError::Section`]
+/// when the file's Mach-O container itself could not be read.
+pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
+    if let Some(trailer) = Trailer::read_from(file)? {
+        return Ok(Some(PayloadLoc {
+            offset: trailer.payload_offset,
+            len: trailer.payload_len,
+            sha256: trailer.payload_sha256,
+            via: PayloadVia::EofTrailer,
+        }));
+    }
+
+    // No EOF trailer. Only a Mach-O carries its payload any other way, so
+    // nothing further is read unless the file begins with one of its
+    // magics. `head` is capped well below the file's own length: the
+    // header and every load command sit at the front of a Mach-O, and the
+    // section a payload occupies is everything after them, so there is
+    // never a reason to hold the payload itself in memory just to find it.
+    let file_len = file.metadata().map_err(TrailerError::Io)?.len();
+    let head_len = file_len.min(MACHO_HEAD_CAP) as usize;
+    let mut head = vec![0u8; head_len];
+    crate::trailer::read_exact_at(file, &mut head, 0).map_err(TrailerError::Io)?;
+    if !crate::macho::is_macho(&head) {
+        return Ok(None);
+    }
+
+    let facts = crate::macho::read(&head).map_err(|source| TrailerError::Section {
+        message: source.to_string(),
+    })?;
+    if facts.is_fat {
+        return Err(TrailerError::Fat);
+    }
+    let Some((section_offset, section_size)) = crate::macho::section(
+        &head,
+        crate::macho::PAYLOAD_SEGMENT,
+        crate::macho::PAYLOAD_SECTION,
+    ) else {
+        return Ok(None);
+    };
+
+    if section_size < TRAILER_LEN {
+        return Err(TrailerError::Section {
+            message: format!(
+                "the {segment},{section} section is {section_size} bytes, too small to hold \
+                 the {TRAILER_LEN}-byte trailer",
+                segment = crate::macho::PAYLOAD_SEGMENT,
+                section = crate::macho::PAYLOAD_SECTION,
+            ),
+        });
+    }
+
+    // The section's own first 64 bytes are the trailer struct, with
+    // `payload_offset` relative to the section rather than to the file; see
+    // `docs/format.md` and `docs/dev/log/D3.md` for why. Reusing
+    // `Trailer::parse` for the geometry check means passing it
+    // `section_size + TRAILER_LEN` in place of a file length: that is what
+    // makes `payload_offset(64) + payload_len + TRAILER_LEN` land on it for
+    // a well-formed section, the same equation `Trailer::parse` already
+    // checks for the EOF case, applied to a region one trailer length
+    // larger than the section itself.
+    let mut inner = [0u8; TRAILER_LEN as usize];
+    crate::trailer::read_exact_at(file, &mut inner, section_offset).map_err(TrailerError::Io)?;
+    let region_len = section_size.saturating_add(TRAILER_LEN);
+    let inner_trailer =
+        Trailer::parse(&inner, region_len)?.ok_or_else(|| TrailerError::Section {
+            message: format!(
+                "the {segment},{section} section's first {TRAILER_LEN} bytes carry no ginary magic",
+                segment = crate::macho::PAYLOAD_SEGMENT,
+                section = crate::macho::PAYLOAD_SECTION,
+            ),
+        })?;
+
+    // `docs/format.md` fixes `payload_offset` at exactly `TRAILER_LEN`: the
+    // payload immediately follows the trailer and nothing else is in the
+    // section. `Trailer::parse`'s own equation has other solutions — a
+    // `payload_offset` of `0` paired with a `payload_len` equal to the whole
+    // region also balances it — so that equation alone does not prove the
+    // fixed layout this section is defined to have; this checks it directly
+    // rather than let a section built to a different, still-balanced
+    // geometry point `PayloadLoc::offset` somewhere other than just past the
+    // trailer.
+    if inner_trailer.payload_offset != TRAILER_LEN {
+        return Err(TrailerError::Section {
+            message: format!(
+                "the {segment},{section} section's trailer names payload_offset \
+                 {found}, and this format fixes it at {TRAILER_LEN}",
+                segment = crate::macho::PAYLOAD_SEGMENT,
+                section = crate::macho::PAYLOAD_SECTION,
+                found = inner_trailer.payload_offset,
+            ),
+        });
+    }
+
+    Ok(Some(PayloadLoc {
+        offset: section_offset.saturating_add(inner_trailer.payload_offset),
+        len: inner_trailer.payload_len,
+        sha256: inner_trailer.payload_sha256,
+        via: PayloadVia::MachOSection,
+    }))
+}
+
+/// The most of a file's front [`locate`] reads to look for a
+/// `__GINARY,__payload` Mach-O section.
+///
+/// A Mach-O header and every one of its load commands sit at the front of
+/// the file; sixteen mebibytes is far more than any real one occupies, and
+/// staying well under the payload's own size (which can be gigabytes) is the
+/// whole point of the cap.
+const MACHO_HEAD_CAP: u64 = 16 * 1024 * 1024;
 
 /// Why a payload could not be written or read.
 #[derive(Debug, thiserror::Error)]

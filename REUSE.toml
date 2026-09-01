@@ -34,3 +34,13 @@ path = ["tests/fixtures/beam/*.beam"]
 precedence = "override"
 SPDX-FileCopyrightText = "the gleam_stdlib authors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# `erts-17.0.5/bin/inet_gethost` from erlef/otp_builds' OTP-29.0.5 macOS
+# arm64 release, copied verbatim so that `src/macho.rs` is tested against a
+# real Mach-O it did not write. A binary carries no SPDX header; the path is
+# declared here instead. See tests/fixtures/macho/README.md.
+[[annotations]]
+path = ["tests/fixtures/macho/inet_gethost-aarch64-apple-darwin"]
+precedence = "override"
+SPDX-FileCopyrightText = "Ericsson AB and the Erlang/OTP contributors"
+SPDX-License-Identifier = "Apache-2.0"

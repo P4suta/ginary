@@ -50,7 +50,7 @@ use crate::payload::PayloadError;
 use crate::report::{ReportError, SizeReport};
 use crate::strip::{StripError, StripReport};
 use crate::stub::StubOpts;
-use crate::target::Target;
+use crate::target::{Os, Target};
 use crate::trailer::{TRAILER_LEN, Trailer, TrailerError};
 
 /// The prefix of the per-build staging directory, under `build/ginary`.
@@ -406,7 +406,10 @@ pub fn check_stub(stub: &Path) -> Result<u64, BundleError> {
     // appending a second one would produce an artifact nobody can read. A
     // trailer that could not be *read* is a different fault and gets a
     // different message: "install plain ginary" is no remedy for an EIO.
-    match Trailer::read_from(&file) {
+    // `payload::locate` covers a Mach-O stub that already carries the
+    // `__GINARY,__payload` section too, the same way it covers the eof
+    // trailer every other target's stub is checked by.
+    match crate::payload::locate(&file) {
         Ok(None) => Ok(len),
         Ok(Some(_)) => Err(BundleError::BundledStub {
             path: stub.to_path_buf(),
@@ -1061,7 +1064,7 @@ fn assemble_and_write(
     )?;
     let (payload_len, sha256) = {
         let _phase = diag.phase("pack");
-        write_artifact(opts, &out, stub, stub_len, staged.root(), &manifest)?
+        write_artifact(opts, target, &out, stub, stub_len, staged.root(), &manifest)?
     };
 
     let manifest_copy = opts.manifest_copy_path(target);
@@ -1468,12 +1471,17 @@ fn launch_spec(
 /// is a complete artifact.
 fn write_artifact(
     opts: &BuildOptions,
+    target: Target,
     out: &Path,
     stub: &Path,
     stub_len: u64,
     staging: &Path,
     manifest: &Manifest,
 ) -> Result<(u64, String), BundleError> {
+    if target.os == Os::Macos {
+        return write_macos_artifact(opts, out, stub, staging, manifest);
+    }
+
     let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|source| BundleError::Io {
         what: format!("cannot create the output directory {}", dir.display()),
@@ -1541,6 +1549,93 @@ fn write_artifact(
         what: format!("cannot write the artifact to {}", out.display()),
         source: error.error,
     })?;
+
+    Ok((packed.len, hex::encode(packed.sha256)))
+}
+
+/// [`write_artifact`]'s darwin arm: instead of appending a trailer, the
+/// payload goes into a `__GINARY,__payload` Mach-O section, ad-hoc signed
+/// once it is written. See [`crate::sign_macos`] and ADR
+/// [0016](../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md)
+/// for why a Mach-O cannot be built the ELF/PE way.
+///
+/// Unlike [`write_artifact`] above, this does not go through a temporary
+/// file and an atomic rename — [`crate::sign_macos::inject_and_sign`] writes
+/// `out` directly, so this function creates `out`'s parent directory and
+/// makes the result executable itself, the same two things the ELF/PE arm
+/// gets from `NamedTempFile` and its own `set_permissions` call. There is no
+/// macOS toolchain on this host to build a darwin stub with, so a build
+/// reaching this function through `ginary build --target macos-*` end to end
+/// has no coverage here; what is checked on this machine is this function
+/// directly (`bundle::tests::write_macos_artifact_*`, against the committed
+/// Mach-O fixture standing in for a stub, since `write_macos_artifact` reads
+/// `stub`'s bytes without asking `stub::verify` to prove them), the injector
+/// underneath it (`tests/sign_macos.rs`), and the honest `StubError::NotFound`
+/// a `ginary build --target macos-*` gets without a stub at all.
+/// `docs/dev/log/D3.md` records this scope as work for the milestone that
+/// can actually run a macOS build end to end.
+fn write_macos_artifact(
+    opts: &BuildOptions,
+    out: &Path,
+    stub: &Path,
+    staging: &Path,
+    manifest: &Manifest,
+) -> Result<(u64, String), BundleError> {
+    let stub_bytes = std::fs::read(stub).map_err(|source| BundleError::Io {
+        what: format!("cannot read the stub at {}", stub.display()),
+        source,
+    })?;
+
+    if crate::fault::point("pack") == Some("fail") {
+        return Err(BundleError::Fault { point: "pack" });
+    }
+
+    let mut packed_bytes = Vec::new();
+    let packed =
+        crate::payload::pack(staging, manifest, opts.compression_level, &mut packed_bytes)?;
+
+    let mut payload_with_trailer = Trailer {
+        payload_offset: TRAILER_LEN,
+        payload_len: packed.len,
+        payload_sha256: packed.sha256,
+    }
+    .to_bytes()
+    .to_vec();
+    payload_with_trailer.extend_from_slice(&packed_bytes);
+
+    // Mirrors `write_artifact`'s ELF/PE arm above: the output directory is
+    // not assumed to exist, since an ordinary first build has not created it
+    // yet.
+    let dir = out.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|source| BundleError::Io {
+        what: format!("cannot create the output directory {}", dir.display()),
+        source,
+    })?;
+
+    crate::sign_macos::inject_and_sign(
+        &stub_bytes,
+        &payload_with_trailer,
+        out,
+        &crate::sign_macos::MacSignCfg {
+            codesign: crate::sign_macos::CodeSign::Adhoc,
+        },
+    )
+    .map_err(BundleError::MacSign)?;
+
+    // Mirrors `write_artifact`'s ELF/PE arm above, which chmods its temp
+    // file before publishing it: `inject_and_sign` writes `out` with
+    // `std::fs::write`, which gives it the platform default (not
+    // executable), so the artifact is unusable until this runs.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(out, std::fs::Permissions::from_mode(ARTIFACT_MODE)).map_err(
+            |source| BundleError::Io {
+                what: "cannot make the artifact executable".to_owned(),
+                source,
+            },
+        )?;
+    }
 
     Ok((packed.len, hex::encode(packed.sha256)))
 }
@@ -1651,6 +1746,10 @@ pub enum BundleError {
     /// The payload could not be packed.
     #[error("cannot pack the payload")]
     Payload(#[from] PayloadError),
+    /// A macOS artifact's payload section could not be written or ad-hoc
+    /// signed.
+    #[error("cannot write the macOS payload section")]
+    MacSign(#[from] crate::sign_macos::SignMacosError),
     /// The size report could not be measured.
     #[error("cannot measure the staged tree")]
     Report(#[from] ReportError),
@@ -2068,5 +2167,155 @@ mod tests {
             panic!("expected ConfigError::UnreadableFile, got {error:?}");
         };
         assert_eq!(file, &path);
+    }
+
+    // --------------------------------------------- write_macos_artifact --
+
+    /// The committed real Mach-O fixture, standing in for a darwin stub —
+    /// `write_macos_artifact` only reads `stub`'s bytes, it never asks
+    /// `stub::verify` to prove them, so the fixture (which carries no ginary
+    /// marker) works here the same way it does in `tests/sign_macos.rs`.
+    fn macos_stub_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/macho/inet_gethost-aarch64-apple-darwin")
+    }
+
+    /// The smallest staging root [`write_macos_artifact`] accepts: one
+    /// staged file and the listing `payload::pack` reads back.
+    fn macos_staging_tree(root: &Path) {
+        use crate::assemble::{LISTING_NAME, StageListing, StagedApp, StagedFile, StagedSource};
+
+        let file_path = root.join("lib/hello/ebin/hello.beam");
+        std::fs::create_dir_all(file_path.parent().expect("a parent"))
+            .expect("create the staging directory");
+        let data = b"FOR1\0\0\0\x04BEAM";
+        std::fs::write(&file_path, data).expect("write the staged file");
+
+        let listing = StageListing {
+            erts_vsn: "17.0.5".to_owned(),
+            otp_release: 29,
+            otp_version: "29.0.5".to_owned(),
+            apps: vec![StagedApp {
+                name: "hello".to_owned(),
+                vsn: "1.2.3".to_owned(),
+                source: StagedSource::Shipment,
+                dir: "lib/hello".to_owned(),
+                files: 1,
+                bytes: data.len() as u64,
+            }],
+            files: vec![StagedFile {
+                path: "lib/hello/ebin/hello.beam".to_owned(),
+                size: data.len() as u64,
+                mode: 0o644,
+                category: Category::GleamBeam,
+            }],
+        };
+        let json = serde_json::to_string_pretty(&listing).expect("serialise the listing");
+        std::fs::write(root.join(LISTING_NAME), format!("{json}\n")).expect("write the listing");
+    }
+
+    /// The manifest [`macos_staging_tree`] matches.
+    fn macos_manifest() -> Manifest {
+        use crate::manifest::{LaunchSpec, OtpProvenance};
+
+        Manifest {
+            format_version: crate::manifest::FORMAT_VERSION,
+            app: "hello".to_owned(),
+            app_version: "1.2.3".to_owned(),
+            gleam_version: None,
+            otp_release: 29,
+            otp_version: "29.0.5".to_owned(),
+            erts_version: "17.0.5".to_owned(),
+            otp: OtpProvenance {
+                linkage: "dynamic".to_owned(),
+                libc: None,
+                nif_loading: true,
+                source: "dir:/opt/otp".to_owned(),
+            },
+            target: "macos-aarch64".parse().expect("a target name"),
+            otp_applications: Vec::new(),
+            gleam_applications: vec!["hello".to_owned()],
+            launch: LaunchSpec {
+                program: "erlexec".to_owned(),
+                bindir: "erts-17.0.5/bin".to_owned(),
+                boot: "bin/no_dot_erlang".to_owned(),
+                pa: vec!["lib/hello/ebin".to_owned()],
+                eval: "'hello@@main':run('hello')".to_owned(),
+                erl_flags: Vec::new(),
+                args_file: None,
+                config: None,
+                distribution: false,
+                filename_encoding: crate::config::DEFAULT_FILENAME_ENCODING.to_owned(),
+                heart: false,
+                env: BTreeMap::new(),
+            },
+            native: Vec::new(),
+            created_at: "2026-08-31T00:00:00Z".to_owned(),
+            ginary_version: env!("CARGO_PKG_VERSION").to_owned(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn write_macos_artifact_creates_the_output_directory_when_it_does_not_exist() {
+        // `write_artifact`'s ELF/PE arm creates `out`'s parent before writing
+        // (see its own `std::fs::create_dir_all` above); the darwin arm did
+        // not, so a build whose output directory does not yet exist — the
+        // ordinary case for a first build — failed with a raw `NotFound` IO
+        // error instead of producing the artifact.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("the staging root");
+        macos_staging_tree(&staging);
+        let opts = options(dir.path(), "");
+        let out = dir.path().join("build/output/not/yet/created/hello");
+
+        let result =
+            write_macos_artifact(&opts, &out, &macos_stub_path(), &staging, &macos_manifest());
+
+        assert!(
+            result.is_ok(),
+            "expected the output directory to be created, got {:?}",
+            result.err()
+        );
+        assert!(
+            out.is_file(),
+            "the artifact must exist at {}",
+            out.display()
+        );
+    }
+
+    #[test]
+    fn write_macos_artifact_makes_the_output_file_executable() {
+        // `write_artifact`'s ELF/PE arm chmods its temp file to
+        // `ARTIFACT_MODE` before publishing it; the darwin arm never touched
+        // permissions at all, so its output kept whatever default
+        // `std::fs::write` gives a new file (0o644 under an ordinary umask,
+        // never executable).
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("the staging root");
+        macos_staging_tree(&staging);
+        let opts = options(dir.path(), "");
+        let out_dir = dir.path().join("build/output");
+        std::fs::create_dir_all(&out_dir).expect("the output directory");
+        let out = out_dir.join("hello");
+
+        write_macos_artifact(&opts, &out, &macos_stub_path(), &staging, &macos_manifest())
+            .expect("writing the macOS artifact succeeds");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&out)
+                .expect("the artifact's metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(
+                mode, ARTIFACT_MODE,
+                "expected mode {ARTIFACT_MODE:o}, got {mode:o}"
+            );
+        }
     }
 }

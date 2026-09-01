@@ -22,7 +22,7 @@ and must never look at `argv`.
 ## Module map
 
 Modules marked *(A0)*, *(A1a)*, *(A1b)*, *(A1c)*, *(A2)*, *(A3a)*, *(A3b)*, *(A4)*, *(B1)*,
-*(B2)*, *(C1)*, *(C2)*, *(C4)* or *(D2)* exist; the rest are the plan.
+*(B2)*, *(C1)*, *(C2)*, *(C4)*, *(D2)* or *(D3)* exist; the rest are the plan.
 
 ```
 build side
@@ -44,7 +44,8 @@ build side
   payload.rs       (A3a) deterministic tar + zstd; safe unpack
   trailer.rs       (A3a) the 64-byte trailer
   stub.rs          (C2) finds a target's ginary binary and proves it is one
-  sign_macos.rs    Mach-O section injection and ad-hoc signing
+  macho.rs         (D3) read-only Mach-O inspection: cputype, fat/thin, sections, signature
+  sign_macos.rs    (D3) Mach-O section injection and ad-hoc signing
   verify.rs        (B2) the deep check: every file against the index, every ELF
   sbom.rs          (B2) the SPDX 2.3 bill of materials for one artifact
   bundle.rs        (A4) orchestrates the above

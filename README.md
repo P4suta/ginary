@@ -637,6 +637,80 @@ the execute bit only under the artifact's `erts-<vsn>/bin`, so a program shipped
 `docs/adr/0015-windows-launcher-stays-resident.md` records why the launcher stays alive as the
 runtime's parent, and `docs/dev/log/D2.md` records the build sizes and the wine transcript.
 
+## macOS
+
+macOS support is **verified structurally on Linux — the packaging half — and has never been run
+on a Mac.** The same distinction the Windows section draws applies here, with a different line:
+Windows has run its stub under wine; nothing built for macOS has run anywhere, because there is
+no way to execute a Mach-O on this host at all, wine included.
+
+What macOS packaging *is*: ordinary self-contained-executable packaging, the technique Burrito
+and Bakeware both use and the same one any macOS app-bundler applies. A Mach-O has no room to
+append bytes after its last segment without breaking code signing, so the payload goes into a
+dedicated `__GINARY,__payload` section instead, and the finished artifact gets a plain, unsigned,
+ad-hoc code signature over ginary's own output — no identity claimed, nothing stripped, nothing
+evaded. `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` records why a section and not
+an appended trailer: `codesign --strict` refuses appended bytes, and an arm64 kernel refuses to
+map any unsigned page at all, not merely a wrongly-signed one.
+
+What works, and is checked on every run of the suite:
+
+- **Read-only Mach-O inspection** (`macho.rs`): a file's `cputype`, whether it is a fat
+  (universal) binary, whether an `LC_CODE_SIGNATURE` load command is present, and where a named
+  section is. Checked against a committed real Mach-O (`tests/fixtures/macho/`, Erlang/OTP's own
+  `inet_gethost`, arm64, already ad-hoc signed by erlef's own build) and against hand-fabricated
+  headers for the cases a real binary does not conveniently carry — a fat header, a truncated
+  one, a section this crate itself planted.
+- **The payload locator** (`payload::locate`) reads a `__GINARY,__payload` section the same way
+  it reads the end-of-file trailer everywhere else: the trailer struct is identical, only
+  `payload_offset`'s meaning (relative to the section, not the file) and the geometry check
+  differ. Every existing ELF and PE test keeps passing unchanged, which is the abstraction's own
+  proof — nothing downstream of `locate` had to learn there are two containers. `launcher::mode`
+  (what `main()` calls to decide launcher versus CLI at all), `ginary inspect` and `ginary
+  verify` all go through it now, so a real darwin build of this launcher would recognise its own
+  section as a payload, and both commands can already open a Mach-O artifact on this host — they
+  just cannot run one.
+- **A macOS build's own arm** (`bundle::write_macos_artifact`) packs the payload and calls
+  `sign_macos::inject_and_sign` instead of appending a trailer. With no darwin stub on this
+  machine there is nothing to build one against, so the coverage here is the honest refusal:
+  `ginary build --target macos-aarch64` with no `--stub` and no `GINARY_STUB_DIR` gets the same
+  `StubError::NotFound`, naming every path it searched, that any other unstubbed cross target
+  gets.
+- **Section injection and ad-hoc signing** (`sign_macos::inject_and_sign`) is checked
+  structurally: the section lands at the offset and size `macho.rs` itself reports back, signing
+  adds exactly one `LC_CODE_SIGNATURE` load command, and `payload::locate` round-trips the exact
+  bytes and digest that went in. Run against the committed real Mach-O fixture as the stand-in
+  for a darwin stub, since none exists on this machine — see the next paragraph.
+- **The catalog knows a macOS release is committable before it is built.** `erlef_upstream_asset`
+  names the exact asset `erlef/otp_builds` publishes for each macOS arch, pinned against a real
+  release; `macos_catalog_admissible` is the stricter, commit-time version of the host-release
+  rule a build itself already applies, so `dist/otp/catalog.json` never gains a macOS entry this
+  repository's own host beams could not load. Running the repack end to end — the trust anchor
+  actually reading a repackaged `beam.smp` with `macho.rs`, the way a Linux repack reads an ELF —
+  is recorded in `docs/dev/log/D3.md` as scoped out of this pass: it needs `repack_one`
+  generalised over object format and a Mach-O-aware strip, neither of which exists yet.
+
+What only a Mac can confirm, and is the GitHub Actions milestone on a `macos-13`/`macos-14`
+runner:
+
+- **No darwin stub exists on this machine, because there is no macOS toolchain on Linux to build
+  one with.** `--stub` and `GINARY_STUB_DIR` are the only ways a darwin build gets one here, and
+  without either the honest answer is the same `StubError::NotFound` naming the CI release build,
+  that every other missing stub gets.
+- **`codesign --verify --strict` has never been run against ginary's own output**, and neither
+  has Gatekeeper's quarantine check. An ad-hoc signature satisfies the kernel's load-time
+  requirement, which is what is checked here; it does **not** satisfy Gatekeeper on a file
+  downloaded from the network — a quarantined ad-hoc-signed binary still prompts the user, and
+  clearing that (or moving to a real Developer ID signature, later) needs a Mac to test against.
+- **No Mach-O artifact has ever been executed.** Structurally: the section is there, the
+  signature load command is there, the locator finds the payload back. Actually launching one —
+  the BEAM starting, the port programs resolving, the whole pipeline this repository packages —
+  is untested until a `macos-13`/`macos-14` runner does it.
+
+`docs/dev/log/D3.md` records why the crate the plan named did not end up as a dependency, the
+technique `sign_macos.rs` is built on instead, the injection and structural-verification
+transcript, and the erlef release the catalog functions are pinned against.
+
 ## Documentation
 
 - [docs/format.md](docs/format.md) — the payload trailer and manifest specification.

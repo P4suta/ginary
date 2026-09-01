@@ -96,6 +96,51 @@ pub const EMBEDDED: &str =
 /// The repository the Linux runtimes are repackaged from.
 pub const UPSTREAM_REPO: &str = "gleam-community/erlang-linux-builds";
 
+/// The repository the macOS runtimes are repackaged from.
+///
+/// A different upstream than [`UPSTREAM_REPO`] entirely: `erlef/otp_builds`
+/// publishes macOS builds straight from the Erlang/OTP source, tagged
+/// `OTP-<version>` the same way [`version_from_tag`] already reads Linux
+/// tags. Pinned here, rather than only in `docs/dev/log/D3.md`, because
+/// [`erlef_upstream_asset`] is built on it.
+pub const ERLEF_UPSTREAM_REPO: &str = "erlef/otp_builds";
+
+/// The asset name `erlef/otp_builds` publishes for `arch` at `version`.
+///
+/// Found and pinned against the real `OTP-29.0.5` release at implementation
+/// time: `otp-x86_64-apple-darwin.tar.gz` and
+/// `otp-aarch64-apple-darwin.tar.gz`. (The release also carries
+/// `OTP-<version>-macos-<amd64|arm64>.tar.gz` duplicates of the same bytes;
+/// this function names the `-apple-darwin` spelling, since its shape does
+/// not depend on the release train the way the `OTP-<version>-macos-`
+/// prefix's redundancy with the tag does.) See `docs/dev/log/D3.md` for the
+/// exact release the naming was checked against.
+pub fn erlef_upstream_asset(version: &str, arch: crate::target::Arch) -> String {
+    // The version does not appear in the asset name itself — erlef names
+    // the release by its tag, not its assets — but stays a parameter
+    // because every other `*_upstream_asset`-shaped function in this module
+    // is a function of the version it names an asset for, and a caller
+    // should not have to know that this one upstream happens not to need
+    // it.
+    let _ = version;
+    format!("otp-{}-apple-darwin.tar.gz", arch.as_str())
+}
+
+/// Whether a macOS repack's freshly produced entry may be added to the
+/// *committed* `dist/otp/catalog.json`.
+///
+/// Distinct from [`check_release`], which a *build* uses to accept a catalog
+/// entry somewhat older than the host: committing a new upstream OS's first
+/// entries to this repository's own catalogue is held to the stricter rule
+/// `docs/dev/log/D3.md` records — exactly the host's release, never older
+/// and never newer — so that `dist/otp/catalog.json` never ships a runtime
+/// this repository's own tests could not load. A repack run that fails this
+/// still produces real output (the tarball, its checksum, the linkage
+/// findings); only committing it to the repository's catalogue is refused.
+pub fn macos_catalog_admissible(entry_release: u32, host_release: u32) -> bool {
+    entry_release == host_release
+}
+
 /// Directories that never travel in a repacked runtime.
 ///
 /// Sorted, because the list is printed. `include` is not here and must not be:

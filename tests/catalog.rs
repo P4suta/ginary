@@ -1197,3 +1197,35 @@ fn a_selection_carries_the_erts_version_the_assembly_will_look_for() {
         "and the cache it lands in is the `otp` directory of the ginary cache"
     );
 }
+
+// --------------------------------------------------------- macOS (D3) ----
+
+#[test]
+fn erlef_upstream_asset_names_the_apple_darwin_files_pinned_from_otp_29_0_5() {
+    assert_eq!(
+        catalog::erlef_upstream_asset("29.0.5", ginary::target::Arch::X86_64),
+        "otp-x86_64-apple-darwin.tar.gz"
+    );
+    assert_eq!(
+        catalog::erlef_upstream_asset("29.0.5", ginary::target::Arch::Aarch64),
+        "otp-aarch64-apple-darwin.tar.gz"
+    );
+}
+
+#[test]
+fn macos_catalog_admissible_is_true_only_when_the_entry_release_matches_the_host_exactly() {
+    assert!(
+        catalog::macos_catalog_admissible(29, 29),
+        "the release that was actually found (OTP-29.0.5) matches this repository's host \
+         release (29) and should be committable"
+    );
+    assert!(
+        !catalog::macos_catalog_admissible(28, 29),
+        "an entry older than the host release is not committed to dist/otp/catalog.json, even \
+         though a build may still accept it via check_release"
+    );
+    assert!(
+        !catalog::macos_catalog_admissible(30, 29),
+        "an entry newer than the host release is not committed either"
+    );
+}

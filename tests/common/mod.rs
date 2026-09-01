@@ -21,6 +21,7 @@ pub mod erl;
 pub mod fake_otp;
 pub mod fixture;
 pub mod http;
+pub mod macho;
 #[cfg(feature = "cli")]
 pub mod native;
 pub mod payload;

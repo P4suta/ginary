@@ -238,8 +238,19 @@ pub fn open(path: &Path) -> Result<ArtifactInfo, InspectError> {
         })?
         .len();
 
-    let trailer = match Trailer::read_from(&file) {
-        Ok(Some(trailer)) => trailer,
+    // `payload::locate` tries the end-of-file trailer first, so every ELF and
+    // PE artifact this branch ever saw is read exactly as before; only when
+    // that is absent and the file begins with a Mach-O magic does it also
+    // look up the `__GINARY,__payload` section. Either way the result is
+    // rebuilt as a [`Trailer`] so every reader downstream of this function —
+    // `ginary verify` included — stays written against the one struct it
+    // already knew, unaware which container answered.
+    let trailer = match crate::payload::locate(&file) {
+        Ok(Some(loc)) => Trailer {
+            payload_offset: loc.offset,
+            payload_len: loc.len,
+            payload_sha256: loc.sha256,
+        },
         Ok(None) => {
             return Err(InspectError::NoTrailer {
                 path: path.to_path_buf(),

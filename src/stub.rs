@@ -287,12 +287,42 @@ pub fn verify(path: &Path, want: &Target) -> Result<StubId, StubError> {
 /// The ELF half is `crate::elf`'s, so that "what is this binary for" is
 /// answered in one place; the PE half is read straight from `object`, because
 /// a Windows stub has no interpreter and the machine field is the whole
-/// question. Mach-O is refused with a sentence rather than guessed at: there
-/// is no macOS toolchain here to build a stub with, so the check would be
-/// written against nothing.
+/// question. The Mach-O half is `crate::macho`'s: the `cputype` is the whole
+/// target (macOS names no interpreter the way ELF does), a fat stub is
+/// refused the same way a wrong architecture is, and a stub that already
+/// carries the `__GINARY,__payload` section is refused last, the same
+/// reasoning [`StubError::Trailered`] refuses an ELF or PE artifact by —
+/// a payload may not be added twice.
 fn check_object(path: &Path, bytes: &[u8], want: &Target) -> Result<(), StubError> {
     match want.os {
-        Os::Macos => Err(StubError::NotYetSupported { target: *want }),
+        Os::Macos => {
+            if !crate::macho::is_macho(bytes) {
+                return Err(not_an_object(path, bytes));
+            }
+            let facts = crate::macho::read(bytes).map_err(|error| StubError::NotAnObject {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+            if facts.is_fat || facts.target != Some(*want) {
+                return Err(StubError::ObjectMismatch {
+                    path: path.to_path_buf(),
+                    want: *want,
+                    found: describe_macho(&facts),
+                });
+            }
+            if crate::macho::section(
+                bytes,
+                crate::macho::PAYLOAD_SEGMENT,
+                crate::macho::PAYLOAD_SECTION,
+            )
+            .is_some()
+            {
+                return Err(StubError::Sectioned {
+                    path: path.to_path_buf(),
+                });
+            }
+            Ok(())
+        }
         Os::Linux => {
             if !crate::elf::is_elf(bytes) {
                 return Err(not_an_object(path, bytes));
@@ -357,6 +387,17 @@ fn arch_of(arch: object::Architecture) -> Option<crate::target::Arch> {
         object::Architecture::X86_64 => Some(crate::target::Arch::X86_64),
         object::Architecture::Aarch64 => Some(crate::target::Arch::Aarch64),
         _ => None,
+    }
+}
+
+/// What a Mach-O really is, as the tail of a sentence.
+fn describe_macho(facts: &crate::macho::MachoFacts) -> String {
+    if facts.is_fat {
+        "a fat Mach-O carrying more than one architecture".to_owned()
+    } else if facts.cputype.is_empty() {
+        "a Mach-O this ginary has no target for".to_owned()
+    } else {
+        format!("a Mach-O for {}", facts.cputype)
     }
 }
 
@@ -517,6 +558,17 @@ pub enum StubError {
         /// The file that was refused.
         path: PathBuf,
     },
+    /// The file already carries a `__GINARY,__payload` Mach-O section, so it
+    /// is an artifact.
+    ///
+    /// The Mach-O counterpart of [`StubError::Trailered`]: a macOS artifact
+    /// carries its payload in a section rather than appended after a
+    /// trailer, so a stub that already has one is refused the same way, by
+    /// the same reasoning — a payload may not be added twice.
+    Sectioned {
+        /// The file that was refused.
+        path: PathBuf,
+    },
     /// The file could not be read.
     Io {
         /// What was being done, as a sentence naming the path.
@@ -610,6 +662,12 @@ impl fmt::Display for StubError {
                 f,
                 "{} is a packaged application rather than a stub; a payload may not be appended \
                  twice",
+                path.display()
+            ),
+            Self::Sectioned { path } => write!(
+                f,
+                "{} already carries a __GINARY,__payload section and is a packaged application \
+                 rather than a stub; a payload may not be added twice",
                 path.display()
             ),
             Self::Io { what, .. } => f.write_str(what),
