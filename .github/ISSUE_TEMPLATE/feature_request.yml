@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Feature request
+description: "Propose a capability that fits what ginary is: one file, no runtime on the target machine."
+title: "[Feature]: "
+labels: ["type: feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every change here starts from a failing test, so the most useful part of a proposal is
+        the example that would become one. Describe the behaviour you want to be able to observe,
+        not the implementation you imagine behind it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today, and what did you have to do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: |
+        The observable behaviour: what a command prints, what an artifact contains, what the
+        launcher does differently.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance example
+      description: |
+        One concrete example that fails today and would pass if this were implemented — a command
+        line and the output you expect. This is the test the change would be written from.
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: This does not require the machine running the artifact to have Erlang, a PATH entry, or an unpacking step.
+          required: true
+        - label: I searched the existing issues and the roadmap in docs/dev/log/ first.
+          required: true

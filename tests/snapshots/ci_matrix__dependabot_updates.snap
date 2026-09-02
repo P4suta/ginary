@@ -1,0 +1,24 @@
+---
+source: tests/ci_matrix.rs
+expression: rendered
+---
+cargo /
+  schedule: weekly monday Asia/Tokyo
+  cooldown-days: 7
+  open-pull-requests-limit: 5
+  labels: type: dependencies, area: rust
+  groups: cargo
+
+cargo /fuzz
+  schedule: weekly monday Asia/Tokyo
+  cooldown-days: 7
+  open-pull-requests-limit: 5
+  labels: type: dependencies, area: rust
+  groups: fuzz
+
+github-actions /
+  schedule: weekly monday Asia/Tokyo
+  cooldown-days: 7
+  open-pull-requests-limit: 5
+  labels: type: dependencies, area: ci
+  groups: github-actions

@@ -156,27 +156,72 @@ fn the_readme_carries_a_target_status_matrix() {
     );
 }
 
+/// Markdown with every HTML comment removed.
+///
+/// A badge inside `<!-- ... -->` renders nothing, so a test that only looks
+/// for the text cannot tell a live badge from a commented placeholder.
+fn uncommented(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut rest = markdown;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
-fn the_readme_carries_commented_badge_placeholders_for_the_unpublished_repo() {
+fn the_readme_badges_point_at_the_published_repository() {
     let readme = read("README.md");
+    // E1 left the badges commented out because the repository did not exist and
+    // a live badge would have 404ed. E3 decides the slug, so they go live: a
+    // commented badge is a status nobody sees.
     assert!(
-        readme.contains("badge")
-            || readme.contains("shields.io")
-            || readme.contains("actions/workflows"),
-        "the README carries CI/coverage badges (commented until the repo exists)"
+        !readme.contains("<owner>"),
+        "the `<owner>` placeholder outlived E1; the repository is `P4suta/ginary`"
     );
-    // Commented out, because the repository does not exist yet and a live badge
-    // would 404. The owner placeholder is named so a real link is a find-replace.
+    let live = uncommented(&readme);
+    let badges: Vec<&str> = live
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("![") || line.starts_with("[!["))
+        .collect();
     assert!(
-        readme.contains("<owner>/ginary") || readme.contains("<owner>"),
-        "the badges reference the `<owner>/ginary` placeholder until the repo is created"
+        !badges.is_empty(),
+        "every badge in the README is still inside an HTML comment, so none of them renders"
     );
-    // Commented out, so no broken image renders before the repository exists.
-    let commented = readme.contains("<!--") && readme.contains("![");
+    for workflow in ["ci.yml", "codeql.yml"] {
+        let url =
+            format!("https://github.com/P4suta/ginary/actions/workflows/{workflow}/badge.svg");
+        assert!(
+            badges.iter().any(|badge| badge.contains(&url)),
+            "no live badge reports `{workflow}`: {badges:?}"
+        );
+    }
     assert!(
-        commented,
-        "the badges are inside an HTML comment so they do not render a broken image yet"
+        badges
+            .iter()
+            .any(|badge| badge.to_lowercase().contains("scorecard")),
+        "the OpenSSF Scorecard result is a public number; the README shows it: {badges:?}"
     );
+    assert!(
+        badges
+            .iter()
+            .any(|badge| badge.to_lowercase().contains("licen") && badge.contains("MIT")),
+        "a badge names the licence, which is `MIT OR Apache-2.0`: {badges:?}"
+    );
+    // The crate is `publish = false` and has no rustdoc on docs.rs. A badge for
+    // either would be a claim the tree cannot back.
+    for absent in ["crates.io", "docs.rs"] {
+        assert!(
+            badges.iter().all(|badge| !badge.contains(absent)),
+            "a `{absent}` badge claims a publication that has not happened: {badges:?}"
+        );
+    }
 }
 
 #[test]

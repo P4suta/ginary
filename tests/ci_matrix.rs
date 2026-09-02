@@ -17,7 +17,9 @@ mod common;
 
 use std::path::PathBuf;
 
-use crate::common::repo::{read, read_opt, root};
+use saphyr::YamlOwned;
+
+use crate::common::repo::{parse_yaml, read, read_opt, read_or_missing, root};
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
 fn action_yaml() -> Vec<(String, String)> {
@@ -274,25 +276,565 @@ fn the_ci_scripts_directory_holds_the_two_gates_ci_runs() {
     }
 }
 
-// ---------------------------------------------- top-level hardening --
+// --------------------------------------------- the security workflows --
+
+/// The `language: build-mode` pairs a CodeQL matrix declares, sorted.
+///
+/// The matrix has to be written as `include:` rows — one `language:` with the
+/// `build-mode:` that language is analysed under — because the build mode is
+/// per language here: `actions` needs no build and Rust may need one. The rows
+/// come out of the parsed document rather than out of the file's text, so a
+/// row is a row and prose in a comment is prose.
+fn codeql_matrix(text: &str) -> Vec<(String, String)> {
+    let parsed = workflow(".github/workflows/codeql.yml", text);
+    let mut out: Vec<(String, String)> = jobs(&parsed)
+        .into_iter()
+        .filter_map(|(_, job)| {
+            job.as_mapping_get("strategy")?
+                .as_mapping_get("matrix")?
+                .as_mapping_get("include")?
+                .as_vec()
+        })
+        .flatten()
+        .map(|row| {
+            let field = |key: &str| {
+                row.as_mapping_get(key)
+                    .and_then(YamlOwned::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (field("language"), field("build-mode"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every `cron:` expression a workflow schedules itself on.
+///
+/// A schedule is a YAML sequence, so the key almost always arrives as the
+/// first entry of a list item — `- cron: "41 20 * * 3"` — and only rarely on a
+/// line of its own under a bare `-`. Both spellings are the same schedule, so
+/// the leading dash is stripped before the key is looked for; reading only the
+/// second spelling would make every one of these assertions vacuous against a
+/// workflow written the ordinary way.
+fn crons(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            entry.trim_start().strip_prefix("cron:")
+        })
+        .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_owned())
+        .collect()
+}
 
 #[test]
-fn every_workflow_sets_the_default_permissions_to_none_and_never_persists_credentials() {
+fn the_security_workflows_the_milestone_named_are_committed() {
+    for workflow in [
+        ".github/workflows/codeql.yml",
+        ".github/workflows/scorecard.yml",
+        ".github/workflows/dependency-review.yml",
+    ] {
+        assert!(
+            read_opt(workflow).is_some(),
+            "{workflow} is a public-repository gate E3 promised; it is not committed"
+        );
+    }
+}
+
+#[test]
+fn codeql_analyzes_the_languages_this_repository_actually_has() {
+    let codeql = read(".github/workflows/codeql.yml");
+    let matrix = codeql_matrix(&codeql);
+    let languages: Vec<&str> = matrix.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(
+        languages,
+        vec!["actions", "rust"],
+        "CodeQL analyses exactly the two languages in this tree — the Rust crate and the \
+         workflows — as `include:` rows, sorted here; it declares: {matrix:?}"
+    );
+    for needle in [
+        "github/codeql-action/init",
+        "github/codeql-action/analyze",
+        "queries: security-extended",
+    ] {
+        assert!(
+            codeql.contains(needle),
+            "the CodeQL workflow is missing `{needle}`"
+        );
+    }
+    // A language this repository does not hold is an analysis that can only
+    // report nothing, and a matrix row that will not be noticed when it breaks.
+    // The check is against the parsed rows, not against the file's text: a
+    // `cargo build` step spells `go`, and a rule that reads the whole file
+    // would report the build command the spec names as the `manual` fallback
+    // as if it were a Go analysis.
+    for absent in [
+        "javascript-typescript",
+        "python",
+        "go",
+        "java",
+        "ruby",
+        "c-cpp",
+        "csharp",
+        "swift",
+    ] {
+        assert!(
+            !languages.contains(&absent),
+            "the CodeQL matrix analyses `{absent}`, which this repository does not contain"
+        );
+    }
+}
+
+#[test]
+fn codeql_gives_every_language_an_explicit_build_mode_and_never_autobuilds() {
+    let codeql = read(".github/workflows/codeql.yml");
+    let matrix = codeql_matrix(&codeql);
+    assert!(
+        !matrix.is_empty(),
+        "the CodeQL matrix has to be `include:` rows carrying a build-mode per language"
+    );
+    for (language, build_mode) in &matrix {
+        assert!(
+            matches!(build_mode.as_str(), "none" | "manual"),
+            "`{language}` is analysed with build-mode `{build_mode}`: every row states `none` or \
+             `manual`, so the mode is a decision the diff records rather than a default"
+        );
+    }
+    let by_language: std::collections::BTreeMap<&str, &str> = matrix
+        .iter()
+        .map(|(l, m)| (l.as_str(), m.as_str()))
+        .collect();
+    assert_eq!(
+        by_language.get("actions").copied(),
+        Some("none"),
+        "workflow analysis builds nothing: `actions` is `build-mode: none`"
+    );
+    // `autobuild` on a Rust crate guesses at the build; this repository has one
+    // build command and a committed lock file, so the workflow says so itself.
+    assert!(
+        !codeql.contains("autobuild"),
+        "CodeQL never autobuilds here: the Rust row is `none`, or `manual` with the crate's own \
+         `cargo build`"
+    );
+    if by_language.get("rust").copied() == Some("manual") {
+        for needle in ["cargo build", "--all-features", "--locked"] {
+            assert!(
+                codeql.contains(needle),
+                "a manual build mode owns the build: the Rust row needs an explicit \
+                 `cargo build --all-features --locked` step, and `{needle}` is missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn codeql_runs_weekly_on_a_slot_of_its_own_plus_push_pull_request_and_dispatch() {
+    let codeql = read(".github/workflows/codeql.yml");
+    assert_eq!(
+        crons(&codeql),
+        vec!["41 20 * * 3".to_owned()],
+        "CodeQL runs weekly on one slot of its own. The sibling repositories hold `31 20 * * 3` \
+         and `11 20 * * 3`; a third repository joining either would queue three scans at once"
+    );
+    for trigger in ["pull_request:", "workflow_dispatch:", "push:"] {
+        assert!(
+            codeql.contains(trigger),
+            "the CodeQL workflow does not run on `{trigger}`"
+        );
+    }
+    assert!(
+        codeql.contains("concurrency:") && codeql.contains("cancel-in-progress: true"),
+        "a superseded scan is cancelled rather than queued, as in the sibling repositories"
+    );
+    assert!(
+        codeql.contains("timeout-minutes:"),
+        "every job carries a timeout, so a hung analysis fails rather than burning the budget"
+    );
+}
+
+#[test]
+fn scorecard_publishes_its_results_and_uploads_them_to_code_scanning() {
+    let scorecard = read(".github/workflows/scorecard.yml");
+    for trigger in [
+        "branch_protection_rule:",
+        "push:",
+        "schedule:",
+        "workflow_dispatch:",
+    ] {
+        assert!(
+            scorecard.contains(trigger),
+            "the Scorecard workflow does not run on `{trigger}`"
+        );
+    }
+    for needle in [
+        "ossf/scorecard-action",
+        "publish_results: true",
+        "id-token: write",
+        "security-events: write",
+        "github/codeql-action/upload-sarif",
+        "results.sarif",
+    ] {
+        assert!(
+            scorecard.contains(needle),
+            "the Scorecard workflow is missing `{needle}`: publishing the result is what makes \
+             the badge and the public record real, and it needs the OIDC token to do it"
+        );
+    }
+    let crons = crons(&scorecard);
+    assert_eq!(
+        crons.len(),
+        1,
+        "Scorecard runs on exactly one weekly slot: {crons:?}"
+    );
+    let slot = &crons[0];
+    for taken in ["31 20 * * 3", "11 20 * * 3", "41 20 * * 3"] {
+        assert_ne!(
+            slot, taken,
+            "`{taken}` is already taken by a sibling repository or by our own CodeQL scan; \
+             Scorecard needs a slot of its own"
+        );
+    }
+}
+
+#[test]
+fn dependency_review_gates_pull_requests_and_defers_to_cargo_deny() {
+    let review = read(".github/workflows/dependency-review.yml");
+    assert!(
+        review.contains("pull_request:"),
+        "dependency review is a pull-request gate; it has no other trigger"
+    );
+    for needle in ["actions/dependency-review-action", "fail-on-severity: high"] {
+        assert!(
+            review.contains(needle),
+            "the dependency-review workflow is missing `{needle}`"
+        );
+    }
+    // deny.toml is the licence and advisory authority: it runs in `lint`, on
+    // every target the crate names, and locally through `mise run deny`. This
+    // workflow is the pull-request convenience, and says so, so nobody grows a
+    // second allow-list here for the two to drift apart.
+    assert!(
+        review.contains("deny.toml") && review.to_lowercase().contains("cargo deny"),
+        "the workflow has to record that `cargo deny` is the authoritative gate and this is the \
+         pull-request-time convenience"
+    );
+    assert!(
+        !review.contains("allow-licenses:") && !review.contains("deny-licenses:"),
+        "a licence list here would be a second copy of `deny.toml`'s allow-list, free to drift"
+    );
+}
+
+// ----------------------------------------------------------- dependabot --
+
+/// One `updates:` entry of `.github/dependabot.yml`, as the fields E3 pins.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Update {
+    ecosystem: String,
+    directory: String,
+    interval: String,
+    day: String,
+    timezone: String,
+    cooldown_days: String,
+    limit: String,
+    labels: Vec<String>,
+    groups: Vec<String>,
+}
+
+/// A YAML scalar as the text a snapshot can hold.
+///
+/// `open-pull-requests-limit: 5` is an integer and `directory: "/"` is a
+/// string, and both are one line of the rendered table, so the three scalar
+/// shapes dependabot uses come back as their own spelling.
+fn scalar(node: Option<&YamlOwned>) -> String {
+    let Some(node) = node else {
+        return String::new();
+    };
+    node.as_str()
+        .map(str::to_owned)
+        .or_else(|| node.as_integer().map(|value| value.to_string()))
+        .or_else(|| node.as_bool().map(|value| value.to_string()))
+        .unwrap_or_default()
+}
+
+/// A YAML sequence of strings, or an empty list for anything else.
+fn string_sequence(node: Option<&YamlOwned>) -> Vec<String> {
+    node.and_then(YamlOwned::as_vec)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The names of the `groups:` one entry declares, in the order it declares them.
+fn group_names(entry: &YamlOwned) -> Vec<String> {
+    entry
+        .as_mapping_get("groups")
+        .and_then(YamlOwned::as_mapping)
+        .map(|groups| {
+            groups
+                .keys()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every `updates:` entry of a `dependabot.yml`, sorted.
+///
+/// Parsed rather than scanned line by line: dependabot's own reader is a YAML
+/// reader, so a file it cannot load is a policy that never runs, and a
+/// hand-rolled scan is happy with one.
+fn dependabot_updates(text: &str) -> Vec<Update> {
+    let parsed = parse_yaml(text)
+        .unwrap_or_else(|error| panic!(".github/dependabot.yml is not valid YAML: {error}"));
+    let Some(entries) = parsed.as_mapping_get("updates").and_then(YamlOwned::as_vec) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Update> = entries
+        .iter()
+        .map(|entry| {
+            let schedule = entry.as_mapping_get("schedule");
+            let at = |node: Option<&YamlOwned>, key: &str| {
+                scalar(node.and_then(|node| node.as_mapping_get(key)))
+            };
+            Update {
+                ecosystem: at(Some(entry), "package-ecosystem"),
+                directory: at(Some(entry), "directory"),
+                interval: at(schedule, "interval"),
+                day: at(schedule, "day"),
+                timezone: at(schedule, "timezone"),
+                cooldown_days: at(entry.as_mapping_get("cooldown"), "default-days"),
+                limit: at(Some(entry), "open-pull-requests-limit"),
+                labels: string_sequence(entry.as_mapping_get("labels")),
+                groups: group_names(entry),
+            }
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The dependabot entries as the table the snapshot pins.
+fn render_updates(updates: &[Update]) -> String {
+    updates
+        .iter()
+        .map(|update| {
+            format!(
+                "{} {}\n  schedule: {} {} {}\n  cooldown-days: {}\n  \
+                 open-pull-requests-limit: {}\n  labels: {}\n  groups: {}",
+                update.ecosystem,
+                update.directory,
+                update.interval,
+                update.day,
+                update.timezone,
+                update.cooldown_days,
+                update.limit,
+                update.labels.join(", "),
+                update.groups.join(", "),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+#[test]
+fn dependabot_watches_every_manifest_this_repository_actually_has() {
+    let text = read(".github/dependabot.yml");
+    let updates = dependabot_updates(&text);
+    let watched: Vec<(&str, &str)> = updates
+        .iter()
+        .map(|u| (u.ecosystem.as_str(), u.directory.as_str()))
+        .collect();
+    // `fuzz/` is a workspace of its own — deliberately not a member of the root
+    // one, see its Cargo.toml — so the root `cargo` entry does not reach its
+    // manifest and it needs an entry of its own.
+    assert_eq!(
+        watched,
+        vec![("cargo", "/"), ("cargo", "/fuzz"), ("github-actions", "/")],
+        "dependabot covers the crate, the fuzz workspace and the actions, and nothing this \
+         repository does not have; it covers: {watched:?}"
+    );
+    for update in &updates {
+        assert_eq!(
+            (
+                update.interval.as_str(),
+                update.day.as_str(),
+                update.timezone.as_str()
+            ),
+            ("weekly", "monday", "Asia/Tokyo"),
+            "{} {} does not update weekly on a Monday morning in the author's timezone",
+            update.ecosystem,
+            update.directory
+        );
+        assert_eq!(
+            update.limit, "5",
+            "{} {} does not cap its open pull requests at 5",
+            update.ecosystem, update.directory
+        );
+        assert!(
+            !update.cooldown_days.is_empty(),
+            "{} {} has no `cooldown`, so a release yanked hours later still opens a pull request",
+            update.ecosystem,
+            update.directory
+        );
+        assert!(
+            update.labels.contains(&"type: dependencies".to_owned()),
+            "{} {} is not labelled `type: dependencies`: {:?}",
+            update.ecosystem,
+            update.directory,
+            update.labels
+        );
+        // Per entry rather than once for the file: a single `groups:` anywhere
+        // in the document says nothing about the entry beside it, and an
+        // ungrouped `github-actions` entry opens one pull request per pinned
+        // SHA every Monday.
+        assert!(
+            !update.groups.is_empty(),
+            "{} {} declares no `groups:`, so one Monday is one pull request per dependency \
+             rather than one for the ecosystem",
+            update.ecosystem,
+            update.directory
+        );
+    }
+}
+
+#[test]
+fn the_dependabot_schedule_is_the_committed_record() {
+    let text = read_or_missing(".github/dependabot.yml");
+    let rendered = if text.starts_with("(missing") {
+        text
+    } else {
+        render_updates(&dependabot_updates(&text))
+    };
+    insta::assert_snapshot!("dependabot_updates", rendered);
+}
+
+// ---------------------------------------------- top-level hardening --
+
+/// A workflow parsed as the document GitHub itself loads.
+///
+/// The two guards below used to read `permissions:` out of the file as text,
+/// which accepts the word wherever it appears: in a comment, in a `with:`
+/// input spelled the same way, in a step's script. Parsing first means a key
+/// of the mapping is the only thing that can satisfy them.
+fn workflow(path: &str, text: &str) -> YamlOwned {
+    parse_yaml(text).unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"))
+}
+
+/// The `jobs:` mapping of a parsed workflow, as (job id, job node).
+fn jobs(workflow: &YamlOwned) -> Vec<(String, &YamlOwned)> {
+    let Some(jobs) = workflow
+        .as_mapping_get("jobs")
+        .and_then(YamlOwned::as_mapping)
+    else {
+        return Vec::new();
+    };
+    jobs.iter()
+        .map(|(id, job)| {
+            (
+                id.as_str()
+                    .unwrap_or("<a job id that is not a string>")
+                    .to_owned(),
+                job,
+            )
+        })
+        .collect()
+}
+
+/// Whether a `permissions:` node grants nothing but read scopes.
+///
+/// An empty mapping — `permissions: {}`, no token at all — counts, and so
+/// does a mapping whose every value is the string `read`. Anything else does
+/// not: `write` is the one this refuses, and the `read-all` / `write-all`
+/// shorthands are scalars rather than mappings and are refused with it, since
+/// a scope this repository cannot name per job is a scope it does not want.
+fn grants_only_reads(permissions: &YamlOwned) -> bool {
+    permissions
+        .as_mapping()
+        .is_some_and(|scopes| scopes.values().all(|value| value.as_str() == Some("read")))
+}
+
+/// A `permissions:` node as the one-line `scope: level` list a message shows.
+fn render_permissions(permissions: &YamlOwned) -> String {
+    match permissions.as_mapping() {
+        Some(scopes) if scopes.is_empty() => "{}".to_owned(),
+        Some(scopes) => scopes
+            .iter()
+            .map(|(scope, level)| format!("{}: {}", scalar(Some(scope)), scalar(Some(level))))
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => scalar(Some(permissions)),
+    }
+}
+
+#[test]
+fn every_workflow_defaults_to_a_read_only_token_and_never_persists_credentials() {
     let files = action_yaml();
     assert!(!files.is_empty(), "there are no workflow files to check");
     for (path, text) in &files {
         if !path.contains("/workflows/") {
             continue;
         }
+        // `permissions: {}` — no token at all — is what the CI, release,
+        // distribute and nightly workflows start from. The security workflows
+        // follow the sibling repositories' `contents: read`, which the CodeQL
+        // and Scorecard actions read the repository with before a job widens
+        // to `security-events: write`. Either is a default that can write
+        // nothing; a top-level `write` is what this refuses, because it hands
+        // every job in the file a token it never asked for.
+        let parsed = workflow(path, text);
+        let permissions = parsed
+            .as_mapping_get("permissions")
+            .unwrap_or_else(|| panic!("{path} declares no top-level `permissions:`"));
         assert!(
-            text.contains("permissions: {}"),
-            "{path} must set `permissions: {{}}` at the top level and widen per job"
+            grants_only_reads(permissions),
+            "{path} defaults to `permissions: {}`, which grants more than read; widen per job \
+             instead",
+            render_permissions(permissions)
         );
         assert!(
             text.contains("persist-credentials: false"),
             "{path} must check out with `persist-credentials: false`"
         );
     }
+}
+
+#[test]
+fn every_job_of_every_workflow_declares_its_own_permissions() {
+    let files = action_yaml();
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in &files {
+        if !path.contains("/workflows/") {
+            continue;
+        }
+        let parsed = workflow(path, text);
+        let jobs = jobs(&parsed);
+        assert!(!jobs.is_empty(), "{path} declares no jobs");
+        for (id, job) in jobs {
+            // A key of the job's own mapping, not the word anywhere in its
+            // text: a comment that mentions permissions is not a declaration.
+            let declared = job
+                .as_mapping_get("permissions")
+                .is_some_and(|node| node.is_mapping());
+            if !declared {
+                offenders.push(format!("{path}: job `{id}`"));
+            }
+        }
+    }
+    // A read-only default is only half the rule: the other half is that no job
+    // inherits it silently. A job that names its own scopes is a job whose
+    // token is visible in the diff that widens it.
+    assert!(
+        offenders.is_empty(),
+        "every job states the scopes it needs as a mapping of its own, so a widening is a line \
+         in the diff; these do not:\n{}",
+        offenders.join("\n")
+    );
 }
 
 // ------------------------------------------------ the SHA-pin table --

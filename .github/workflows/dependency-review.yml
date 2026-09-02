@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Dependency review
+
+# The pull-request-time convenience, not the gate.
+#
+# `deny.toml` is this repository's authoritative dependency policy: it holds
+# the licence allow-list and the advisory rules, `cargo deny check` runs it in
+# CI's `lint` job over every target the crate names, and `mise run deny` runs
+# the same file locally. This workflow only reads the dependency diff of a
+# pull request and fails it early on a high-severity advisory, so a reviewer
+# sees the problem beside the change instead of in a log.
+#
+# It deliberately carries no licence list of its own. A second allow-list here
+# would be a copy of `deny.toml`'s, free to drift from the one that decides.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Review the dependency diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review added and changed dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          # `deny.toml` owns the licence policy; this action does not get a
+          # second opinion on it.
+          license-check: false
+          # No summary comment, so the workflow needs no `pull-requests: write`.
+          comment-summary-in-pr: never

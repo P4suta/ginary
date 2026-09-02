@@ -12,15 +12,12 @@ trimmed BEAM runtime, to a copy of the ginary binary itself.
 
 ## Status
 
-<!--
-These badges render once the repository is published at github.com/<owner>/ginary; they are
-commented out until then so no broken image renders. Replace `<owner>/ginary` with the real path
-to make them live.
-
-![CI](https://github.com/<owner>/ginary/actions/workflows/ci.yml/badge.svg)
-![Nightly](https://github.com/<owner>/ginary/actions/workflows/nightly.yml/badge.svg)
+[![CI](https://github.com/P4suta/ginary/actions/workflows/ci.yml/badge.svg)](https://github.com/P4suta/ginary/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/P4suta/ginary/actions/workflows/codeql.yml/badge.svg)](https://github.com/P4suta/ginary/actions/workflows/codeql.yml)
+[![Nightly](https://github.com/P4suta/ginary/actions/workflows/nightly.yml/badge.svg)](https://github.com/P4suta/ginary/actions/workflows/nightly.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/P4suta/ginary/badge)](https://scorecard.dev/viewer/?uri=github.com/P4suta/ginary)
 ![Coverage](https://img.shields.io/badge/coverage-90%25%2B-brightgreen)
--->
+![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
 **v1.** ginary packages a Gleam application and a trimmed BEAM runtime into a single executable
 that runs on a machine with no Erlang, no `PATH` entry and no unpacking step. v1 delivers the

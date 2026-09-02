@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Bug report
+description: Report a reproducible defect in the ginary CLI, a packaged artifact, or its launcher.
+title: "[Bug]: "
+labels: ["type: bug", "status: needs-reproduction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A ginary bug lives in one of three places — the build-side CLI, the artifact it wrote, or
+        the launcher inside that artifact — and which one it is cannot be told without the target
+        and the revision that built it. The fields below are what makes a report reproducible.
+
+        Do not file a vulnerability here. Report it privately through
+        [a security advisory](https://github.com/P4suta/ginary/security/advisories/new).
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behaviour
+      description: What happened, and what did you expect instead?
+      placeholder: Describe the smallest reproducible difference.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: |
+        The commands you ran and their output, smallest first. Strip secrets, credentials,
+        signing identities, tokens and home-directory paths that name you before pasting.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ginary version or commit
+      description: The output of `ginary --version`, or a full commit SHA if you built from source.
+      placeholder: 0.1.0 or a full commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target the artifact was built for
+      options:
+        - linux-x86_64-gnu
+        - linux-x86_64-musl
+        - linux-aarch64-gnu
+        - linux-aarch64-musl
+        - macos-x86_64
+        - macos-aarch64
+        - windows-x86_64
+        - Not applicable, the CLI itself failed
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where it went wrong
+      options:
+        - Building the artifact (`ginary build`)
+        - Inspecting or verifying an artifact (`ginary inspect`, `verify`, `sbom`)
+        - Running the artifact, in the launcher
+        - Somewhere else
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Build and run environment
+      description: |
+        The operating system and architecture of the machine that built the artifact, the one
+        that ran it, and the `gleam` and Erlang/OTP versions on the build machine.
+    validations:
+      required: true
+  - type: textarea
+    id: artifact
+    attributes:
+      label: What the artifact says about itself
+      description: |
+        Optional but decisive for a launcher bug: the output of `ginary inspect <artifact>` and,
+        if the launcher printed one, its numbered exit code and hint.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before you file
+      options:
+        - label: I removed secrets, credentials, tokens and signing identities from everything pasted above.
+          required: true
+        - label: I searched the existing issues first.
+          required: true

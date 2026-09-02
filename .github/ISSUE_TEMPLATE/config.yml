@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# A blank issue skips both forms, and the forms are what make a report
+# reproducible. The advisory link comes first so a vulnerability never becomes
+# a public issue by default.
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/P4suta/ginary/security/advisories/new
+    about: Report a suspected vulnerability privately. Never attach real credentials or signing identities.
+  - name: Questions and usage help
+    url: https://github.com/P4suta/ginary/discussions
+    about: Ask how to package something, or discuss behaviour you are not sure is a defect.

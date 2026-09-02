@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: CodeQL
+
+# Advanced setup rather than the repository's default setup, so the languages
+# scanned, the query pack and the build mode are lines in a diff instead of
+# settings in a web form nobody reviews.
+#
+# Both matrix rows analyse without a build. `build-mode: none` is what CodeQL
+# itself uses for Rust — the buildless Rust extractor became generally
+# available in CodeQL 2.23.3, and the bundle this action version ships is well
+# past it — and the `actions` extractor has nothing to build in the first
+# place. See docs/dev/log/E3.md for the decision and the evidence behind it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly. The slot is this repository's own: the sibling repositories hold
+    # `31 20 * * 3` and `11 20 * * 3`, and three scans starting at once would
+    # queue behind each other for no reason.
+    - cron: "41 20 * * 3"
+  workflow_dispatch:
+
+# The scan reads the repository and writes alerts; the job below widens to
+# `security-events: write` for the upload, and nothing here may write.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # `actions: read` lets the workflow extractor read the workflow runs it
+      # analyses; `security-events: write` is the alert upload.
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: rust
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          build-mode: ${{ matrix.build-mode }}
+          languages: ${{ matrix.language }}
+          queries: security-extended
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9

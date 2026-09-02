@@ -230,3 +230,6 @@ mod d3_macho_segment_vmaddr_and_vmsize_were_wrong;
 mod e1_otp_tarballs_escaped_the_verification;
 #[path = "regressions/e1_the_sha256sums_step_read_and_wrote_one_file.rs"]
 mod e1_the_sha256sums_step_read_and_wrote_one_file;
+
+#[path = "regressions/e3_an_issue_form_was_not_valid_yaml.rs"]
+mod e3_an_issue_form_was_not_valid_yaml;

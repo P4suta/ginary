@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Three manifests, because this repository has three. The root `cargo` entry
+# reaches the crate's `Cargo.toml` and `Cargo.lock`; it does not reach
+# `fuzz/Cargo.toml`, which is a workspace of its own on purpose (see the note
+# in that file) and therefore needs an entry of its own; and `github-actions`
+# watches the pinned `uses:` SHAs in `.github/workflows/`.
+#
+# Everything is grouped, so one Monday is one pull request per ecosystem
+# rather than ten, and everything waits a `cooldown` week, so a release that
+# is yanked hours later never becomes a pull request here at all.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels: ["type: dependencies", "area: rust"]
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels: ["type: dependencies", "area: rust"]
+    groups:
+      fuzz:
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels: ["type: dependencies", "area: ci"]
+    groups:
+      github-actions:
+        patterns: ["*"]

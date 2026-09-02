@@ -67,6 +67,9 @@
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
 | `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
+| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:` |
+| `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
+| `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
 timeout runner moved there in A1a, because `otp::discover` needs the same
@@ -793,6 +796,33 @@ same unattributed `AlreadyExists` the reservation existed to end.
 `tests/regressions/a3b_a_reserved_name_covered_only_the_exact_path.rs` pins the first-component
 rule at both ends, including the `./` shape, and asserts the destination holds nothing but the
 one front-matter entry that is legitimately unpacked.
+
+## The repository as its own fixture
+
+`tests/ci_matrix.rs`, `tests/repo_hardening.rs`, `tests/v1_readiness.rs`, `tests/formal.rs` and
+`tests/smoke_matrix.rs` have no fixture: the repository is the fixture. All five read committed
+paths through `tests/common/repo.rs`, which is the one place that resolution lives:
+
+- `root()` — the directory holding `Cargo.toml`, from `CARGO_MANIFEST_DIR`, so a test finds the
+  same file whatever directory the run started in.
+- `read(path)` — the file as text, panicking with the path when it is not there. For these
+  targets that *is* the assertion: a workflow or a document the milestone promised and did not
+  write is a failed test, named by where it was looked for.
+- `read_opt(path)` / `exists(path)` — for a test that wants to make its own message, or that
+  asserts a file's absence.
+- `read_or_missing(path)` — the text, or the one-line marker `(missing <path>)`. Use it in a
+  snapshot test rather than `read`: a panic reports only the path, while the marker makes the
+  failure a diff between the record the milestone promised and the empty tree, so one run shows
+  both the path and the whole expected content.
+- `parse_yaml(text)` / `yaml(path)` — the document as YAML, through `saphyr`. GitHub loads the
+  issue forms, `dependabot.yml` and every workflow with a YAML reader, and a substring assertion
+  is just as happy with a file no reader will accept; parsing first makes that a test failure.
+  `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
+  and it holds every `.github` record to it through `yaml_files_under(".github")`.
+
+The same rule applies to all of them: assert on what the file *says*, not on where its lines
+happen to wrap. `flowed()` in `tests/repo_hardening.rs` collapses whitespace before a prose
+assertion, and the parsed helpers above are the equivalent for a record with structure.
 
 ## The `Diag` sink-injection pattern
 

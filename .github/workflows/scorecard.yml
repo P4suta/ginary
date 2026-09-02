@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Scorecard supply-chain security
+
+# OpenSSF Scorecard grades this repository's supply-chain posture — pinned
+# actions, branch protection, a security policy, dangerous workflow patterns —
+# and publishes the grade, which is what makes the README badge a number a
+# stranger can check rather than a claim.
+#
+# `branch_protection_rule` is in the trigger list on purpose: the ruleset under
+# .github/rulesets/ is half of the score, so loosening it re-runs the scan.
+
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, on a slot nobody else holds: `11 20` and `31 20` belong to the
+    # sibling repositories and `41 20` to this repository's own CodeQL scan.
+    - cron: "51 20 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    # The scan is only meaningful against the default branch.
+    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'branch_protection_rule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The SARIF upload writes code-scanning alerts.
+      security-events: write
+      # `publish_results` signs the result with an OIDC token; without this the
+      # published record, and therefore the badge, is not produced.
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Keep the SARIF as a run artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scorecard-sarif-${{ github.run_id }}
+          path: results.sarif
+          retention-days: 7
+      - name: Upload results to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: results.sarif

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# One owner for everything, with the paths that decide whether a change can
+# reach `main` at all listed after the catch-all so they are never covered by
+# accident: the workflows and rulesets, the licence and advisory policy, the
+# security policy, and the architecture decisions the rest of the tree is
+# argued from.
+* @P4suta
+/.github/ @P4suta
+/SECURITY.md @P4suta
+/deny.toml @P4suta
+/docs/adr/ @P4suta
