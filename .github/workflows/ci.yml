@@ -44,9 +44,9 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
       - run: cargo doc --no-deps --locked
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.7
       - run: cargo deny check
 
   msrv:
@@ -159,9 +159,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
       # The launcher-only stub for each target. `cross` runs the compiler in a
       # per-triple container, so a build script linked against this runner's
       # glibc does not leak into the cross build; hence a separate target dir.
@@ -202,16 +202,22 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
       # Register the qemu binfmt handlers so the aarch64 container row can run
       # on this x86_64 runner, then run the committed matrix script.
       - name: Bootstrap binfmt for arm64
         run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+      # One target directory per triple, because one target directory belongs to
+      # one container image. `cross` runs each triple's compiler in its own
+      # image and the gnu image is deliberately ancient, so a host
+      # `build-script-build` cached by the musl row cannot start in it:
+      # `GLIBC_2.28 not found`, which is how the first live run died before it
+      # built a single stub. GitHub does not shell-expand `env:` values, so the
+      # per-triple directory is exported inside the loop. See
+      # tests/regressions/e5_one_cross_target_directory_was_shared_between_images.rs.
       - name: Build the cross stubs the matrix runs against
-        env:
-          CARGO_TARGET_DIR: target/cross
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           mkdir -p target/stubs
@@ -220,8 +226,10 @@ jobs:
             linux-x86_64-gnu:x86_64-unknown-linux-gnu \
             linux-aarch64-musl:aarch64-unknown-linux-musl; do
             name=${entry%%:*}; triple=${entry##*:}
-            cross build --release --locked --no-default-features --target "$triple"
-            cp "target/cross/$triple/release/ginary" "target/stubs/ginary-stub-$version-$name"
+            ( export CARGO_TARGET_DIR="target/cross/$triple"
+              cross build --release --locked --no-default-features --target "$triple"
+              cp "$CARGO_TARGET_DIR/$triple/release/ginary" \
+                 "target/stubs/ginary-stub-$version-$name" )
           done
       - name: Repack the OTP catalog the matrix builds from
         run: |
@@ -264,12 +272,19 @@ jobs:
           gleam-version: "1.18.1"
       - run: cargo build --release --locked
       # The darwin stub comes from here and from nowhere else.
+      #
+      # Into a target directory of its own. Both flavors are one Cargo target
+      # and share `target/release/ginary`, so a stub built into the default
+      # directory replaces the command line tool the next step runs — which is
+      # exactly what happened on the first live run, and the packaging step
+      # below was answered by the launcher stub's payloadless sentence. See
+      # tests/regressions/e5_the_macos_job_ran_the_stub_as_the_command_line_tool.rs.
       - name: Build the darwin stub natively
         run: |
-          cargo build --no-default-features --release --locked
+          cargo build --no-default-features --release --locked --target-dir target/stub
           mkdir -p target/stubs
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          cp target/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
+          cp target/stub/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
       # Build a hello_ffi artifact against a dir: catalog ERTS, run it (its
       # arguments, its greeting, exit 3), and verify the ad-hoc signature.
       - name: Package, run and verify a hello_ffi artifact
@@ -342,9 +357,9 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.0
       # Line coverage, gated at 90%. The branch floor is documented as
       # nightly-only (it needs a `-Z coverage-options=branch` build); see
       # docs/dev/testing.md. The threshold lives here, not only in the script's

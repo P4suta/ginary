@@ -1284,3 +1284,70 @@ fn every_uses_reference_is_pinned_to_a_full_sha_or_marked_todo() {
         offenders.join("\n")
     );
 }
+
+// ------------------------------------------ what the first live run found --
+
+/// The action every helper binary in this repository is installed with.
+const INSTALL_ACTION: &str = "taiki-e/install-action";
+
+#[test]
+fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    for (path, text) in action_yaml() {
+        let parsed = parse_yaml(&text).unwrap_or_else(|e| panic!("{path} is not valid YAML: {e}"));
+        let Some(jobs) = parsed
+            .as_mapping_get("jobs")
+            .and_then(YamlOwned::as_mapping)
+        else {
+            continue;
+        };
+        for (id, job) in jobs {
+            let job_id = id.as_str().unwrap_or("<a job id that is not a string>");
+            let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
+                continue;
+            };
+            for step in steps {
+                let uses = step
+                    .as_mapping_get("uses")
+                    .and_then(YamlOwned::as_str)
+                    .unwrap_or_default();
+                if !uses.starts_with(INSTALL_ACTION) {
+                    continue;
+                }
+                let tool = step
+                    .as_mapping_get("with")
+                    .and_then(|with| with.as_mapping_get("tool"))
+                    .and_then(YamlOwned::as_str)
+                    .unwrap_or_default();
+                for entry in tool.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                    match entry.split_once('@') {
+                        Some((name, version))
+                            if version.starts_with(|c: char| c.is_ascii_digit()) =>
+                        {
+                            let _ = name;
+                            pinned += 1;
+                        }
+                        _ => offenders.push(format!(
+                            "{path}: job `{job_id}` installs `{entry}`, which resolves to \
+                             whatever the action calls latest"
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        pinned + offenders.len() > 0,
+        "no workflow installs a tool through {INSTALL_ACTION} any more"
+    );
+    assert!(
+        offenders.is_empty(),
+        "an unpinned tool is a build whose result changes without a commit. The first live run \
+         of `lint` installed cargo-deny 0.18.5 — the newest this action's manifest knew — and it \
+         could not parse a CVSS 4.0 advisory that had appeared in the RustSec database, so \
+         `cargo deny check` failed on a tree nothing had changed. Pin each one to the version \
+         the gates were run against:\n{}",
+        offenders.join("\n")
+    );
+}

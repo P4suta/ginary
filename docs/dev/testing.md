@@ -227,10 +227,14 @@ supposed to have the toolchain cannot silently skip its coverage. CI sets it on 
 
 A test can need more than a program. `tests/closure.rs` needs a real
 `gleam export erlang-shipment` output, which `require_tools` knows nothing about, so it reads
-`GINARY_TEST_SHIPMENT` (defaulting to the author's `notify` shipment) and applies the same rule by
-hand: a directory that is not there is a reported skip, and a failure under
-`GINARY_REQUIRE_TOOLCHAIN=1`. Any fixture a gated test needs from outside the repository is
-overridable and escalated the same way.
+`GINARY_TEST_SHIPMENT` — and there is no default, because a path is not a program. The rule is
+`tests/common/shipment.rs::choose_shipment`: unset — or set to nothing at all, which is what an
+unset `${{ vars.… }}` expands to and what `var_os` reports as `Some("")` — is a reported skip
+*however* `GINARY_REQUIRE_TOOLCHAIN` is set, because that variable is a claim about programs the
+machine installs and cannot be a claim that somebody exported a Gleam project here; a non-empty
+value that is not a directory is a failure *however* it is set, because the caller asked for a
+run and mistyped the path. A fixture a gated test needs from outside the repository is named by
+the caller or it is not used.
 
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
@@ -604,10 +608,11 @@ The gated test at the end of the file runs the same closure over a real
 `gleam export erlang-shipment` output with `--root notify`, and asserts what only a real tree can
 show: `crypto` resolves to a version that exists under the host `lib/`, every OTP `ebin` is a
 directory under that `lib/`, and every shipment application has a directory. The shipment it uses
-is `GINARY_TEST_SHIPMENT` when that is set and a path on the author's machine otherwise, and a
-missing one is escalated exactly as a missing program is: a reported skip, or a failure under
-`GINARY_REQUIRE_TOOLCHAIN=1`. Without that escalation the only test that touches a real tree would
-evaporate silently on every machine but one.
+is `GINARY_TEST_SHIPMENT` and nothing else: unset is a reported skip, and a value that is not a
+directory is a failure. It used to fall back to a path on the author's machine, which read as a
+default and was one machine's truth; the first live CI run failed the `test` and `coverage` jobs on
+it, and `tests/regressions/e5_a_gated_test_defaulted_to_one_developers_machine.rs` now holds both
+halves of the rule.
 
 ## Fixture policy
 
@@ -823,6 +828,16 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   is just as happy with a file no reader will accept; parsing first makes that a test failure.
   `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
   and it holds every `.github` record to it through `yaml_files_under(".github")`.
+- `workflow_steps(path)` — every step of every job of one workflow, in file order, as
+  `WorkflowStep { workflow, job, position, name, run, env }`: the job id it belongs to, its
+  1-based position within that job, its `name:` (or its `uses:`), its `run:` script, and the
+  job's `env:` overlaid with the step's own. `step.commands()` is that script as one command per
+  line with backslash continuations joined, because a command wrapped for width is still one
+  command and a cosmetic reflow must not change what a rule asserts. E5 bought it: three of that
+  milestone's findings are about *order* and *environment* within a job — which build last wrote
+  `target/release/ginary`, which target directory a second `cross` invocation reuses, which job a
+  step lives in and therefore which `if:` decides whether it runs — and a substring search over
+  the file text cannot answer any of them.
 - `rust_toolchain_sites()` — every `dtolnay/rust-toolchain` step under `.github/`, as
   `ToolchainSite { workflow, job, toolchain }`, read out of the parsed workflow rather than
   grepped: the word `toolchain` also appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in
@@ -1015,7 +1030,8 @@ assertion.
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
 `cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
-`coverage.rs`, `repo.rs`, `deps.rs` and `digest.rs`, described above. Still to come:
+`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs` and `shipment.rs`, described above. Still to
+come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

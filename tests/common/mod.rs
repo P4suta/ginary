@@ -32,6 +32,7 @@ pub mod project;
 pub mod repack;
 pub mod repo;
 pub mod script;
+pub mod shipment;
 pub mod snapshot;
 pub mod stubfile;
 pub mod tools;

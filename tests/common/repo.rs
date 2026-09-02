@@ -9,6 +9,7 @@
 //! [`tests/smoke_matrix.rs`](../smoke_matrix.rs) grew their own copies of; this
 //! module is the one place the E1 targets share them from.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use saphyr::{LoadableYamlNode, YamlOwned};
@@ -241,4 +242,123 @@ fn scalar_text(node: &YamlOwned) -> String {
         },
         str::to_owned,
     )
+}
+
+// ------------------------------------------------------- workflow steps --
+
+/// One step of one workflow job, with the environment it runs under.
+///
+/// The tests that came out of the first live CI runs are all about *order and
+/// environment* rather than about the presence of a word: which build wrote
+/// `target/release/ginary` last, whether two `cross` invocations share one
+/// `CARGO_TARGET_DIR`. A substring search over the file cannot answer either,
+/// so the steps are read out of the parsed document with their env merged.
+#[derive(Clone, Debug)]
+pub struct WorkflowStep {
+    /// The workflow file, repository-relative.
+    pub workflow: String,
+    /// The job id the step belongs to.
+    pub job: String,
+    /// The step's position within its job, counting from one.
+    pub position: usize,
+    /// The step's `name:`, or its `uses:`, or `<a run step>`.
+    pub name: String,
+    /// The step's `run:` script, empty for a step that only `uses:` an action.
+    pub run: String,
+    /// The job's `env:` overlaid with the step's own, values as written.
+    pub env: BTreeMap<String, String>,
+}
+
+impl WorkflowStep {
+    /// The step's script as one command per line, with backslash
+    /// continuations joined and each line trimmed.
+    ///
+    /// Every rule a test writes over a `run:` block reads one command at a
+    /// time, and a shell command wrapped over three lines for width is still
+    /// one command. Without joining, a purely cosmetic reflow of a workflow
+    /// silently changes what such a rule asserts — in both directions: a
+    /// `--target-dir` moved onto a continuation makes the first line look like
+    /// a build that writes to the default path, and a flag moved off one hides
+    /// the build the rule was watching.
+    pub fn commands(&self) -> Vec<String> {
+        self.run
+            .replace("\\\n", " ")
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .collect()
+    }
+}
+
+impl std::fmt::Display for WorkflowStep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: job `{}` step {} (`{}`)",
+            self.workflow, self.job, self.position, self.name
+        )
+    }
+}
+
+/// Every step of every job of one workflow, in file order.
+///
+/// # Panics
+///
+/// If the file is not there or is not valid YAML: a workflow GitHub cannot
+/// parse is a workflow that never runs.
+pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
+    let parsed = yaml(relative);
+    let mut out = Vec::new();
+    let Some(jobs) = parsed
+        .as_mapping_get("jobs")
+        .and_then(YamlOwned::as_mapping)
+    else {
+        return out;
+    };
+    for (id, job) in jobs {
+        let name = id.as_str().unwrap_or("<a job id that is not a string>");
+        let job_env = env_map(job.as_mapping_get("env"));
+        let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
+            continue;
+        };
+        for (index, step) in steps.iter().enumerate() {
+            let run = step
+                .as_mapping_get("run")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let label = step
+                .as_mapping_get("name")
+                .and_then(YamlOwned::as_str)
+                .or_else(|| step.as_mapping_get("uses").and_then(YamlOwned::as_str))
+                .unwrap_or("<a run step>")
+                .to_owned();
+            let mut env = job_env.clone();
+            env.extend(env_map(step.as_mapping_get("env")));
+            out.push(WorkflowStep {
+                workflow: relative.to_owned(),
+                job: name.to_owned(),
+                position: index + 1,
+                name: label,
+                run,
+                env,
+            });
+        }
+    }
+    out
+}
+
+/// One `env:` mapping as name to value, dropping anything that is not a pair
+/// of strings — a numeric or boolean value cannot be an environment variable
+/// GitHub passes through unchanged anyway.
+fn env_map(node: Option<&YamlOwned>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(mapping) = node.and_then(YamlOwned::as_mapping) else {
+        return out;
+    };
+    for (key, value) in mapping {
+        if let (Some(key), Some(value)) = (key.as_str(), value.as_str()) {
+            out.insert(key.to_owned(), value.to_owned());
+        }
+    }
+    out
 }

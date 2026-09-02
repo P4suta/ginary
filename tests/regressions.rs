@@ -236,3 +236,18 @@ mod e3_an_issue_form_was_not_valid_yaml;
 
 #[path = "regressions/e4_a_crlf_checkout_rewrote_the_hashed_fixtures.rs"]
 mod e4_a_crlf_checkout_rewrote_the_hashed_fixtures;
+
+#[path = "regressions/e5_a_gated_test_defaulted_to_one_developers_machine.rs"]
+mod e5_a_gated_test_defaulted_to_one_developers_machine;
+
+#[path = "regressions/e5_one_cross_target_directory_was_shared_between_images.rs"]
+mod e5_one_cross_target_directory_was_shared_between_images;
+
+#[path = "regressions/e5_the_build_script_had_no_name_for_the_msvc_triple.rs"]
+mod e5_the_build_script_had_no_name_for_the_msvc_triple;
+
+#[path = "regressions/e5_the_credentials_notice_was_not_tied_to_the_missing_credentials.rs"]
+mod e5_the_credentials_notice_was_not_tied_to_the_missing_credentials;
+
+#[path = "regressions/e5_the_macos_job_ran_the_stub_as_the_command_line_tool.rs"]
+mod e5_the_macos_job_ran_the_stub_as_the_command_line_tool;

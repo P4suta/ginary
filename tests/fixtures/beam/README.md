@@ -28,6 +28,24 @@ small enough that a test can name every chunk offset in it; `gleam@list.beam`
 is large enough that truncating it at every byte offset is a real workout for
 the never-panic property.
 
+## They contain an absolute path, on purpose
+
+Each of the three carries a `Dbgi` chunk, and the Erlang compiler records in it
+the absolute path of the `.erl` it compiled — here a directory under the home
+of the machine `gleam_stdlib` was built on. The regression test
+`e5_a_gated_test_defaulted_to_one_developers_machine.rs` scans every tracked
+file under `tests/`, `src/`, `scripts/` and `.github/` for exactly that, so
+these three are named in its `ALLOWED` list with the reason.
+
+The exception is narrow and it is argued. A compiled artifact copied verbatim
+is the one thing in the tree whose bytes nobody chose: rewriting the chunk
+would make it no longer what a compiler wrote, which is the whole point of
+these files, and recompiling `gleam_stdlib` with a relative `-o` would change
+every offset and size in the table above and would no longer be 1.0.5 as
+shipped. Nothing reads the path, and nothing falls back to it. The rule it is
+carved out of is unchanged: no source or test file may name a path that exists
+on one machine.
+
 ## Licensing
 
 These are not ginary's files: they are compiled from `gleam_stdlib`, which is
