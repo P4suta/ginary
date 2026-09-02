@@ -27,6 +27,7 @@ pub mod native;
 pub mod payload;
 pub mod project;
 pub mod repack;
+pub mod repo;
 pub mod script;
 pub mod snapshot;
 pub mod stubfile;

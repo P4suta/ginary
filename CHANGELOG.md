@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-02
+
+The first release. ginary turns a Gleam application into one self-contained executable that runs
+on a machine with no Erlang installation. Five phases, A through E, built it:
+
+- **Phase A — the build pipeline and the launcher.** `ginary build` reads a Gleam project, runs
+  `gleam export erlang-shipment`, resolves the application closure against an OTP installation,
+  stages and strips a trimmed runtime, packs a deterministic tar + zstd payload, and appends it
+  with a 64-byte trailer to a copy of the ginary binary. The same binary is the launcher: it
+  reads the trailer at its own tail, extracts the runtime into a per-user cache atomically, and
+  `execve`s the BEAM, mapping every failure to a numbered exit code.
+- **Phase B — reading and assuring an artifact.** `ginary verify`, `ginary sbom` and
+  `ginary crashdump` read a packaged application from the outside; the cache gained per-runtime
+  locking and age pruning that never removes an entry in use; and the cache protocol is modelled
+  in TLA+ under `formal/`.
+- **Phase C — cross-target builds.** Version-locked stubs for every target, the local-first OTP
+  catalog (`ginary otp`), and native-code reconciliation for the NIFs and port programs a
+  shipment carries.
+- **Phase D — Windows and macOS.** The resident Windows launcher, and the Mach-O section payload
+  with ad-hoc signing for macOS.
+- **Phase E — the verification matrix.** The CI job matrix, the release-please and distribute
+  workflows, the coverage and version-consistency gates, and the v1 readiness sweep.
+
 ### Added
 
 - Every ginary binary carries a 128-byte identity marker naming the version it was built by, the
@@ -74,4 +97,5 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entries every reader takes on their own decode without the rest of the stream. `ginary inspect`
   can therefore still say what a damaged artifact was supposed to be.
 
-[Unreleased]: https://github.com/P4suta/ginary/commits/main
+[Unreleased]: https://github.com/P4suta/ginary/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/P4suta/ginary/releases/tag/v0.1.0

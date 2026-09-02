@@ -225,3 +225,8 @@ mod d3_macho_section_addr_was_never_shifted;
 #[cfg(feature = "cli")]
 #[path = "regressions/d3_macho_segment_vmaddr_and_vmsize_were_wrong.rs"]
 mod d3_macho_segment_vmaddr_and_vmsize_were_wrong;
+
+#[path = "regressions/e1_otp_tarballs_escaped_the_verification.rs"]
+mod e1_otp_tarballs_escaped_the_verification;
+#[path = "regressions/e1_the_sha256sums_step_read_and_wrote_one_file.rs"]
+mod e1_the_sha256sums_step_read_and_wrote_one_file;

@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Nightly
+
+# The heavy assurance passes, kept off the pull-request path so PR CI stays
+# fast. Mutation testing, the fuzz smoke and the full cross-Linux smoke matrix
+# run on a schedule and on demand.
+on:
+  schedule:
+    # 03:17 UTC daily; an odd minute so it does not land on the hour with every
+    # other project's nightly.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: Mutation testing (${{ matrix.module }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GINARY_REQUIRE_TOOLCHAIN: "1"
+    strategy:
+      fail-fast: false
+      # Sharded over the highest-value modules so one slow shard does not hold
+      # the others, and a survivor is attributed to a module rather than a run.
+      matrix:
+        module: [trailer, payload, cache, closure, appfile, launch, verify]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cargo-mutants
+      # A missed or timed-out mutant fails the shard: the caught-percentage gate
+      # is "every mutant this module produces is caught".
+      - run: cargo mutants --file "src/${{ matrix.module }}.rs" --features fault-injection
+
+  fuzz:
+    name: Fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [trailer_parse, appfile_terms, beam_chunks, payload_read_manifest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cargo-fuzz
+      # 30 seconds per target, seeded from the committed corpus; a crash is a
+      # failed job with the reproducer in the log.
+      - run: |
+          cargo fuzz run "${{ matrix.target }}" \
+            fuzz/corpus/"${{ matrix.target }}" fuzz/seeds/"${{ matrix.target }}" \
+            -- -max_total_time=30 -rss_limit_mb=4096
+
+  smoke-matrix:
+    name: Full cross-Linux smoke matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GINARY_REQUIRE_TOOLCHAIN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cross
+      - name: Bootstrap binfmt for arm64
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+      - name: Build the cross stubs and repack the catalog
+        env:
+          CARGO_TARGET_DIR: target/cross
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          mkdir -p target/stubs
+          for entry in \
+            linux-x86_64-musl:x86_64-unknown-linux-musl \
+            linux-x86_64-gnu:x86_64-unknown-linux-gnu \
+            linux-aarch64-musl:aarch64-unknown-linux-musl; do
+            name=${entry%%:*}; triple=${entry##*:}
+            cross build --release --locked --no-default-features --target "$triple"
+            cp "target/cross/$triple/release/ginary" "target/stubs/ginary-stub-$version-$name"
+          done
+          cargo run --quiet --locked -- otp repack \
+            --upstream-tag OTP-29.0.5 \
+            --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
+            --out dist/otp
+      - run: scripts/smoke-matrix.sh
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs

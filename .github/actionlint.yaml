@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# macos-13 is a real GitHub-hosted runner label (the last x86_64 macOS image),
+# but this actionlint build's baked-in label list predates it and reports it as
+# unknown. Teaching actionlint the label here keeps the lint clean without
+# weakening the macos matrix, which needs both an x86_64 (macos-13) and an
+# arm64 (macos-14) runner.
+self-hosted-runner:
+  labels:
+    - macos-13

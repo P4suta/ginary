@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
 
+# No workflow-wide token: each job widens `permissions` to exactly what it
+# needs, and most need nothing but `contents: read`.
 permissions: {}
 
 env:
@@ -13,29 +15,41 @@ env:
 
 jobs:
   lint:
-    name: Formatting and lints
+    name: Formatting, lints, docs and licences
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: read
+    env:
+      # rustdoc warnings are denied for the `cargo doc` step below.
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Pinned to the MSRV (rust-version in Cargo.toml). `--locked` proves the
+      # committed Cargo.lock resolves under 1.88 rather than a newer floor.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: 1.88.0
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+      # Three clippy flavors. `--all-features` compiles the fault-injection
+      # tests in; the plain run is what a contributor's `cargo clippy` does and
+      # keeps a helper only the gated tests call from rotting; the stub run is
+      # the launcher-only build a cross-target artifact is made of.
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      # The default feature set too: `--all-features` compiles the
-      # `fault-injection` tests in, and a helper only they call is dead code
-      # without them.
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo doc --no-deps --locked
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (both flavors, pinned toolchain)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -54,39 +68,22 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      # The launcher fault points are compiled in only under this feature; see
-      # `src/fault.rs` and `docs/dev/testing.md`.
-      - run: cargo test --locked --features fault-injection
-
-  doc:
-    name: Documentation
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    env:
-      RUSTDOCFLAGS: -D warnings
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: 1.88.0
-      - run: cargo doc --no-deps --locked
+      # The full command line tool, with the launcher fault points compiled in.
+      - run: cargo test --features fault-injection --locked
+      # The launcher-only stub flavor: no clap, no TOML reader, no build side.
+      - run: cargo test --no-default-features --locked
 
   smoke:
     name: Clean-room smoke test
     # Pinned rather than `ubuntu-latest`: the smoke test runs the artifact this
     # runner built inside `ubuntu:24.04`, and the glibc floor it demonstrates is
-    # a property of the pair.
+    # a property of the pair. Docker is preinstalled on the hosted runner.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
     env:
-      # An unreachable docker daemon must fail the job rather than report a
-      # skip; docker is preinstalled on the GitHub-hosted ubuntu runners.
+      # An unreachable docker daemon must fail the job rather than report a skip.
       GINARY_REQUIRE_TOOLCHAIN: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,22 +101,244 @@ jobs:
         env:
           GINARY_BIN: ${{ github.workspace }}/target/release/ginary
 
+  cross-build:
+    name: Cross-build the stubs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64-gnu
+            triple: x86_64-unknown-linux-gnu
+          - target: linux-x86_64-musl
+            triple: x86_64-unknown-linux-musl
+          - target: linux-aarch64-gnu
+            triple: aarch64-unknown-linux-gnu
+          - target: linux-aarch64-musl
+            triple: aarch64-unknown-linux-musl
+          - target: windows-x86_64
+            triple: x86_64-pc-windows-gnu
+            suffix: .exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cross
+      # The launcher-only stub for each target. `cross` runs the compiler in a
+      # per-triple container, so a build script linked against this runner's
+      # glibc does not leak into the cross build; hence a separate target dir.
+      - name: Build the ${{ matrix.target }} stub
+        env:
+          CARGO_TARGET_DIR: target/cross
+        run: |
+          cross build --release --locked --no-default-features --target "${{ matrix.triple }}"
+          mkdir -p dist/stubs
+          cp "target/cross/${{ matrix.triple }}/release/ginary${{ matrix.suffix }}" \
+             "dist/stubs/ginary-stub-${{ matrix.target }}${{ matrix.suffix }}"
+      # Where a catalog runtime for the target exists, build a hello_ffi artifact
+      # too, to prove the stub packages. This runner cannot for every target, so
+      # the stub itself is the artifact `required` waits on; the full matrix runs
+      # in distribute.yml on the right runners.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ginary-stub-${{ matrix.target }}
+          path: dist/stubs/ginary-stub-${{ matrix.target }}${{ matrix.suffix }}
+          if-no-files-found: error
+
+  smoke-matrix:
+    name: Cross-Linux smoke matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      GINARY_REQUIRE_TOOLCHAIN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cross
+      # Register the qemu binfmt handlers so the aarch64 container row can run
+      # on this x86_64 runner, then run the committed matrix script.
+      - name: Bootstrap binfmt for arm64
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+      - name: Build the cross stubs the matrix runs against
+        env:
+          CARGO_TARGET_DIR: target/cross
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          mkdir -p target/stubs
+          for entry in \
+            linux-x86_64-musl:x86_64-unknown-linux-musl \
+            linux-x86_64-gnu:x86_64-unknown-linux-gnu \
+            linux-aarch64-musl:aarch64-unknown-linux-musl; do
+            name=${entry%%:*}; triple=${entry##*:}
+            cross build --release --locked --no-default-features --target "$triple"
+            cp "target/cross/$triple/release/ginary" "target/stubs/ginary-stub-$version-$name"
+          done
+      - name: Repack the OTP catalog the matrix builds from
+        run: |
+          cargo run --quiet --locked -- otp repack \
+            --upstream-tag OTP-29.0.5 \
+            --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
+            --out dist/otp
+      - run: scripts/smoke-matrix.sh
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+
+  macos:
+    name: macOS build, launch and signature
+    # macos-13 is the last x86_64 image; macos-14 is arm64. This is the job that
+    # closes the D3 "awaits a Mac runner" gap: the darwin stub is built natively
+    # here (there is no macOS cross toolchain on Linux) and its signature is
+    # verified against the kernel's own requirement.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            target: macos-x86_64
+          - runner: macos-14
+            target: macos-aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - run: cargo build --release --locked
+      # The darwin stub comes from here and from nowhere else.
+      - name: Build the darwin stub natively
+        run: |
+          cargo build --no-default-features --release --locked
+          mkdir -p target/stubs
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          cp target/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
+      # Build a hello_ffi artifact against a dir: catalog ERTS, run it (its
+      # arguments, its greeting, exit 3), and verify the ad-hoc signature.
+      - name: Package, run and verify a hello_ffi artifact
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+        run: |
+          otp_root="$(dirname "$(dirname "$(command -v erl)")")"
+          work=$(mktemp -d)
+          cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
+          ( cd "$work/hello_ffi"
+            "$GITHUB_WORKSPACE/target/release/ginary" build \
+              --target "${{ matrix.target }}" \
+              --erts "dir:${otp_root}" )
+          artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
+          "$artifact" 0 hello world
+          set +e; "$artifact" 3; test $? -eq 3; set -e
+          codesign --verify --strict --verbose=4 "$artifact"
+
+  windows:
+    name: Windows build and exit-code propagation
+    runs-on: windows-2022
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      # Both flavors, and the launcher-side unit tests natively (the wine gap
+      # from D2 — a real Rust test binary cannot start under the cross image's
+      # wine, so these run nowhere until a real Windows runner does it).
+      - run: cargo build --no-default-features --release --locked
+      - run: cargo build --release --locked
+      - run: cargo test --locked
+      # Prove an exit code crosses the launcher: erl halt(3) reaches ERRORLEVEL.
+      - name: Assert exit-code propagation
+        shell: pwsh
+        run: |
+          erl -noshell -eval "halt(3)"
+          if ($LASTEXITCODE -ne 3) { throw "expected ERRORLEVEL 3, got $LASTEXITCODE" }
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      GINARY_REQUIRE_TOOLCHAIN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+          components: llvm-tools-preview
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
+      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+        with:
+          tool: cargo-llvm-cov
+      # Line coverage, gated at 90%. The branch floor is documented as
+      # nightly-only (it needs a `-Z coverage-options=branch` build); see
+      # docs/dev/testing.md. The threshold lives here, not only in the script's
+      # default, so it cannot be lowered without the diff showing it. The
+      # full end-to-end suite runs under coverage (the toolchain is present and
+      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure), so the
+      # number reflects the whole tree rather than a toolchain-free subset.
+      - run: cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info
+      - run: scripts/ci/coverage-gate.sh target/lcov.info 90
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lcov
+          path: target/lcov.info
+          if-no-files-found: error
+
   required:
     name: Required CI
     if: ${{ always() && !cancelled() }}
-    needs: [lint, test, doc, smoke]
+    needs: [lint, test, smoke, cross-build, smoke-matrix, macos, windows, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require lints, tests, documentation and the smoke test to pass
+      - name: Require every runnable job to have passed
         env:
-          LINT_RESULT: ${{ needs.lint.result }}
-          TEST_RESULT: ${{ needs.test.result }}
-          DOC_RESULT: ${{ needs.doc.result }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          test "$LINT_RESULT" = success
-          test "$TEST_RESULT" = success
-          test "$DOC_RESULT" = success
-          test "$SMOKE_RESULT" = success
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            test "$result" = success
+          done

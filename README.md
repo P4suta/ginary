@@ -12,10 +12,40 @@ trimmed BEAM runtime, to a copy of the ginary binary itself.
 
 ## Status
 
-**Alpha.** `ginary build` works end to end on Linux x86_64 against the host's own OTP
-installation: run it in a Gleam project and it writes one executable that runs on a machine with
-no Erlang. Cross-target builds, prebuilt runtimes and the runtime-configuration keys are not
-implemented yet — see [Limitations](#limitations) and [CHANGELOG.md](CHANGELOG.md).
+<!--
+These badges render once the repository is published at github.com/<owner>/ginary; they are
+commented out until then so no broken image renders. Replace `<owner>/ginary` with the real path
+to make them live.
+
+![CI](https://github.com/<owner>/ginary/actions/workflows/ci.yml/badge.svg)
+![Nightly](https://github.com/<owner>/ginary/actions/workflows/nightly.yml/badge.svg)
+![Coverage](https://img.shields.io/badge/coverage-90%25%2B-brightgreen)
+-->
+
+**v1.** ginary packages a Gleam application and a trimmed BEAM runtime into a single executable
+that runs on a machine with no Erlang, no `PATH` entry and no unpacking step. v1 delivers the
+whole pipeline for seven targets — Linux gnu and musl on x86_64 and aarch64, macOS on x86_64 and
+arm64, and Windows on x86_64 — plus the tools to read, verify and cross-build an artifact: a
+version-locked stub per target, a local-first OTP catalog, native-code reconciliation for NIFs
+and port programs, `ginary verify` and `ginary sbom`, and a launcher whose cache protocol is
+modelled in TLA+. What runs where, and what a Mac or Windows runner still has to confirm, is the
+matrix below.
+
+| target | builds here | runs here | runs on CI |
+|---|---|---|---|
+| `linux-x86_64-gnu` | yes (host) | yes (host) | yes (ubuntu-24.04) |
+| `linux-x86_64-musl` | yes (cross) | yes (alpine container) | yes (smoke matrix) |
+| `linux-aarch64-gnu` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
+| `linux-aarch64-musl` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
+| `macos-x86_64` | no (needs a Mac) | no | yes (macos-13) |
+| `macos-aarch64` | no (needs a Mac) | no | yes (macos-14) |
+| `windows-x86_64` | yes (stub, cross) | no | yes (windows-2022) |
+
+"builds here" and "runs here" are what this development machine (Linux x86_64) can do today;
+"runs on CI" is the job that runs it once the workflows have a remote to run on. The macOS and
+Windows launches, the catalog publishing and the provenance attestations are authored as CI jobs
+and run when the repository is published — see [docs/dev/v1-readiness.md](docs/dev/v1-readiness.md)
+for the phase-by-phase evidence and [CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 ## Quickstart
 

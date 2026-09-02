@@ -33,3 +33,5 @@ only partly built, the record says so under `Consequences`.
   refusal cannot be waived
 - [0015](0015-windows-launcher-stays-resident.md) — The Windows launcher stays resident, and
   holds the lock itself
+- [0016](0016-macho-section-payload-and-adhoc-signing.md) — A Mach-O section carries the payload,
+  ad-hoc signed, not an appended trailer

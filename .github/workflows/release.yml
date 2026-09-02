@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Release
+
+# release-please watches `main`: it maintains a release pull request that bumps
+# the version and updates CHANGELOG.md from the Conventional Commits since the
+# last release, and — when that pull request is merged — creates the draft
+# GitHub release and the tag. Publishing the artifacts is distribute.yml's job,
+# triggered when the draft release is published. Nothing here tags or publishes
+# on its own; the release-please pull request is a human decision.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Maintain the release PR and draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # release-please opens a pull request and, on merge, creates the tag and
+      # the draft release.
+      contents: write
+      pull-requests: write
+    steps:
+      # No repository contents are needed, but the checkout keeps the token out
+      # of the local git config for any later step.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: googleapis/release-please-action@a02a34c4d625f9be7cb89156071d8567266a2445 # v4.2.0
+        with:
+          # The config and the manifest are committed at the repository root;
+          # `draft: true` in release-please-config.json is what makes the
+          # created release a draft, so distribute.yml runs on its publish.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
