@@ -101,9 +101,9 @@ fn the_command_line_refuses_it_too_and_leaves_the_directory() {
 
     let mut command =
         assert_cmd::Command::cargo_bin("ginary").expect("the `ginary` binary is built for tests");
+    command.env_clear().env("GINARY_CACHE_DIR", &root);
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     let assert = command
-        .env_clear()
-        .env("GINARY_CACHE_DIR", &root)
         .args(["cache", "clean", "--app"])
         .arg(&outside)
         .assert()

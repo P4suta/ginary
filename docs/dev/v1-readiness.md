@@ -63,11 +63,17 @@ and both were corrected; the model now checks clean. `tests/formal.rs` holds the
 configuration and `docs/dev/formal.md` against the tree so none rots. **Line coverage is gated at
 90%** by `scripts/ci/coverage-gate.sh` in the `coverage` CI job; the 80% branch floor is
 documented as nightly-only, because it needs a `-Z coverage-options=branch` build (see
-`docs/dev/testing.md`). As of the E1 commit the tree measures **85.17% line coverage**, below the
-90% floor: the gate is written and correct, and the shortfall is untested unit-level error and
-edge paths (`sign_macos`, `stubid`, `selfexe`, `main`, `stub`) that raising the crate to the
-floor requires. This is the one v1 acceptance item not yet met; it is recorded honestly rather
-than by lowering the gate, and `docs/dev/log/E1.md` details the measurement.
+`docs/dev/testing.md`). As of E2 the tree measures **90.26% line coverage**, over the 90% floor
+(done — E2). The E1 figure of 85.17% was in part a measurement artifact: the launcher path runs
+in a spawned artifact subprocess, and the hermetic `env_clear()` those spawns use dropped
+`LLVM_PROFILE_FILE`, so the subprocess wrote no profile and its real execution of `launcher`,
+`launch`, `cache` and `selfexe` was invisible. Re-injecting only that one variable after the
+clear (nothing else — the hermetic `PATH`/`ERL_*` scrub is unchanged) lifted the measured total
+to 89.61% with no new assertions, and genuine unit tests for `stubid`, `error`, `catalog`,
+`selfexe` and `cli` dispatch carried it to 90.26%. The remaining uncovered mass is the OTP
+repack pipeline (real upstream tarballs and network), macOS-only signing paths, and
+failure-injection error arms, none of which is reachable by a deterministic in-process test on
+this platform; `docs/dev/log/E2.md` details the before/after measurement per module.
 
 ### Phase C — cross-target builds
 

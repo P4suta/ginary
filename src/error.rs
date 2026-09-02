@@ -368,6 +368,50 @@ mod tests {
     }
 
     #[test]
+    fn every_variant_reports_its_cause_as_the_error_source() {
+        use std::error::Error as _;
+
+        // Each variant that wraps a cause must expose it through `source`, so a
+        // caller that walks the chain reaches the underlying failure rather
+        // than stopping at the launcher's own message.
+        let self_exe = LauncherError::SelfExe(io(2));
+        assert!(
+            self_exe.source().is_some(),
+            "a self-exe failure must carry its io cause"
+        );
+
+        let trailer = LauncherError::Trailer(TrailerError::EmptyPayload);
+        assert!(
+            trailer.source().is_some(),
+            "a trailer failure must carry its trailer cause"
+        );
+
+        let payload = LauncherError::Payload(PayloadError::UnsafePath {
+            path: "../x".to_owned(),
+        });
+        assert!(
+            payload.source().is_some(),
+            "a payload failure must carry its payload cause"
+        );
+
+        let cache = LauncherError::cache("/c", io(13));
+        assert!(
+            cache.source().is_some(),
+            "a cache failure must carry its io cause"
+        );
+
+        let exec = LauncherError::Exec {
+            program: PathBuf::from("/p"),
+            source: io(2),
+            hint: None,
+        };
+        assert!(
+            exec.source().is_some(),
+            "an exec failure must carry its io cause"
+        );
+    }
+
+    #[test]
     fn the_panic_hook_line_names_the_bug_and_the_message() {
         assert_eq!(
             panic_line("index out of bounds"),

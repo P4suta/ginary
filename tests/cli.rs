@@ -938,6 +938,37 @@ fn elf_deps_prints_what_the_binary_needs() {
 }
 
 #[test]
+fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
+    // Two files, so the text form's per-file separator and its whole
+    // block-per-binary layout are exercised rather than only the single-file
+    // case the JSON test drives.
+    let binary = assert_cmd::cargo::cargo_bin("ginary");
+    let assert = ginary()
+        .args(["elf", "deps"])
+        .arg(&binary)
+        .arg(&binary)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
+
+    let path = binary.display().to_string();
+    assert_eq!(
+        stdout.matches(&path).count(),
+        2,
+        "each of the two named binaries heads its own block:\n{stdout}"
+    );
+    for label in ["class", "machine", "interp", "pie", "stripped"] {
+        assert!(stdout.contains(label), "no `{label}` line:\n{stdout}");
+    }
+    // The two blocks are separated by a blank line: the second path is preceded
+    // by an empty line the first is not.
+    assert!(
+        stdout.contains(&format!("\n\n{path}")),
+        "a blank line separates the two file blocks:\n{stdout}"
+    );
+}
+
+#[test]
 fn elf_deps_json_carries_the_documented_keys() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
     let assert = ginary()
@@ -1313,6 +1344,7 @@ fn stage_rewrites_the_listing_so_its_sizes_match_the_stripped_tree() {
 fn ginary_with_cache(root: &Path) -> Command {
     let mut command = ginary();
     command.env_clear().env("GINARY_CACHE_DIR", root);
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     command
 }
 
@@ -1360,6 +1392,7 @@ fn cache_dir_reports_the_temporary_fallback_when_nothing_is_set() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut command = ginary();
     command.env_clear().env("TMPDIR", dir.path());
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     let assert = command.args(["cache", "dir", "--json"]).assert().success();
     let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
     assert_eq!(value["origin"], Value::from("TMPDIR fallback"));
@@ -1915,4 +1948,53 @@ fn inspect_launch_plan_prints_the_argv_against_a_placeholder_root() {
             "the plan must show `{expected}`:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn inspect_launch_plan_json_carries_the_program_argv_and_env_edits() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let artifact = common::artifact::SyntheticArtifact::build(dir.path());
+
+    let assert = ginary()
+        .args([
+            "inspect".as_ref(),
+            "--launch-plan".as_ref(),
+            "--json".as_ref(),
+            artifact.path().as_os_str(),
+        ])
+        .assert()
+        .success();
+    let value: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("inspect --json is JSON");
+
+    let plan = value
+        .get("launch_plan")
+        .expect("the launch plan is present when --launch-plan is asked for");
+    assert!(
+        plan.get("program")
+            .and_then(Value::as_str)
+            .is_some_and(|program| program.contains(ginary::inspect::PLACEHOLDER_ROOT)),
+        "the program is resolved against the placeholder root: {plan}"
+    );
+    let argv: Vec<&str> = plan
+        .get("argv")
+        .and_then(Value::as_array)
+        .expect("argv is an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for expected in ["-boot", "-noshell", "-eval", "-extra"] {
+        assert!(
+            argv.contains(&expected),
+            "the JSON argv must carry `{expected}`: {argv:?}"
+        );
+    }
+    assert!(
+        plan.get("set").and_then(Value::as_array).is_some(),
+        "the plan reports the environment it sets: {plan}"
+    );
+    assert!(
+        plan.get("remove").and_then(Value::as_array).is_some(),
+        "the plan reports the environment it removes: {plan}"
+    );
 }

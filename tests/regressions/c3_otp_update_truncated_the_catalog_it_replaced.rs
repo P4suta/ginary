@@ -148,6 +148,7 @@ fn a_path_that_holds_a_double_slash_is_a_path_and_not_a_url() {
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_clear()
         .env("GINARY_CACHE_DIR", &cache);
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     let assert = command
         .args(["otp", "update", "--catalog"])
         .arg(&spelled)

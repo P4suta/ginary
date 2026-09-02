@@ -16,6 +16,7 @@ pub mod built;
 pub mod cachefs;
 #[cfg(feature = "cli")]
 pub mod catalog;
+pub mod coverage;
 pub mod erl;
 #[cfg(feature = "cli")]
 pub mod fake_otp;

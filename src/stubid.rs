@@ -391,3 +391,68 @@ fn parse_body(text: &str) -> Result<StubId, StubIdError> {
         flavor,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The marker this build renders at compile time is the same array the
+    /// run-time `const fn` produces, and it reads back through [`scan`] as this
+    /// build's own identity.
+    ///
+    /// Calling `marker` at run time is what exercises the digit-writing of
+    /// `put_u32` and the byte copy of `put` under coverage; the round trip is
+    /// the assertion that the number field in particular is rendered correctly,
+    /// since a wrong `f` value would not parse back to
+    /// [`crate::manifest::FORMAT_VERSION`].
+    #[test]
+    fn the_rendered_marker_round_trips_to_this_builds_identity() {
+        let rendered = marker();
+        assert_eq!(
+            rendered, GINARY_STUB_ID,
+            "the run-time marker must equal the linked static"
+        );
+
+        let Ok(id) = scan(&rendered) else {
+            panic!("this build's own marker must scan as exactly one stub");
+        };
+        assert_eq!(
+            id.version,
+            env!("CARGO_PKG_VERSION"),
+            "the v field is this ginary's version"
+        );
+        assert_eq!(
+            id.format_version,
+            crate::manifest::FORMAT_VERSION,
+            "the f field is the number put_u32 wrote, read back"
+        );
+        assert_eq!(
+            id.target.name(),
+            TARGET_NAME,
+            "the t field is this build's target"
+        );
+        assert_eq!(
+            id.flavor.as_str(),
+            FLAVOR_NAME,
+            "the k field is this build's flavor"
+        );
+    }
+
+    /// A format version with more than one decimal digit is written whole, so
+    /// the number-writing path is exercised past its single-digit case.
+    #[test]
+    fn a_multi_digit_format_version_is_rendered_and_parses_back() {
+        // Drive `put_u32` through its multi-digit loop directly, then read the
+        // field back the way `parse_body` does, so a mutation in the digit
+        // arithmetic is caught here rather than only at the current one-digit
+        // format version.
+        let mut buf = [0u8; MARKER_LEN];
+        let (written, at) = put_u32(buf, 0, 12345);
+        buf = written;
+        let text = std::str::from_utf8(&buf[..at]).expect("decimal digits are UTF-8");
+        assert_eq!(
+            text, "12345",
+            "put_u32 writes the whole number, low digit last"
+        );
+    }
+}

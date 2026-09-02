@@ -270,6 +270,7 @@ impl ArtifactRun {
             .env("XDG_CACHE_HOME", &self.home)
             .current_dir(&self.cwd)
             .args(&self.args);
+        super::coverage::preserve_coverage_env(&mut command);
         for (key, value) in &self.env {
             command.env(key, value);
         }

@@ -510,6 +510,7 @@ impl<'a> Runner<'a> {
     pub fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args).env_clear();
+        super::coverage::preserve_coverage_env(&mut command);
         for (key, value) in &self.env {
             command.env(key, value);
         }

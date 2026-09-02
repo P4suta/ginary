@@ -20,6 +20,8 @@
 //! it, and nothing derives the cache key from it.
 
 use std::fs::File;
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::error::LauncherError;
@@ -44,16 +46,40 @@ pub const PROC_SELF_EXE: &str = "/proc/self/exe";
 /// failure, so reporting it would send every reader down the wrong path.
 #[cfg(unix)]
 pub fn open_self() -> Result<(File, PathBuf), LauncherError> {
-    if let Ok(file) = File::open(PROC_SELF_EXE) {
+    open_self_from(Path::new(PROC_SELF_EXE), current_exe)
+}
+
+/// The two-route open of [`open_self`], with both routes injected.
+///
+/// `proc_path` stands in for `/proc/self/exe` and `fallback` for the
+/// `current_exe` route, so a unit test can drive the primary route and the fallback
+/// route without a machine that has, or lacks, a `/proc`. When `proc_path`
+/// opens, its inode is the answer and its link target is read for the reported
+/// path — falling back to `proc_path` itself when the target cannot be read, so
+/// a link the kernel has annotated ` (deleted)` still yields a usable path.
+/// When `proc_path` cannot be opened, `fallback` is called and its answer is
+/// returned unchanged.
+///
+/// # Errors
+///
+/// Whatever `fallback` returns when `proc_path` cannot be opened; the primary
+/// route never contributes an error, because a failure there is the ordinary
+/// no-`/proc` case that must not be reported in place of the fallback's.
+#[cfg(unix)]
+pub fn open_self_from<F>(proc_path: &Path, fallback: F) -> Result<(File, PathBuf), LauncherError>
+where
+    F: FnOnce() -> Result<(File, PathBuf), LauncherError>,
+{
+    if let Ok(file) = File::open(proc_path) {
         // The link's target is a diagnostic, not a handle: the descriptor above
         // is already on the right inode, so a target that cannot be read — or
-        // that the kernel has annotated ` (deleted)` — costs nothing.
-        let path =
-            std::fs::read_link(PROC_SELF_EXE).unwrap_or_else(|_| PathBuf::from(PROC_SELF_EXE));
+        // that the kernel has annotated ` (deleted)` — costs nothing, and the
+        // reported path falls back to `proc_path` itself.
+        let path = std::fs::read_link(proc_path).unwrap_or_else(|_| proc_path.to_path_buf());
         return Ok((file, path));
     }
 
-    current_exe()
+    fallback()
 }
 
 /// Opens the running executable for reading.
@@ -87,6 +113,58 @@ fn current_exe() -> Result<(File, PathBuf), LauncherError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn open_self_from_uses_the_primary_path_when_it_opens() {
+        // A real, readable file stands in for /proc/self/exe: the fallback must
+        // not run, and its inode -- the whole file -- is the answer.
+        let current = std::env::current_exe().expect("current_exe answers in a test process");
+        let expected = current.clone();
+        let Ok((file, path)) = open_self_from(&current, || {
+            panic!("the fallback must not run when the primary path opens");
+        }) else {
+            panic!("open_self_from must open the primary path");
+        };
+        assert_eq!(
+            path, expected,
+            "the reported path must be the primary path when its link cannot be read"
+        );
+        let opened_len = file.metadata().expect("the opened file has metadata").len();
+        let path_len = std::fs::metadata(&expected)
+            .expect("the primary file has metadata")
+            .len();
+        assert_eq!(
+            opened_len, path_len,
+            "the descriptor must be the whole primary file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_self_from_falls_back_when_the_primary_path_is_unopenable() {
+        // A path that cannot exist forces the fallback, whose answer -- file and
+        // reported path -- must be returned unchanged.
+        let sentinel = std::env::current_exe().expect("current_exe answers in a test process");
+        let expected = sentinel.clone();
+        let Ok((file, path)) = open_self_from(
+            Path::new("/proc/ginary-self-exe-does-not-exist"),
+            move || {
+                let opened = File::open(&sentinel).map_err(LauncherError::SelfExe)?;
+                Ok((opened, sentinel))
+            },
+        ) else {
+            panic!("open_self_from must use the fallback when the primary path fails");
+        };
+        assert_eq!(
+            path, expected,
+            "the fallback's reported path must be returned unchanged"
+        );
+        assert!(
+            file.metadata().is_ok(),
+            "the fallback's descriptor must be usable"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

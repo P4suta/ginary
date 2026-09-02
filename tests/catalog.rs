@@ -1229,3 +1229,125 @@ fn macos_catalog_admissible_is_true_only_when_the_entry_release_matches_the_host
         "an entry newer than the host release is not committed either"
     );
 }
+
+// ------------------------------------------------- further edge cases --
+
+/// A document that is a JSON object but never names `schema_version` is refused
+/// at that first gate, before any entry is read.
+#[test]
+fn a_catalog_missing_its_schema_version_says_which_field_is_absent() {
+    let text = r#"{"generated_at":"2026-08-31T00:00:00Z","otp":{}}"#;
+
+    let error = Catalog::parse(text, "/tmp/catalog.json").expect_err("no schema_version at all");
+
+    match error {
+        CatalogError::Parse { origin, message } => {
+            assert_eq!(origin, "/tmp/catalog.json");
+            assert!(
+                message.contains("schema_version"),
+                "the message names the missing field: {message}"
+            );
+        }
+        other => panic!("a missing schema_version is a Parse error, not {other:?}"),
+    }
+}
+
+/// `lookup` answers questions about a catalogue without the version rule, so
+/// its own version miss must name what the catalogue does hold rather than
+/// deferring to `select`.
+#[test]
+fn lookup_of_a_version_that_is_not_there_names_the_ones_that_are() {
+    let catalog = two_target_catalog().build();
+
+    let error = catalog
+        .lookup("28.3.1", MUSL, None, "dist/otp/catalog.json")
+        .expect_err("28.3.1 is not in the fixture");
+
+    assert_eq!(
+        error,
+        CatalogError::NoSuchVersion {
+            origin: "dist/otp/catalog.json".to_owned(),
+            req: "28.3.1".to_owned(),
+            available: "29.0.5".to_owned(),
+        }
+    );
+}
+
+/// A version component that is not a number is ordered as text, so a
+/// pre-release suffix compares deterministically rather than not at all.
+#[test]
+fn a_non_numeric_component_is_compared_as_text() {
+    assert_eq!(
+        catalog::compare_versions("29.0.0-rc1", "29.0.0-rc2"),
+        Ordering::Less,
+        "rc1 sorts before rc2 by text when the component is not a number"
+    );
+    assert_eq!(
+        catalog::compare_versions("29.0.0-rc2", "29.0.0-rc1"),
+        Ordering::Greater
+    );
+}
+
+/// The origin an explicit `--catalog` records carries its path back for a
+/// message; the cache and embedded origins carry none, because a path there
+/// would add nothing.
+#[test]
+fn only_an_explicit_origin_reports_a_flag_path() {
+    let named = PathBuf::from("/tmp/my-catalog.json");
+    assert_eq!(
+        CatalogOrigin::Explicit(named.clone()).flag_path(),
+        Some(named.as_path()),
+        "an explicit catalogue names its path"
+    );
+    assert_eq!(
+        CatalogOrigin::Embedded.flag_path(),
+        None,
+        "the embedded catalogue has no flag path"
+    );
+}
+
+/// A document that is schema 1 and valid JSON but whose entry does not fit the
+/// catalogue shape is a parse failure at the point the reader tries to build
+/// the typed value, not a schema error.
+#[test]
+fn a_schema_one_document_whose_entry_is_malformed_is_a_parse_error() {
+    // `otp_release` is a number in the shape; a string there is well-formed
+    // JSON that `serde_json::from_value` refuses.
+    let text = r#"{"schema_version":1,"generated_at":"2026-08-31T00:00:00Z",
+        "otp":{"29.0.5":{"otp_release":"twenty-nine","erts_version":"17.0.5","targets":{}}}}"#;
+
+    let error = Catalog::parse(text, "/tmp/catalog.json").expect_err("otp_release is not a number");
+
+    match error {
+        CatalogError::Parse { origin, .. } => assert_eq!(origin, "/tmp/catalog.json"),
+        other => panic!("a malformed entry is a Parse error, not {other:?}"),
+    }
+}
+
+/// An empty catalogue names `nothing at all` where it would otherwise list what
+/// it holds, rather than an empty string that reads as a dropped line.
+#[test]
+fn a_miss_against_an_empty_catalog_says_nothing_at_all() {
+    let catalog = CatalogBuilder::new().build();
+
+    let error = catalog
+        .select(
+            &OtpReq::Exact {
+                version: VERSION.to_owned(),
+                host_release: RELEASE,
+            },
+            MUSL,
+            None,
+            "the empty fixture",
+        )
+        .expect_err("an empty catalogue holds no version");
+
+    assert_eq!(
+        error,
+        CatalogError::NoSuchVersion {
+            origin: "the empty fixture".to_owned(),
+            req: VERSION.to_owned(),
+            available: "nothing at all".to_owned(),
+        }
+    );
+}

@@ -47,6 +47,7 @@ fn ginary_with_cache(cache: &Path) -> Command {
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_clear()
         .env("GINARY_CACHE_DIR", cache);
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     command
 }
 

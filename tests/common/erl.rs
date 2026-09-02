@@ -105,6 +105,7 @@ pub fn run_staged(root: &Path, app: &str, args: &[&str], home: &Path) -> Output 
         .arg("-boot")
         .arg(root.join("bin/no_dot_erlang"))
         .args(["-noshell", "+B", "-start_epmd", "false"]);
+    super::coverage::preserve_coverage_env(&mut command);
 
     for ebin in code_path(root, app) {
         command.arg("-pa").arg(ebin);

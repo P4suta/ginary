@@ -46,6 +46,7 @@ fn ginary_with_cache(cache: &Path) -> Command {
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_clear()
         .env("GINARY_CACHE_DIR", cache);
+    crate::common::coverage::preserve_coverage_env_assert(&mut command);
     command
 }
 
@@ -139,15 +140,17 @@ fn the_remedy_a_space_in_the_path_earns_still_runs_in_a_shell() {
     std::os::unix::fs::symlink(assert_cmd::cargo::cargo_bin("ginary"), bin.join("ginary"))
         .expect("a link to this test run's own binary");
 
-    let run = Command::new("/bin/sh")
+    let mut shell = Command::new("/bin/sh");
+    shell
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_clear()
         .env("GINARY_CACHE_DIR", &cache)
-        .env("PATH", &bin)
-        .arg("-c")
-        .arg(&command)
-        .assert()
-        .success();
+        .env("PATH", &bin);
+    // The shell is not instrumented, but the `ginary` it execs is: the profile
+    // file threaded here is inherited across the `exec`, so the launched
+    // binary's coverage merges into the run.
+    crate::common::coverage::preserve_coverage_env_assert(&mut shell);
+    let run = shell.arg("-c").arg(&command).assert().success();
     let printed = String::from_utf8(run.get_output().stdout.clone()).expect("utf-8");
     assert!(
         printed.contains(&format!("{VERSION}-{MUSL}")),

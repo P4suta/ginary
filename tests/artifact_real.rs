@@ -84,6 +84,7 @@ impl RealArtifact {
             .env("XDG_CACHE_HOME", &home)
             .current_dir(&cwd)
             .args(args);
+        common::coverage::preserve_coverage_env(&mut command);
         let output = run_bounded(&mut command, RUN_BUDGET, &format!("the {APP} artifact"));
         (output, cwd)
     }
