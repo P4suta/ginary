@@ -521,6 +521,10 @@ fn the_testing_document_lists_the_repository_targets_and_their_shared_reader() {
         "tests/ci_matrix.rs",
         "tests/repo_hardening.rs",
         "tests/v1_readiness.rs",
+        // E4's two: the dependency record the pre-push freshness gate reads,
+        // and the digests that are on-disk format.
+        "tests/deps.rs",
+        "tests/digest.rs",
     ] {
         assert!(
             testing.contains(target),
@@ -529,12 +533,26 @@ fn the_testing_document_lists_the_repository_targets_and_their_shared_reader() {
         );
     }
     let prose = flowed(&testing);
-    assert!(
-        prose.contains("tests/common/repo.rs"),
-        "the five repository-as-fixture targets share one reader; the document that catalogues \
-         them has to say where it is"
-    );
-    for helper in ["read_or_missing", "parse_yaml", "yaml_files_under"] {
+    for helper in [
+        "tests/common/repo.rs",
+        // E4's fixture half: the published SHA-256 vectors, and the recording
+        // order that makes them evidence rather than a recording.
+        "tests/common/digest.rs",
+    ] {
+        assert!(
+            prose.contains(helper),
+            "the repository-as-fixture targets share their readers; the document that catalogues \
+             them has to say where `{helper}` is"
+        );
+    }
+    for helper in [
+        "read_or_missing",
+        "parse_yaml",
+        "yaml_files_under",
+        // E4 added the fourth: which Rust every CI job installs, parsed rather
+        // than grepped, so the MSRV cannot creep back into every job.
+        "rust_toolchain_sites",
+    ] {
         assert!(
             prose.contains(helper),
             "`{helper}` is a helper a test author has to know exists — the alternative is a \

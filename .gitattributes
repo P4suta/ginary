@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The working-tree bytes of this repository are the bytes in the objects.
+#
+# `tests/digest.rs` publishes the SHA-256 of five committed `hello_ffi`
+# fixture files, because every digest this crate writes is on-disk format and
+# a hashing library swapped underneath it must not move one. A digest over a
+# file a checkout is allowed to rewrite proves nothing: with `core.autocrlf`
+# at its Git-for-Windows default, every `\n` in a text file becomes `\r\n` on
+# the way to the working tree, so `priv/greeting.txt` arrives 17 bytes instead
+# of 16 and hashes to a different number on the `windows` CI job alone.
+
+# Normalise on the way in, LF on the way out, for everything git detects as
+# text. Nothing in the tree is committed with CRLF today, so this records the
+# state rather than changing it.
+* text=auto eol=lf
+
+# The fixtures are stronger than normalised: no end-of-line conversion at all,
+# in either direction. These bytes are hashed, and a `-text` path is the one
+# git never rewrites whatever a checkout is configured to do.
+tests/fixtures/** -text
+fuzz/seeds/** -text
+tests/snapshots/*.snap -text

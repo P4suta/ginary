@@ -18,8 +18,12 @@ mod common;
 use std::path::PathBuf;
 
 use saphyr::YamlOwned;
+use serde_json::Value;
 
-use crate::common::repo::{parse_yaml, read, read_opt, read_or_missing, root};
+use crate::common::deps::{Version, rust_version};
+use crate::common::repo::{
+    ToolchainSite, exists, parse_yaml, read, read_opt, read_or_missing, root, rust_toolchain_sites,
+};
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
 fn action_yaml() -> Vec<(String, String)> {
@@ -67,6 +71,9 @@ fn ci_defines_every_job_the_milestone_named() {
     let ci = read(".github/workflows/ci.yml");
     for job in [
         "lint:",
+        // The MSRV is checked in exactly one place, so that every other job is
+        // free to build on stable. See `docs/dev/log/E4.md`.
+        "msrv:",
         "test:",
         "smoke:",
         "cross-build:",
@@ -98,6 +105,7 @@ fn the_required_fan_in_waits_on_every_runnable_job() {
     // `required` would let a red Mac or Windows run stop blocking the merge.
     for job in [
         "lint",
+        "msrv",
         "test",
         "smoke",
         "cross-build",
@@ -116,16 +124,13 @@ fn the_required_fan_in_waits_on_every_runnable_job() {
 #[test]
 fn the_lint_job_runs_all_three_clippy_flavors_and_the_deny_check() {
     let ci = read(".github/workflows/ci.yml");
-    let lint = ci.split("lint:").nth(1).expect("a lint job").to_owned();
-    // Stop at the next job so a needle from another job cannot satisfy it.
-    let lint = lint.split("\n  test:").next().unwrap_or(&lint);
+    let lint = job_text(&ci, "lint").expect("a lint job");
     for needle in [
         "cargo fmt",
         "--all-features",
         "--no-default-features",
         "cargo doc",
         "deny check",
-        "1.88",
         "--locked",
     ] {
         assert!(
@@ -133,11 +138,52 @@ fn the_lint_job_runs_all_three_clippy_flavors_and_the_deny_check() {
             "the lint job is missing `{needle}`:\n{lint}"
         );
     }
+    // Stable, not the MSRV: the lints a contributor sees are the lints of the
+    // compiler they have, and `msrv` is where the floor is proved. Read out of
+    // the toolchain site rather than as the substring `stable`, which one
+    // lower-case word in a comment would satisfy with no `toolchain:` line in
+    // the job at all.
+    assert_toolchain_of("lint", STABLE);
+}
+
+/// Asserts that one job of `ci.yml` installs exactly one Rust toolchain, and
+/// that it is the named one.
+///
+/// Structural: [`rust_toolchain_sites`] reads the `with: toolchain:` of a
+/// parsed `dtolnay/rust-toolchain` step, so a comment, a job name or an
+/// unrelated `with:` input cannot satisfy it, and a deleted `toolchain:` line
+/// fails here rather than falling back to the action's own default.
+fn assert_toolchain_of(job: &str, expected: &str) {
+    let sites = rust_toolchain_sites();
+    let installed: Vec<&ToolchainSite> = sites
+        .iter()
+        .filter(|site| site.workflow == ".github/workflows/ci.yml" && site.job == job)
+        .collect();
+    assert_eq!(
+        installed.len(),
+        1,
+        "ci.yml's `{job}` job installs {} Rust toolchains; it needs exactly one, so which \
+         compiler it runs is a fact one line states. The sites are:\n{}",
+        installed.len(),
+        render_sites(&sites)
+    );
+    assert_eq!(
+        installed[0].toolchain, expected,
+        "ci.yml's `{job}` job installs `{}`, not `{expected}`",
+        installed[0].toolchain
+    );
 }
 
 #[test]
-fn the_test_job_runs_both_flavors_under_a_pinned_toolchain() {
+fn the_test_job_runs_both_flavors_on_stable() {
+    // Sliced to the job rather than read over the whole file. Every one of
+    // these needles appears somewhere else in ci.yml — `--no-default-features`
+    // in `lint`, `cross-build` and `windows`, `GINARY_REQUIRE_TOOLCHAIN` in
+    // `smoke` and `coverage` — so an assertion over the file text passes with
+    // the `test` job's own command deleted, which is exactly what it did until
+    // E4's fix round.
     let ci = read(".github/workflows/ci.yml");
+    let job = job_text(&ci, "test").expect("a test job");
     for needle in [
         "erlef/setup-beam",
         "29.0.5",
@@ -147,11 +193,14 @@ fn the_test_job_runs_both_flavors_under_a_pinned_toolchain() {
         "--no-default-features",
     ] {
         assert!(
-            ci.contains(needle),
+            job.contains(needle),
             "the test job is missing `{needle}`: the stub flavor or the toolchain gate is not \
-             exercised"
+             exercised:\n{job}"
         );
     }
+    // Stable, like every job here but `msrv`: this is the job that would first
+    // see a behaviour change from any Rust past the floor.
+    assert_toolchain_of("test", STABLE);
 }
 
 #[test]
@@ -228,6 +277,288 @@ fn the_smoke_matrix_job_bootstraps_binfmt_and_runs_the_committed_script() {
     }
 }
 
+// ------------------------------------------------------ the toolchains --
+
+/// The one job allowed to install a numbered Rust release: the MSRV check.
+const MSRV_JOB: (&str, &str) = (".github/workflows/ci.yml", "msrv");
+
+/// The one job allowed to install `nightly`: cargo-fuzz needs it, and there is
+/// no stable equivalent.
+const NIGHTLY_JOB: (&str, &str) = (".github/workflows/nightly.yml", "fuzz");
+
+/// The toolchain every other job installs.
+const STABLE: &str = "stable";
+
+/// The text of one job of a workflow, comments and all.
+///
+/// The parsed tree drops comments, and one of the things the MSRV job has to
+/// carry is a comment saying where its number comes from — the whole point of
+/// a single dedicated job is that the floor is written down once and its
+/// mirror is documented. `None` when the file declares no such job.
+fn job_text(workflow_text: &str, id: &str) -> Option<String> {
+    let header = format!("  {id}:");
+    let mut lines = workflow_text.lines().skip_while(|line| *line != header);
+    let first = lines.next()?.to_owned();
+    let mut out = vec![first];
+    for line in lines {
+        // A job header is the only thing indented by exactly two spaces that
+        // is not blank; anything deeper still belongs to this job.
+        let is_next_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.trim().is_empty()
+            && !line.trim_start().starts_with('#');
+        if is_next_job {
+            break;
+        }
+        out.push(line.to_owned());
+    }
+    Some(out.join("\n"))
+}
+
+/// Every `run:` script of one parsed job, in order.
+fn run_commands(job: &YamlOwned) -> Vec<String> {
+    job.as_mapping_get("steps")
+        .and_then(YamlOwned::as_vec)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(|step| step.as_mapping_get("run").and_then(YamlOwned::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Renders the toolchain table for a failure message.
+fn render_sites(sites: &[ToolchainSite]) -> String {
+    sites
+        .iter()
+        .map(ToolchainSite::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn ci_runs_one_dedicated_msrv_job_that_checks_the_declared_floor() {
+    let text = read(".github/workflows/ci.yml");
+    let parsed = workflow(".github/workflows/ci.yml", &text);
+    let all = jobs(&parsed);
+    let named: Vec<&str> = all.iter().map(|(id, _)| id.as_str()).collect();
+    let (_, job) = all.iter().find(|(id, _)| id == "msrv").unwrap_or_else(|| {
+        panic!(
+            "ci.yml has no `msrv` job. The MSRV belongs in exactly one place: a job that proves \
+             the crate still compiles on its declared floor, so every other job is free to build \
+             on stable and actually see what current Rust does to this tree. ci.yml defines {}",
+            named.join(", ")
+        )
+    });
+
+    // Both flavors. `--all-features` is the build side plus the fault points;
+    // `--no-default-features` is the launcher-only stub, the binary that ships
+    // inside every artifact, and it compiles `#[cfg(not(feature = "cli"))]`
+    // code that `--all-features` never sees at all. The floor is only proved
+    // for a flavor that is actually compiled on it.
+    let commands = run_commands(job);
+    for flavor in ["--all-features", "--no-default-features"] {
+        assert!(
+            commands.iter().any(|command| {
+                ["cargo check", "--workspace", flavor, "--locked"]
+                    .iter()
+                    .all(|needle| command.contains(needle))
+            }),
+            "the msrv job has to run `cargo check --workspace {flavor} --locked`; it runs:\n{}",
+            commands.join("\n")
+        );
+    }
+    // A check, not a test run. The job answers one question — does the crate
+    // still compile on its floor — and a full suite there would double the
+    // slowest part of CI to answer it twice.
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.contains("cargo test")),
+        "the msrv job runs the test suite; its purpose is that the crate compiles on the floor, \
+         and `test` already runs the suite on stable:\n{}",
+        commands.join("\n")
+    );
+
+    let block = job_text(&text, "msrv").expect("the msrv job has text");
+    assert!(
+        block.contains("rust-version") && block.contains("Cargo.toml"),
+        "the msrv job's toolchain number mirrors `rust-version` in Cargo.toml, and the job says \
+         so in a comment so a reader knows which of the two moves first:\n{block}"
+    );
+}
+
+#[test]
+fn the_msrv_job_installs_exactly_the_rust_version_cargo_toml_declares() {
+    let declared = rust_version();
+    let floor = Version::parse(&declared)
+        .unwrap_or_else(|| panic!("`rust-version = \"{declared}\"` is not a version"));
+
+    let sites = rust_toolchain_sites();
+    let site = sites
+        .iter()
+        .find(|site| (site.workflow.as_str(), site.job.as_str()) == MSRV_JOB)
+        .unwrap_or_else(|| {
+            panic!(
+                "no `msrv` job in ci.yml installs a Rust toolchain. The sites that do are:\n{}",
+                render_sites(&sites)
+            )
+        });
+
+    let installed = Version::parse(&site.toolchain).unwrap_or_else(|| {
+        panic!(
+            "the msrv job installs `{}`, which is not a numbered release; the job exists to pin \
+             the floor",
+            site.toolchain
+        )
+    });
+    assert_eq!(
+        installed, floor,
+        "the msrv job installs Rust {installed} and Cargo.toml declares rust-version \
+         \"{declared}\". These are the same number written twice, and the job is the only place \
+         the second copy is allowed to live: move them together or the floor CI proves is not \
+         the floor the crate promises."
+    );
+    assert_eq!(
+        site.toolchain,
+        floor.to_string(),
+        "the msrv job spells the floor in full (`{floor}`), so the toolchain it installs is the \
+         exact release rather than whatever the latest of a two-part series happens to be"
+    );
+}
+
+#[test]
+fn every_job_but_the_msrv_and_fuzz_ones_builds_on_stable() {
+    let declared = rust_version();
+    let floor = Version::parse(&declared)
+        .unwrap_or_else(|| panic!("`rust-version = \"{declared}\"` is not a version"))
+        .to_string();
+
+    let sites = rust_toolchain_sites();
+    assert!(
+        !sites.is_empty(),
+        "no workflow installs a Rust toolchain at all; this test would pass vacuously"
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    for site in &sites {
+        let key = (site.workflow.as_str(), site.job.as_str());
+        let expected = if key == MSRV_JOB {
+            floor.clone()
+        } else if key == NIGHTLY_JOB {
+            "nightly".to_owned()
+        } else {
+            STABLE.to_owned()
+        };
+        if site.toolchain != expected {
+            offenders.push(format!("{site} — expected `{expected}`"));
+        }
+    }
+
+    // This is the defect E4 exists to fix. Twelve jobs pinned the MSRV, so CI
+    // never once built this crate on current stable: a compile error, a new
+    // lint or a behaviour change from any Rust past the floor would reach a
+    // contributor's machine — which runs stable — before it reached CI. Stable
+    // is the default for real work; `msrv` proves the floor; `fuzz` needs
+    // nightly because cargo-fuzz does.
+    assert!(
+        offenders.is_empty(),
+        "every Rust toolchain site but `{}` (the floor) and `{}` (cargo-fuzz) installs \
+         `{STABLE}`; these do not:\n{}",
+        MSRV_JOB.1,
+        NIGHTLY_JOB.1,
+        offenders.join("\n")
+    );
+}
+
+/// Every `run:` script of one parsed workflow or composite action, as
+/// (job id, script). A composite action's steps live under `runs:` rather
+/// than under a job, and they install and invoke toolchains exactly the same
+/// way.
+fn every_run_command(parsed: &YamlOwned) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (id, job) in jobs(parsed) {
+        for command in run_commands(job) {
+            out.push((id.clone(), command));
+        }
+    }
+    if let Some(runs) = parsed.as_mapping_get("runs") {
+        for command in run_commands(runs) {
+            out.push(("runs".to_owned(), command));
+        }
+    }
+    out
+}
+
+/// Whether a script invokes cargo with a numbered toolchain, as in
+/// `cargo +1.88.0 build`.
+///
+/// `cargo +stable` and `cargo +nightly` are not this: they name a channel, and
+/// the channel a job runs on is what the toolchain sites already state.
+fn selects_a_numbered_toolchain(command: &str) -> bool {
+    command.match_indices("cargo +").any(|(index, needle)| {
+        command[index + needle.len()..]
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+    })
+}
+
+#[test]
+fn no_workflow_reaches_around_the_toolchain_action_and_no_override_is_committed() {
+    // `rust_toolchain_sites` reads `dtolnay/rust-toolchain` steps, which is
+    // every Rust this repository installs today — and only that. The rule the
+    // milestone actually needs is stronger than the one that list can state:
+    // *no job outside `msrv` builds on a numbered release*. A
+    // `run: rustup toolchain install 1.88.0`, a `rustup default 1.88.0`, a
+    // `cargo +1.88.0 test` or a committed `rust-toolchain.toml` each pins one
+    // with `toolchain: stable` still written in the step above, so the site
+    // table stays clean while the compiler that runs is the floor again. This
+    // is the other half of the guarantee, over the scripts rather than the
+    // steps.
+    for (path, text) in action_yaml() {
+        let parsed = workflow(&path, &text);
+        for (job, command) in every_run_command(&parsed) {
+            for forbidden in [
+                "rustup toolchain install",
+                "rustup default",
+                "rustup override",
+            ] {
+                assert!(
+                    !command.contains(forbidden),
+                    "{path}: job `{job}` runs `{forbidden}`. Which Rust a job builds on is \
+                     declared once, in its `dtolnay/rust-toolchain` step, so the \
+                     toolchain table `rust_toolchain_sites` reads is the whole \
+                     truth; a script that installs or selects another one puts CI \
+                     back on a compiler no test can see:\n{command}"
+                );
+            }
+            assert!(
+                !selects_a_numbered_toolchain(&command),
+                "{path}: job `{job}` invokes cargo with a numbered toolchain. Only `msrv` \
+                 builds on a numbered release, and it does it by installing one \
+                 rather than by overriding a stable job:\n{command}"
+            );
+        }
+    }
+
+    // A checked-in override outranks every `toolchain:` line in the tree: with
+    // one of these at the root, `rustup` runs its toolchain in every job of
+    // every workflow, and each of them would install stable and then not use
+    // it.
+    for override_file in ["rust-toolchain", "rust-toolchain.toml"] {
+        assert!(
+            !exists(override_file),
+            "`{override_file}` is committed at the repository root. rustup honours it over \
+             the toolchain every job installs, so every `toolchain: stable` in \
+             .github/workflows becomes decoration and CI silently builds on \
+             whatever it names."
+        );
+    }
+}
+
 // ------------------------------------------------------- the nightly --
 
 #[test]
@@ -252,6 +583,58 @@ fn the_nightly_workflow_runs_mutants_fuzz_and_the_full_smoke_matrix() {
             "the mutants shard list is missing the high-value module `{module}`"
         );
     }
+}
+
+// ------------------------------------------ the freshness exception --
+
+#[test]
+fn the_renovate_exception_covers_the_floor_and_nothing_else() {
+    // The development machine's pre-push hook runs a dependency-freshness
+    // check, and that check reads `toolchain: 1.88.0` as a `rust` dependency
+    // three minors behind stable. It is not: it is the declared floor, and
+    // taking the offer would leave the `msrv` job proving nothing. The
+    // exception is therefore config, not a skip — but a config file that
+    // silences a gate is worth exactly as much as its scope, so the scope is
+    // asserted here.
+    let text = read("renovate.local.json5");
+    let config: Value = serde_json::from_str(&text).expect(
+        "renovate.local.json5 is written as plain JSON so this test can read it; a comment or a \
+         trailing comma makes it json5 that `serde_json` will not parse",
+    );
+
+    assert!(
+        config.get("enabled").is_none() && config.get("ignoreDeps").is_none(),
+        "renovate.local.json5 states one exception; a top-level `enabled` or `ignoreDeps` turns \
+         off more than the floor:\n{text}"
+    );
+
+    let rules = config
+        .get("packageRules")
+        .and_then(Value::as_array)
+        .expect("renovate.local.json5 states its exception as a packageRules list");
+    assert_eq!(
+        rules.len(),
+        1,
+        "one exception, and it is the MSRV pin; {} rules are in the file:\n{text}",
+        rules.len()
+    );
+    let rule = &rules[0];
+    assert_eq!(
+        rule.get("matchFileNames"),
+        Some(&serde_json::json!([".github/workflows/ci.yml"])),
+        "the exception is scoped to ci.yml, the only file that carries the floor: {rule}"
+    );
+    assert_eq!(
+        rule.get("matchDatasources"),
+        Some(&serde_json::json!(["rust-version"])),
+        "the exception is scoped to the Rust toolchain datasource, so a stale action SHA or a \
+         stale crate in the same file still blocks a push: {rule}"
+    );
+    assert_eq!(
+        rule.get("enabled"),
+        Some(&Value::Bool(false)),
+        "the rule disables the lookup; anything else is a rule that does nothing: {rule}"
+    );
 }
 
 // --------------------------------------------------- the local scripts --

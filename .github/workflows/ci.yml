@@ -27,11 +27,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Pinned to the MSRV (rust-version in Cargo.toml). `--locked` proves the
-      # committed Cargo.lock resolves under 1.88 rather than a newer floor.
+      # Stable, like every job here but `msrv`: the lints a contributor sees
+      # are the lints of the compiler they have, and a lint that only current
+      # Rust emits has to fail here rather than on their machine. `--locked`
+      # proves the committed Cargo.lock is the one CI resolves.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       # Three clippy flavors. `--all-features` compiles the fault-injection
@@ -47,8 +49,36 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  msrv:
+    name: MSRV check (the declared floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The only place in this repository that installs a numbered Rust
+      # release. `1.88.0` mirrors `rust-version` in Cargo.toml and moves only
+      # when that line moves; tests/ci_matrix.rs compares the two, so the floor
+      # CI proves cannot drift away from the floor the crate promises.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.88.0
+      # A check, not a test run. This job answers one question — does the crate
+      # still compile on its declared floor — and the suite already runs on
+      # stable in `test`, so building it twice would only make CI slower.
+      #
+      # Both flavors, because they are different code. `--all-features` never
+      # compiles anything behind `#[cfg(not(feature = "cli"))]`, and that is
+      # the launcher-only stub — the binary that ships inside every artifact
+      # and the one `cross-build`, `macos` and `windows` build.
+      - run: cargo check --workspace --all-features --locked
+      - run: cargo check --workspace --no-default-features --locked
+
   test:
-    name: Test (both flavors, pinned toolchain)
+    name: Test (both flavors, stable)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -63,7 +93,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -91,7 +121,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -128,7 +158,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
         with:
           tool: cross
@@ -167,7 +197,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -227,7 +257,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -260,6 +290,10 @@ jobs:
 
   windows:
     name: Windows build and exit-code propagation
+    # windows-2025 is offered and deliberately not taken: this runner is where
+    # the Windows launcher's exit-code propagation is proved, and moving the
+    # image is a claim about what that proof runs against. It moves with a run
+    # that can be read, not with an unrelated change. See docs/dev/log/E4.md.
     runs-on: windows-2022
     timeout-minutes: 40
     permissions:
@@ -270,7 +304,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -302,7 +336,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
           components: llvm-tools-preview
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
@@ -329,7 +363,7 @@ jobs:
   required:
     name: Required CI
     if: ${{ always() && !cancelled() }}
-    needs: [lint, test, smoke, cross-build, smoke-matrix, macos, windows, coverage]
+    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

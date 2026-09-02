@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Configuration for the local dependency-freshness run only.",
+    "The development machine's pre-push hook runs `renovate-local`, which reads this file when",
+    "it is present, and refuses a push that leaves a touched dependency on a stale non-major",
+    "release. Nothing here reaches a hosted bot: the repository's dependency PRs come from",
+    "Dependabot, whose policy is `.github/dependabot.yml`. The file is written as plain JSON so",
+    "`tests/ci_matrix.rs` can parse it with `serde_json` and hold the rule below to its scope;",
+    "the `.json5` extension is the name the wrapper looks for.",
+    "This file states an exception, never a skip. The gate's own escape hatches",
+    "(`RENOVATE_LOCAL_SKIP`, `renovate.localSkip`) turn the whole check off and are not used."
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "`toolchain: 1.88.0` in ci.yml's `msrv` job is not a dependency that wants to be",
+        "current: it is the crate's declared floor, `rust-version` in Cargo.toml, written a",
+        "second time where a CI runner can install it. Renovate reads it as a `rust-version`",
+        "dependency and offers the newest stable, which is exactly the change that would stop",
+        "the job proving anything. The number moves when `rust-version` moves and not before.",
+        "The rule is scoped to that one datasource in that one file, and it is not what keeps",
+        "the exception narrow: `every_job_but_the_msrv_and_fuzz_ones_builds_on_stable` in",
+        "tests/ci_matrix.rs fails if any other job pins a numbered release, and",
+        "`the_msrv_job_installs_exactly_the_rust_version_cargo_toml_declares` fails if this one",
+        "drifts from Cargo.toml."
+      ],
+      "matchFileNames": [".github/workflows/ci.yml"],
+      "matchDatasources": ["rust-version"],
+      "enabled": false
+    }
+  ]
+}

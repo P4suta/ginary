@@ -117,3 +117,128 @@ fn collect_yaml(directory: &std::path::Path, prefix: &str, out: &mut Vec<String>
         }
     }
 }
+
+// -------------------------------------------------- the Rust toolchains --
+
+/// The action every Rust toolchain in this repository is installed with.
+pub const RUST_TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain";
+
+/// One `dtolnay/rust-toolchain` step, and the toolchain it installs.
+///
+/// Which toolchain CI builds with is not a detail: a workflow that installs
+/// the MSRV in every job never once compiles the crate on current stable, so
+/// a lint, a compile error or a behaviour change introduced by any Rust past
+/// the floor reaches a contributor's machine before it reaches CI. Holding
+/// that to a rule needs the toolchain of every job at once, which is what this
+/// is.
+///
+/// Read out of the parsed workflow rather than grepped: the word `toolchain`
+/// appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in the name of the
+/// test job, and none of those installs anything.
+///
+/// This covers the one mechanism the repository uses and only that: a step
+/// whose `uses:` is [`RUST_TOOLCHAIN_ACTION`]. A `run: rustup toolchain
+/// install`, a `cargo +1.88.0` or a committed `rust-toolchain.toml` would pin
+/// a numbered release without ever appearing here, so the other half of the
+/// rule is asserted separately, by
+/// `no_workflow_reaches_around_the_toolchain_action_and_no_override_is_committed`
+/// in `tests/ci_matrix.rs`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ToolchainSite {
+    /// The workflow or action file, repository-relative.
+    pub workflow: String,
+    /// The job id the step belongs to, or `runs` for a composite action.
+    pub job: String,
+    /// The `with: toolchain:` value, or `<unset>` when the step names none.
+    pub toolchain: String,
+}
+
+impl std::fmt::Display for ToolchainSite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: job `{}` installs `{}`",
+            self.workflow, self.job, self.toolchain
+        )
+    }
+}
+
+/// Every Rust toolchain installation under `.github/`, sorted.
+///
+/// # Panics
+///
+/// If a workflow or composite action is not valid YAML. A file GitHub cannot
+/// parse is a job that never runs, and reading it as text would hide that.
+pub fn rust_toolchain_sites() -> Vec<ToolchainSite> {
+    let mut files = yaml_files_under(".github/workflows");
+    files.extend(yaml_files_under(".github/actions"));
+    files.sort();
+
+    let mut out = Vec::new();
+    for relative in files {
+        let text = read(&relative);
+        let parsed = parse_yaml(&text)
+            .unwrap_or_else(|error| panic!("{relative} is not valid YAML: {error}"));
+        if let Some(jobs) = parsed
+            .as_mapping_get("jobs")
+            .and_then(YamlOwned::as_mapping)
+        {
+            for (id, job) in jobs {
+                let name = id.as_str().unwrap_or("<a job id that is not a string>");
+                collect_toolchains(&relative, name, job.as_mapping_get("steps"), &mut out);
+            }
+        }
+        if let Some(runs) = parsed.as_mapping_get("runs") {
+            collect_toolchains(&relative, "runs", runs.as_mapping_get("steps"), &mut out);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Appends every rust-toolchain step of one `steps:` sequence.
+fn collect_toolchains(
+    workflow: &str,
+    job: &str,
+    steps: Option<&YamlOwned>,
+    out: &mut Vec<ToolchainSite>,
+) {
+    let Some(steps) = steps.and_then(YamlOwned::as_vec) else {
+        return;
+    };
+    for step in steps {
+        let Some(uses) = step.as_mapping_get("uses").and_then(YamlOwned::as_str) else {
+            continue;
+        };
+        if !uses.starts_with(RUST_TOOLCHAIN_ACTION) {
+            continue;
+        }
+        let toolchain = step
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("toolchain"))
+            .map_or_else(|| "<unset>".to_owned(), scalar_text);
+        out.push(ToolchainSite {
+            workflow: workflow.to_owned(),
+            job: job.to_owned(),
+            toolchain,
+        });
+    }
+}
+
+/// A YAML scalar as text, or a message naming what is wrong with it.
+///
+/// `toolchain: stable` and `toolchain: 1.88.0` are both strings. Anything else
+/// is a `toolchain:` a YAML reader resolved to a number or a boolean, and
+/// re-rendering the typed value would name a toolchain the file does not
+/// contain: `toolchain: 1.10` parses as the float 1.1 and prints as `1.1`, so
+/// a failure would send the reader looking for a release nobody wrote down.
+/// The message is the accurate answer and it is also the fix — quote it.
+fn scalar_text(node: &YamlOwned) -> String {
+    node.as_str().map_or_else(
+        || {
+            "<unquoted: `toolchain:` has to be a quoted string. YAML resolved this one to a              number or a boolean, and the value it resolved to is not the text the file holds              — `1.10` becomes the float 1.1>"
+                .to_owned()
+        },
+        str::to_owned,
+    )
+}

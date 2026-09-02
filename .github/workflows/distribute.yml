@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
         with:
           tool: cross
@@ -112,7 +112,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: "29.0.5"
@@ -140,6 +140,9 @@ jobs:
   build-windows:
     name: Build windows-x86_64
     needs: version-check
+    # windows-2022, matching ci.yml's `windows` job: the image a release is
+    # built on is the image the launcher was proved on. windows-2025 is
+    # offered; the two move together or not at all. See docs/dev/log/E4.md.
     runs-on: windows-2022
     timeout-minutes: 60
     permissions:
@@ -150,7 +153,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: 1.88.0
+          toolchain: stable
       - name: Build the full binary and the stub
         shell: bash
         run: |

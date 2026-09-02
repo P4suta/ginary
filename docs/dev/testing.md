@@ -67,9 +67,11 @@
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
 | `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
-| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:` |
+| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope |
 | `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
+| `tests/deps.rs` | the committed dependency record, held to what the development machine's pre-push freshness gate reads (E4): `sha2` requested on the 0.11 line and `Cargo.lock` resolved onto it, one version each of `sha2`, `digest` and `block-buffer` — two `digest` majors are two incompatible `Digest` traits and that is what a half-finished migration looks like — and `sha2` and `hex`, the pair that computes and spells every digest, locked on the minor line their requirement names. Reads `Cargo.toml` and `Cargo.lock` through `tests/common/deps.rs`, a hand-rolled scanner rather than `toml`, because `toml` is behind the `cli` feature and these assertions hold for the stub flavor too |
+| `tests/digest.rs` | SHA-256 is on-disk format, and this is the statement of it (E4): three published vectors — the empty input, `abc`, and one mebibyte of `index % 251` — hashed through `manifest::Index::from_staged` against hard-coded hex, the mebibyte pattern itself pinned so the vector above cannot become a test of nothing, the five committed `hello_ffi` fixture files snapshotted as `path size sha256`, `Packed.sha256` proved to be the digest of the bytes `payload::pack` wrote, and the unpack side recomputing exactly what the index recorded. Every constant was recorded before the 0.11 bump and checked against `sha256sum`, so a future swap of the hashing library that moves one byte fails loudly |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
 timeout runner moved there in A1a, because `otp::discover` needs the same
@@ -799,9 +801,11 @@ one front-matter entry that is legitimately unpacked.
 
 ## The repository as its own fixture
 
-`tests/ci_matrix.rs`, `tests/repo_hardening.rs`, `tests/v1_readiness.rs`, `tests/formal.rs` and
-`tests/smoke_matrix.rs` have no fixture: the repository is the fixture. All five read committed
-paths through `tests/common/repo.rs`, which is the one place that resolution lives:
+`tests/ci_matrix.rs`, `tests/repo_hardening.rs`, `tests/v1_readiness.rs`, `tests/formal.rs`,
+`tests/smoke_matrix.rs` and `tests/deps.rs` have no fixture: the repository is the fixture. All
+six read committed paths through `tests/common/repo.rs`, which is the one place that resolution
+lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free reader for
+`Cargo.toml` and `Cargo.lock`:
 
 - `root()` — the directory holding `Cargo.toml`, from `CARGO_MANIFEST_DIR`, so a test finds the
   same file whatever directory the run started in.
@@ -819,6 +823,25 @@ paths through `tests/common/repo.rs`, which is the one place that resolution liv
   is just as happy with a file no reader will accept; parsing first makes that a test failure.
   `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
   and it holds every `.github` record to it through `yaml_files_under(".github")`.
+- `rust_toolchain_sites()` — every `dtolnay/rust-toolchain` step under `.github/`, as
+  `ToolchainSite { workflow, job, toolchain }`, read out of the parsed workflow rather than
+  grepped: the word `toolchain` also appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in
+  a job name, so a grep would answer a question nobody asked. E4 bought it, because every job
+  had quietly pinned the MSRV and CI had therefore never once built this crate on stable.
+
+`tests/common/digest.rs` is the other helper E4 added, and it is not a repository reader at all
+— it is the fixture half of `tests/digest.rs`. It holds the three published SHA-256 vectors (the
+empty input, `abc`, and one mebibyte of `index % 251`), the pattern generator behind the third,
+and `vector_listing()`, which writes them into a directory and returns the staging listing over
+them. The vectors go through `ginary::manifest::Index::from_staged` — the crate's own hashing
+call site, reached through its own public API — rather than through `sha2` called from the test,
+which would only prove `sha2` is `sha2`. The mebibyte matters for the same reason: every digest
+in the format is computed incrementally, and an input smaller than one 64 KiB buffer never
+reaches the second `update`. What makes the constants evidence rather than a recording is the
+*order* they were taken in: each was recorded against sha2 0.10.9, before the 0.11 bump, and
+checked against `sha256sum` by hand, so the suite reading them on the far side of the migration
+is the proof that not one byte of any digest moved. A file written after a library swap records
+whatever the new library produces and demonstrates nothing.
 
 The same rule applies to all of them: assert on what the file *says*, not on where its lines
 happen to wrap. `flowed()` in `tests/repo_hardening.rs` collapses whitespace before a prose
@@ -884,7 +907,9 @@ end of a real artifact holds.
 **`fuzz/` is a workspace of its own.** A libFuzzer target only builds on nightly, and a workspace
 member is compiled by `cargo test`, `cargo clippy --all-targets` and `cargo deny` at the root.
 The `[workspace]` table in `fuzz/Cargo.toml` stops cargo looking upwards, the root manifest does
-not mention the directory, and the gates stay on the stable toolchain `rust-version` names.
+not mention the directory, and the gates stay on stable. Nightly is installed by exactly one CI
+job, `fuzz` in `nightly.yml`, and a numbered release by exactly one, `msrv` in `ci.yml`, which
+proves the floor `rust-version` names and does nothing else.
 
 **A crash is a RED test.** Minimise it with `cargo +nightly fuzz tmin <target> <artifact>`, add
 the minimised input to `tests/regressions/`, watch it fail, then fix it. The artifact itself
@@ -989,7 +1014,8 @@ assertion.
 
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
-`cachefs.rs`, `repack.rs` and `stubfile.rs`, described above. Still to come:
+`cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
+`coverage.rs`, `repo.rs`, `deps.rs` and `digest.rs`, described above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

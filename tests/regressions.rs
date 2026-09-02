@@ -233,3 +233,6 @@ mod e1_the_sha256sums_step_read_and_wrote_one_file;
 
 #[path = "regressions/e3_an_issue_form_was_not_valid_yaml.rs"]
 mod e3_an_issue_form_was_not_valid_yaml;
+
+#[path = "regressions/e4_a_crlf_checkout_rewrote_the_hashed_fixtures.rs"]
+mod e4_a_crlf_checkout_rewrote_the_hashed_fixtures;

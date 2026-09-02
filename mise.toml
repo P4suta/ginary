@@ -6,6 +6,8 @@ erlang = "29.0.5"
 # Only `mise run formal` needs it: TLC is a Java program, and the alternative
 # to declaring the JDK here is a model-checking task that works on whichever
 # machine happens to have one.
+# Temurin 26 is offered; the JDK stays on 25 because `mise run formal` pins
+# TLC by digest and the pair is validated together. See docs/dev/log/E4.md.
 java = "temurin-25"
 
 [tasks.fmt]
