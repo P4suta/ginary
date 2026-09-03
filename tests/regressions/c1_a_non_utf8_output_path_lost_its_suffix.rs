@@ -19,6 +19,10 @@
 //! `a4_a_non_utf8_output_path_failed_the_json_report` states from the other
 //! side: a path the build handled is not a path the build may rewrite.
 
+// A unix file, for the reason `a4_a_non_utf8_output_path_failed_the_json_report`
+// is: `--out` naming a path with a `0xff` byte in it has no Windows spelling.
+#![cfg(unix)]
+
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};

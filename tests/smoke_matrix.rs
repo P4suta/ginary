@@ -48,16 +48,21 @@ fn the_smoke_matrix_script_is_committed_and_executable() {
         path.display()
     );
 
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(&path)
-        .expect("the script")
-        .permissions()
-        .mode();
-    assert_eq!(
-        mode & 0o111,
-        0o111,
-        "a script mise runs directly has to be executable, not sourced by luck"
-    );
+    // As `tests/ci_matrix.rs`: a Windows checkout carries no mode bits, so the
+    // claim is made where it can be observed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .expect("the script")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "a script mise runs directly has to be executable, not sourced by luck"
+        );
+    }
 }
 
 #[test]

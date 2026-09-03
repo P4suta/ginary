@@ -254,15 +254,25 @@ pub fn write_executable(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// Gives a file mode 0o755.
+/// Gives a file mode 0o755, where the platform has modes.
+///
+/// Portable on purpose: [`write_executable`] calls it for every fixture it
+/// writes and those fixtures are read on all three operating systems, so only
+/// the chmod is gated. On Windows an executable is decided by its extension
+/// and there is nothing here to do.
 ///
 /// # Panics
 ///
 /// If the mode cannot be set.
 pub fn set_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("the fixture is executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fixture is executable");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The name `mise run stubs:build` writes for `target`.
@@ -287,18 +297,124 @@ pub fn cache_stub_path(cache_dir: &Path, version: &str, target: &Target) -> Path
         .join(format!("{}{}", target.name(), target.exe_suffix()))
 }
 
+/// The variable that says the cross-built stubs are supposed to be on this
+/// machine, so a missing one is a failure rather than a skip.
+///
+/// It is deliberately *not* [`crate::common::tools::REQUIRE_VAR`].
+/// `GINARY_REQUIRE_TOOLCHAIN` is a claim about programs the machine installs —
+/// `erl`, `gleam`, `strip`, `docker` — and a cross-built stub is none of
+/// those: it is a file `mise run stubs:build` produces after minutes of
+/// `cross` in a docker container, and a job that never ran that command has
+/// not got one however complete its toolchain is. Conflating the two is what
+/// failed the `test` and `coverage` jobs of the first pull-request run; see
+/// `tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs`.
+#[cfg(feature = "cli")]
+pub const REQUIRE_STUBS_VAR: &str = "GINARY_REQUIRE_STUBS";
+
+/// What a stub-gated test should do, given what the environment says.
+#[cfg(feature = "cli")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StubChoice {
+    /// Run against this file.
+    Run(PathBuf),
+    /// Do not run, and print this reason on standard error.
+    Skip(String),
+    /// Fail, with this message: the caller promised the stubs were here.
+    Fail(String),
+}
+
+/// Decides between running, skipping and failing, without touching `PATH` or
+/// the environment.
+///
+/// `dirs` are the directories searched, in order; `is_file` answers whether a
+/// candidate exists, passed in so the rule can be asserted without a
+/// filesystem. `required_toolchain` is whether `GINARY_REQUIRE_TOOLCHAIN` is
+/// `1` and `required_stubs` is whether [`REQUIRE_STUBS_VAR`] is: the first
+/// changes nothing here, and that is the whole rule.
+///
+/// Three answers, in the order the questions are asked:
+///
+/// 1. the first directory that holds the file wins, whatever either flag
+///    says — a stub that is present is never skipped and never a failure;
+/// 2. otherwise, `required_stubs` makes it a failure, because a job that
+///    obtained the stubs — `smoke-matrix` cross-builds them, `coverage`
+///    downloads them — and then cannot find one has a broken step, not a
+///    machine without a toolchain;
+/// 3. otherwise it is a skip that names the command which would fix it.
+///
+/// # Panics
+///
+/// Never.
+#[cfg(feature = "cli")]
+pub fn choose_cross_stub(
+    name: &str,
+    dirs: &[PathBuf],
+    required_toolchain: bool,
+    required_stubs: bool,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> StubChoice {
+    // Taken and deliberately not read. Dropping the parameter would leave the
+    // rule invisible at the call site, and the whole defect this function
+    // exists for was `GINARY_REQUIRE_TOOLCHAIN` being consulted here.
+    let _ = required_toolchain;
+
+    for dir in dirs {
+        let candidate = dir.join(name);
+        if is_file(&candidate) {
+            return StubChoice::Run(candidate);
+        }
+    }
+    if required_stubs {
+        return StubChoice::Fail(format!(
+            "no {name} in any of {dirs:?}: {REQUIRE_STUBS_VAR}=1 says this job obtained the \
+             stubs, so the step that built or downloaded them produced nothing for this target \
+             — check the step that fills target/stubs in this job"
+        ));
+    }
+    StubChoice::Skip(format!(
+        "no {name} in any of {dirs:?}: run `mise run stubs:build` or set {}",
+        ginary::stub::STUB_DIR_VAR
+    ))
+}
+
+/// Which of the two requirement variables the environment sets, as
+/// `(required_toolchain, required_stubs)`.
+///
+/// The seam between [`cross_stub`] and [`choose_cross_stub`], and the half of
+/// this module that the first pull-request run actually got wrong: the rule
+/// was never in doubt, the *wiring* read `GINARY_REQUIRE_TOOLCHAIN` where it
+/// meant [`REQUIRE_STUBS_VAR`]. `lookup` is passed in rather than read from
+/// the process so that swapping the two names back is a test failure and not
+/// a green suite; a test that mutated the real environment would race every
+/// other test in the binary.
+///
+/// Only the exact value `1` counts, for either: an empty variable is how a
+/// shell spells "unset" and `GINARY_REQUIRE_STUBS=0` is a contributor saying
+/// no.
+#[cfg(feature = "cli")]
+pub fn stub_requirement(lookup: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> (bool, bool) {
+    let set = |name: &str| lookup(name).is_some_and(|value| value == "1");
+    (
+        set(crate::common::tools::REQUIRE_VAR),
+        set(REQUIRE_STUBS_VAR),
+    )
+}
+
 /// A prebuilt cross stub for `target`, or a printed skip.
 ///
 /// `GINARY_STUB_DIR` first, then `target/stubs` in the repository, which is
 /// where `mise run stubs:build` puts them. A test that needs a real
 /// cross-built ELF cannot build one itself — `cross` needs a docker daemon and
-/// minutes — so it follows the same rule as a test that needs `erl`: it says
-/// what it skipped and why, unless `GINARY_REQUIRE_TOOLCHAIN=1` says the file
-/// was supposed to be there.
+/// minutes — so a machine without one skips, loudly, naming the command that
+/// would produce it.
+///
+/// The switch that forbids the skip is [`REQUIRE_STUBS_VAR`] and not
+/// `GINARY_REQUIRE_TOOLCHAIN`: see [`choose_cross_stub`] for why the two are
+/// different questions.
 ///
 /// # Panics
 ///
-/// If the stub is missing and `GINARY_REQUIRE_TOOLCHAIN=1`.
+/// If the stub is missing and `GINARY_REQUIRE_STUBS=1`.
 #[cfg(feature = "cli")]
 pub fn cross_stub(target: &Target) -> Option<PathBuf> {
     let name = stub_file_name(VERSION, target);
@@ -308,24 +424,23 @@ pub fn cross_stub(target: &Target) -> Option<PathBuf> {
     }
     dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/stubs"));
 
-    for dir in &dirs {
-        let candidate = dir.join(&name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
+    let (required_toolchain, required_stubs) =
+        stub_requirement(&|name: &str| std::env::var_os(name));
 
-    let required = std::env::var_os(crate::common::tools::REQUIRE_VAR).is_some_and(|v| v == "1");
-    assert!(
-        !required,
-        "no {name} in any of {dirs:?} and {}=1 forbids skipping",
-        crate::common::tools::REQUIRE_VAR
-    );
-    eprintln!(
-        "skipping: no {name}; run `mise run stubs:build` or set {}",
-        ginary::stub::STUB_DIR_VAR
-    );
-    None
+    match choose_cross_stub(
+        &name,
+        &dirs,
+        required_toolchain,
+        required_stubs,
+        &|path: &Path| path.is_file(),
+    ) {
+        StubChoice::Run(path) => Some(path),
+        StubChoice::Skip(reason) => {
+            eprintln!("skipping: {reason}");
+            None
+        }
+        StubChoice::Fail(reason) => panic!("{reason}"),
+    }
 }
 
 /// The `IMAGE_FILE_MACHINE_AMD64` a 64-bit x86 PE names in its COFF header.

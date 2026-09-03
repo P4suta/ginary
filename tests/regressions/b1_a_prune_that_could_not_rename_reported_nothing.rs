@@ -18,6 +18,10 @@
 //! **The correct behaviour.** The entry is reported as kept, with a reason
 //! that is neither `locked` nor `fresh`, because it is neither.
 
+// A unix file: the input is a read-only application directory, which is a
+// mode bit, and a rename that fails because of one.
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt as _;
 
 use ginary::cache::{self, KeptReason, PruneOptions};

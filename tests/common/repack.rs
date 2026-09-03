@@ -437,12 +437,16 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn write_executable(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt as _;
     let temporary = path.with_extension("writing");
     std::fs::write(&temporary, bytes)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", temporary.display()));
-    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", temporary.display()));
+    // Only the chmod is unix; the write and the rename are the same everywhere.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", temporary.display()));
+    }
     std::fs::rename(&temporary, path)
         .unwrap_or_else(|error| panic!("cannot rename onto {}: {error}", path.display()));
 }

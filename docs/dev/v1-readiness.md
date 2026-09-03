@@ -100,7 +100,7 @@ application confirms the shape at scale: the **`notify` shipment packages to 12.
 | Windows cfg split, resident launcher, stub | `tests/windows.rs`, `tests/windows_build.rs` | done (packaging) — `380de43` (D2) |
 | Windows artifact **launch**, exit-code propagation | `ci.yml` `windows` job | CI-gated — authored in E1, runs on `windows-2022` |
 | Mach-O section payload, ad-hoc signing | `tests/macho.rs`, `tests/payload_locate.rs`, `tests/sign_macos.rs` | done (packaging) — `5b35ecf` (D3) |
-| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-13`/`macos-14` |
+| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-15-intel`/`macos-14` |
 
 Windows and macOS packaging are proved structurally on Linux — the cfg split, the resident
 launcher, the PE and Mach-O readers, the section injection and ad-hoc signing all have tests that
@@ -180,7 +180,7 @@ failure.
 Three kinds of work are CI-gated rather than done, and each is authored and committed in the E1
 commit:
 
-- **macOS launch** — `ci.yml` `macos` job, `macos-13` and `macos-14` runners. Builds the darwin
+- **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
   stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
 - **Windows launch** — `ci.yml` `windows` job, `windows-2022` runner. Asserts `halt(3)` reaches
   `%ERRORLEVEL%` as 3, the exit-code propagation the D2 wine gap left unproven.

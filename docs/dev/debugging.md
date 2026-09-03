@@ -19,6 +19,7 @@ nothing today.
 | `GINARY_PRUNE_DAYS=<n>` | implemented | How many days an unused cache entry of the running application may live before the next launch prunes it. Defaults to 14; `0` turns pruning off for that run. A value that is not a count of days falls back to the default rather than failing a launch: a misspelt housekeeping preference must not stop an application from starting. |
 | `GINARY_OFFLINE=1` | planned | The builder refuses to reach the network and lists what it would have fetched. |
 | `GINARY_REQUIRE_TOOLCHAIN=1` | implemented (convention) | Turns a skipped toolchain-gated test into a failure. See [testing.md](testing.md). |
+| `GINARY_REQUIRE_STUBS=1` | implemented (convention) | Turns a *missing cross-built stub* into a failure rather than a skip. Deliberately not the same switch as `GINARY_REQUIRE_TOOLCHAIN`: that one is a claim about programs the machine installs, and a stub is the output of `mise run stubs:build`, which needs `cross`, a docker daemon and minutes per target. Only a job that obtains them — by cross-building them, or by downloading what the job that did uploaded — sets it. See [testing.md](testing.md). |
 
 The launcher **removes** `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`, `ERL_ROOTDIR`,
 `ERL_EPMD_PORT` and every variable whose name begins `ERL_OTP` and ends `_FLAGS` before starting

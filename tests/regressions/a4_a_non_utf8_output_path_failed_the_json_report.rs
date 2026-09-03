@@ -17,6 +17,11 @@
 //! the same lossy way the text report and `InspectReport::path` render it. A
 //! path the build handled is not a path the report may fail on.
 
+// A unix file: a path holding a byte that is not UTF-8 is the whole subject,
+// and a Windows path is UTF-16 with no such byte to write. See
+// tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs.
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;

@@ -12,6 +12,8 @@
 mod common;
 
 use std::ffi::OsString;
+// Only `CountingSink` implements it, and that is a `cfg(unix)` fixture.
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -21,9 +23,13 @@ use common::payload::SharedSink;
 use common::tools::require_tools;
 
 use ginary::cache::{
-    self, APP_DIR_MODE, BIN_MODE, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin,
-    PRUNE_DAYS_VAR, PruneOptions, PruneReport,
+    self, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin, PRUNE_DAYS_VAR, PruneOptions,
+    PruneReport,
 };
+// The two modes, and the sink the fallback warning is written to, belong to
+// the `cfg(unix)` tests below and to nothing else.
+#[cfg(unix)]
+use ginary::cache::{APP_DIR_MODE, BIN_MODE};
 use ginary::diag::Diag;
 use ginary::trailer::Trailer;
 
@@ -86,6 +92,9 @@ fn names(dir: &Path) -> Vec<String> {
 
 // -------------------------------------------------------- creating a root --
 
+// `cache::prepare` takes a uid and is `cfg(unix)`; `cache::prepare_windows`
+// takes a user name and is the other one. `tests/windows.rs` holds that half.
+#[cfg(unix)]
 #[test]
 fn prepare_creates_the_resolved_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -107,6 +116,9 @@ fn prepare_creates_the_resolved_root() {
     );
 }
 
+// A directory nobody may write to is a mode bit, and a mode bit is a unix
+// idea: on Windows a read-only directory still accepts a new child.
+#[cfg(unix)]
 #[test]
 fn an_unwritable_root_falls_back_with_exactly_one_warning() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -151,6 +163,7 @@ fn an_unwritable_root_falls_back_with_exactly_one_warning() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("restore");
 }
 
+#[cfg(unix)]
 #[test]
 fn reaching_the_fallback_because_nothing_was_set_is_silent() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -285,6 +298,7 @@ fn a_key_directory_without_a_manifest_is_moved_aside_and_extracted_again() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_application_directory_is_private_and_the_bindir_is_executable() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -872,12 +886,14 @@ fn cleaning_a_cache_that_was_never_created_is_an_empty_report() {
 /// line buffered when it is a pipe, so the flush is part of the contract
 /// rather than a detail: a warning still sitting in a buffer when `execve`
 /// replaces the process is a warning nobody was given.
+#[cfg(unix)]
 #[derive(Debug, Default)]
 struct CountingSink {
     written: Vec<u8>,
     flushes: usize,
 }
 
+#[cfg(unix)]
 impl Write for CountingSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.written.extend_from_slice(buf);
@@ -890,6 +906,7 @@ impl Write for CountingSink {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_warning_sink_is_written_through_and_flushed() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -928,6 +945,7 @@ fn a_warning_sink_is_written_through_and_flushed() {
 
 // ------------------------------------------------- trusting the fallback --
 
+#[cfg(unix)]
 #[test]
 fn a_fallback_root_somebody_else_may_write_to_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -960,6 +978,7 @@ fn a_fallback_root_somebody_else_may_write_to_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_in_the_place_of_the_fallback_root_is_refused() {
     // `create_dir_all` follows a symlink and reports success, so an attacker
@@ -989,6 +1008,7 @@ fn a_symlink_in_the_place_of_the_fallback_root_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_fallback_root_this_process_owns_is_created_private() {
     use std::os::unix::fs::PermissionsExt as _;

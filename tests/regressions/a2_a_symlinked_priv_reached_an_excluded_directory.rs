@@ -26,6 +26,10 @@
 //! directory reaches the staged tree. A link to a sibling directory that is
 //! *not* excluded — the case A1c deliberately allows — still stages.
 
+// A unix file: every input is a symlink, and the fixture plants each one
+// with `std::os::unix::fs::symlink`.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use ginary::assemble::{self, AssembleError, StageOptions};
@@ -72,7 +76,6 @@ impl Trees {
     }
 
     /// Replaces the application's `priv` with a symlink to `target`.
-    #[cfg(unix)]
     fn link_priv_to(&self, target: &str) {
         let priv_dir = self.app().join("priv");
         std::fs::remove_file(priv_dir.join("greeting.txt")).expect("the priv file");
@@ -133,7 +136,6 @@ fn assert_no_source_staged(out: &Path) {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_priv_that_is_a_symlink_to_the_source_directory_is_refused() {
     let trees = Trees::new();
@@ -161,7 +163,6 @@ fn a_priv_that_is_a_symlink_to_the_source_directory_is_refused() {
     assert_no_source_staged(&trees.out());
 }
 
-#[cfg(unix)]
 #[test]
 fn a_priv_that_is_a_symlink_inside_the_source_directory_is_refused() {
     let trees = Trees::new();
@@ -184,7 +185,6 @@ fn a_priv_that_is_a_symlink_inside_the_source_directory_is_refused() {
     assert_no_source_staged(&trees.out());
 }
 
-#[cfg(unix)]
 #[test]
 fn an_ebin_that_is_a_symlink_to_the_source_directory_is_refused() {
     let trees = Trees::new();
@@ -211,7 +211,6 @@ fn an_ebin_that_is_a_symlink_to_the_source_directory_is_refused() {
     assert_no_source_staged(&trees.out());
 }
 
-#[cfg(unix)]
 #[test]
 fn a_priv_that_is_a_symlink_to_a_directory_that_is_not_excluded_still_stages() {
     let trees = Trees::new();

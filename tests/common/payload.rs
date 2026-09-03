@@ -400,13 +400,25 @@ pub fn staging_tree(root: &Path) -> StagingTree {
     }
 }
 
-/// Sets a file's permission bits.
+/// Sets a file's permission bits, where the platform has any.
+///
+/// The function is portable and only the chmod is gated: the staging-tree
+/// builder above calls it for every file it writes, and a Windows compile of
+/// that builder must not have to know why.
 pub fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 /// A file's permission bits, `st_mode & 0o7777`.
+///
+/// Unix only: there are no such bits to read on Windows.
+#[cfg(unix)]
 pub fn mode_of(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::symlink_metadata(path)

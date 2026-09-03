@@ -98,7 +98,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          # macos-15-intel, not the withdrawn macos-13: a label GitHub no longer
+          # schedules leaves the job queued for ever and the release run with
+          # it. See tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
+          - runner: macos-15-intel
             target: macos-x86_64
           - runner: macos-14
             target: macos-aarch64

@@ -28,6 +28,7 @@ pub mod macho;
 #[cfg(feature = "cli")]
 pub mod native;
 pub mod payload;
+pub mod portability;
 pub mod project;
 pub mod repack;
 pub mod repo;

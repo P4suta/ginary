@@ -251,3 +251,24 @@ mod e5_the_credentials_notice_was_not_tied_to_the_missing_credentials;
 
 #[path = "regressions/e5_the_macos_job_ran_the_stub_as_the_command_line_tool.rs"]
 mod e5_the_macos_job_ran_the_stub_as_the_command_line_tool;
+
+#[path = "regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs"]
+mod e6_five_stub_gated_tests_ran_in_no_ci_job;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs"]
+mod e6_the_coverage_floor_measured_a_stubless_subset;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs"]
+mod e6_the_macos_job_passed_a_flag_the_cli_does_not_have;
+
+#[path = "regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs"]
+mod e6_the_macos_matrix_asked_for_a_runner_github_retired;
+
+#[path = "regressions/e6_the_test_helpers_did_not_compile_on_windows.rs"]
+mod e6_the_test_helpers_did_not_compile_on_windows;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs"]
+mod e6_the_toolchain_flag_required_a_cross_stub_nobody_built;

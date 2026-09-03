@@ -63,7 +63,7 @@
 | `tests/e2e_cross.rs` | four-way gated: a real cross build out of the committed catalog for `linux-x86_64-musl`, `linux-aarch64-musl` and `linux-x86_64-gnu`, each artifact run in a container with no Erlang and no network, the aarch64 row behind a binfmt probe and the glibc row on the oldest Debian its own catalog entry allows |
 | `tests/smoke_matrix.rs` | the C3 scaffolding held against the repository: the smoke-matrix script committed, executable, probing before it installs a binfmt handler and printing a PASS/FAIL table; the two mise tasks; `git check-ignore` proving the catalog committed and the tarballs not; and the four documents — the ADR and its index entry, the catalog schema in `docs/format.md`, the README's quickstart and caveats, and this table |
 | `tests/native.rs` | the native half of a cross build, over fabricated objects: the scan — every object under `priv` in path order, the magic deciding rather than the extension, an ELF under `ebin` left alone, the format, machine and target of an ELF, a PE and a Mach-O, a library told from a program, the four files that begin like an object and are not one (a truncated ELF, a truncated Mach-O, a DOS `MZ`, an object past the size bound) and the directory a walk stopped at — and the reconciliation: an object already for the target kept, an override applied, verified, refused for the wrong machine and refused when it is not there, a static override accepted with a note, a hook's environment and working directory, a hook that writes nothing, a hook that fails, a hook that builds for the wrong machine, a hook that writes once and cannot answer for a second target, an override winning before a hook runs, the mismatch table and the same rows as an `--allow-native-mismatch` warning, the static-runtime refusal that the flag does not lift, `apply` over a staged tree, and the verdict of each artifact |
-| `tests/e2e_native.rs` | four-way gated: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
+| `tests/e2e_native.rs` | four-way gated, the cross-built stub among the four: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
 | `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
@@ -135,7 +135,8 @@ reason:
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 | `tests/e2e_cross.rs` | the real `gleam` and `erl` through `ginary build --target`, and `docker run` for three images | gated four ways, each absence a printed skip naming the task that produces it: `require_tools(&["gleam", "erl", "docker"])`, `dist/otp/catalog.json` (`mise run otp:repack`), a cross-built stub (`mise run stubs:build`), and for the aarch64 row a `docker run --platform linux/arm64` probe. The build runs under `BUILD_BUDGET` (900 s) and each container under `RUN_BUDGET` (180 s), with `--network none` so an artifact that fetched anything at run time would fail rather than pass |
 | `tests/smoke_matrix.rs` | `git check-ignore`, and nothing else | gated on `require_tools(&["git"])`; every other test in the file reads committed files |
-| `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure too. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
+| `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_STUBS=1` turns that skip into a failure, and `GINARY_REQUIRE_TOOLCHAIN` deliberately does not. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
+| `tests/e2e_native.rs`, `tests/regressions/c2_the_artifact_never_had_to_use_the_stub.rs` | five more tests that need a cross-built stub | the same `stubfile::cross_stub` gate as the row above, for `linux-aarch64-musl`, `linux-x86_64-gnu` and `Target::host()`; they are named here because they are the five that ran in no CI job while the `smoke-matrix` step listed only two files. The workflow derives the list from the tree now: `tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs` |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
 
@@ -235,6 +236,37 @@ machine installs and cannot be a claim that somebody exported a Gleam project he
 value that is not a directory is a failure *however* it is set, because the caller asked for a
 run and mistyped the path. A fixture a gated test needs from outside the repository is named by
 the caller or it is not used.
+
+A test can also need a *file this repository builds and does not commit*, and that is a third
+question again. The five cross-built stubs under `target/stubs` come from `mise run stubs:build`,
+which needs `cross`, a running docker daemon and minutes per target; no amount of Erlang on the
+machine produces one. So `tests/common/stubfile.rs::choose_cross_stub` reads a switch of its own,
+`GINARY_REQUIRE_STUBS`, and reads `GINARY_REQUIRE_TOOLCHAIN` not at all: a missing stub is a
+printed skip that names `mise run stubs:build`, and only a job that *obtains* the stubs sets
+`GINARY_REQUIRE_STUBS=1` to turn that skip into a failure — where a miss means the step that
+built or downloaded them produced nothing rather than that the machine never had one. Four
+tracked files ask for one, and between them they hold nine tests: `tests/e2e_cross.rs` (three),
+`tests/e2e_native.rs` (four), `tests/stub.rs` (one) and
+`tests/regressions/c2_the_artifact_never_had_to_use_the_stub.rs` (one, in the `regressions`
+target). In CI two jobs have the stubs and run all four targets: `smoke-matrix`, which
+cross-builds three of them, and `coverage`, which downloads all five from `cross-build` because
+the 90% line floor it enforces was measured with those nine tests running.
+
+The stubs are half of what those nine need. Seven of them — every test in `tests/e2e_cross.rs`
+and `tests/e2e_native.rs` — write `erts = "catalog"` into the fixture and build against
+`dist/otp/catalog.json`, and the repository commits the catalog while `.gitignore` keeps every
+tarball it names out of the tree. A job holding the stubs but not the runtimes does not skip
+those seven: it runs them, and each dies in the runtime resolver with `cannot use the catalog:
+... No such file or directory`. So both jobs also run `ginary otp repack --out dist/otp` before
+the tests, and the rule that ties the two artifacts together is asserted over every job of
+`ci.yml` in
+`tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs`.
+The `test` job builds and downloads none and skips them, loudly. Conflating the two questions is
+what failed `test` and `coverage` on the first pull-request run, and counting the four files by
+hand in a comment is what left five of the nine running in no job at all; see
+`tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs` and
+`tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs`, which derives the list from the
+tree so a fifth caller cannot be added without the workflow learning about it.
 
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
@@ -376,8 +408,8 @@ the marker gates and the object gate apart. `pe_bytes` and `pe_with_marker` are 
 counterpart and are written by hand, the way `payload.rs` writes tar headers by hand: there is no
 Windows toolchain here, and the only fields `check_object` reads out of a PE are the format and
 the COFF machine. `cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
-a real cross-built stub, and it follows the `require_tools` rule: a printed skip, unless
-`GINARY_REQUIRE_TOOLCHAIN=1` says the file was supposed to be there.
+a real cross-built stub, and its rule is `stubfile::choose_cross_stub`: a printed skip, unless
+`GINARY_REQUIRE_STUBS=1` says the file was supposed to be there.
 
 `tests/common/http.rs` is one of the two C3 added, and it exists because four of the claims about
 `src/download.rs` are properties of a *server* and none of them can be written down as a file: a
@@ -416,6 +448,39 @@ that a warm cache is used rather than re-fetched. The runtime inside every one o
 `FakeOtp`, whose `beam.smp` is a shell script, which is exactly the shape the *unseamed*
 inspection refuses and is why the catalogue tests drive `resolve_in_with` and `repack_with` with
 the ELF reader injected.
+
+`tests/common/portability.rs` is what E6 added, and it is not a fixture builder at all: it is the
+rule that the *test tree itself* has to compile on all three operating systems. `unix_sites` is a
+pure function over one file's text — it strips comments and literals with a small lexer that
+carries block comments and raw strings across lines, then tracks `cfg(unix)` gates through the
+brace stack — and it answers, for every mention of `os::unix`, whether a gate covers it. The rule
+it enforces is that every such mention sits under one: an inner attribute on a file that is wholly
+about unix, an outer attribute on the item, or an attribute on an enclosing block, whichever fits.
+`tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs` asserts the scanner against
+source it is handed and then turns it loose on every `.rs` file `git` tracks under `tests/`.
+
+A scan is a proxy, and a better check exists on any machine with docker. `mingw-w64` is all a
+Linux host needs to type-check the whole tree for Windows, which is what the C sources of
+`zstd-sys` had made look impossible:
+
+```console
+$ mise run check:windows
+```
+
+The image is `scripts/ci/wincheck.Dockerfile` — `rust:1-bookworm` plus `mingw-w64` plus
+`rustup target add x86_64-pc-windows-gnu` — and the task builds it and runs the check inside it,
+against a target directory of its own so a foreign libc's objects never land in `target/`:
+
+```console
+$ docker build -t ginary-wincheck:1 -f scripts/ci/wincheck.Dockerfile .
+$ docker run --rm -v "$PWD":/w -w /w -e CARGO_TARGET_DIR=/tmp/t ginary-wincheck:1 \
+    cargo check --all-targets --locked --keep-going --target x86_64-pc-windows-gnu
+```
+
+Forty-five seconds warm, and it catches what the scan cannot: a call to something *already*
+gated — `cache::prepare` is `cfg(unix)`, and an ungated call site of it mentions no `os::unix`
+for a scan to find. Run it before changing a shared test helper. The gnu triple and not the msvc
+one, because `zstd-sys` compiles C and `mingw-w64` is the C compiler a Linux host can have.
 
 `tests/common/native.rs` is what C4 added, and it is the fixture half of a milestone that has no
 cross toolchain to build a real fixture with. Three kinds of object, by the same rule the earlier
@@ -843,6 +908,25 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   grepped: the word `toolchain` also appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in
   a job name, so a grep would answer a question nobody asked. E4 bought it, because every job
   had quietly pinned the MSRV and CI had therefore never once built this crate on stable.
+- `workflow_jobs(path)` — every job of one workflow as
+  `WorkflowJob { workflow, id, needs, env, commands, uses }`, with `runs(needle)` and
+  `uses_action(needle)` over the last two. `workflow_steps` merges the job's `env:` into each
+  step, which answers "what does this command run under"; two questions are about the job
+  itself — what it `needs:`, and whether *the job* declares a variable — and neither survives
+  that flattening. E6 bought it: the rule that a job may set `GINARY_REQUIRE_STUBS` exactly when
+  it obtains the stubs is a statement about jobs.
+- `parse_ginary_command(line)` / `ginary_invocations(path)` — one shell command line, and every
+  ginary invocation in one committed file, as
+  `GinaryInvocation { source, site, line, path, long_flags }`. `path` is the subcommand path
+  (`["otp", "repack"]`), `long_flags` is every `--flag` it passes without its value. A `.yml` is
+  read as a workflow step by step and anything else as a shell script line by line, so
+  `scripts/smoke-matrix.sh` is scanned as well as the step that calls it. What the parser does
+  *not* cover, deliberately: short flags are counted only as "a flag was seen", a flag's value
+  is never read, and a program the scan cannot name — an interpolation other than a
+  `GINARY_*BIN` variable — is not an invocation. `tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs`
+  holds every long flag found against the binary's own `--help`.
+- `yaml_files_under(dir)` / `shell_scripts_under(dir)` — every `.yml`/`.yaml`, and every `.sh`,
+  under a directory, recursively and sorted, so a failure names the same file on every machine.
 
 `tests/common/digest.rs` is the other helper E4 added, and it is not a repository reader at all
 — it is the fixture half of `tests/digest.rs`. It holds the three published SHA-256 vectors (the
@@ -1030,8 +1114,8 @@ assertion.
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
 `cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
-`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs` and `shipment.rs`, described above. Still to
-come:
+`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs` and `portability.rs`, described
+above. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

@@ -23,8 +23,6 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt as _;
-
 use ginary::target::Target;
 use serde_json::Value;
 
@@ -69,12 +67,16 @@ fn ginary_build_writes_one_executable_at_the_default_output_path() {
         "the default output is build/ginary/<app>, and there is nothing at {}",
         artifact.display()
     );
-    let mode = std::fs::metadata(&artifact)
-        .expect("stat the artifact")
-        .permissions()
-        .mode()
-        & 0o7777;
-    assert_eq!(mode, 0o755, "the artifact has to be runnable by its user");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&artifact)
+            .expect("stat the artifact")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755, "the artifact has to be runnable by its user");
+    }
 
     // The number `docs/dev/log/A4.md` records. Printed rather than gated: a
     // size assertion that fails on a new ERTS release is one that gets

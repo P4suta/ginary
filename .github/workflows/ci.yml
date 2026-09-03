@@ -98,10 +98,16 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
+      # `--no-fail-fast` because cargo stops at the first *target* that fails
+      # and abandons the rest: the first pull-request run reported three
+      # failures in `tests/e2e_cross.rs` and never compiled or ran the eleven
+      # targets after it, so the failure set the log recorded was the first
+      # slice of one rather than the whole. One run, one full report.
+      #
       # The full command line tool, with the launcher fault points compiled in.
-      - run: cargo test --features fault-injection --locked
+      - run: cargo test --features fault-injection --locked --no-fail-fast
       # The launcher-only stub flavor: no clap, no TOML reader, no build side.
-      - run: cargo test --no-default-features --locked
+      - run: cargo test --no-default-features --locked --no-fail-fast
 
   smoke:
     name: Clean-room smoke test
@@ -191,6 +197,13 @@ jobs:
       contents: read
     env:
       GINARY_REQUIRE_TOOLCHAIN: "1"
+      # This is the one job that cross-builds the stubs, so it is the one job
+      # entitled to say a missing one is a failure rather than a skip. `test`
+      # and `coverage` build none and must not set it; conflating that with
+      # GINARY_REQUIRE_TOOLCHAIN is what failed both of them on the first
+      # pull-request run. See
+      # tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs.
+      GINARY_REQUIRE_STUBS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -240,18 +253,41 @@ jobs:
       - run: scripts/smoke-matrix.sh
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+      # The stub-gated tests, run in the job that cross-builds the stubs. Here
+      # `GINARY_REQUIRE_STUBS=1` forbids the skip, so a cross build that
+      # produced nothing fails the job rather than quietly removing its own
+      # coverage. Four targets, because four tracked files call
+      # `stubfile::cross_stub`: `tests/e2e_cross.rs`, `tests/stub.rs`,
+      # `tests/e2e_native.rs` and one file under `tests/regressions/`, which
+      # `tests/regressions.rs` compiles into the `regressions` target. That
+      # list is derived from the tree rather than counted by hand in
+      # tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs, because
+      # counting it by hand is how five of the nine came to run nowhere.
+      - name: Run the tests that need a cross-built stub
+        run: |
+          cargo test --locked --no-fail-fast \
+            --test e2e_cross --test stub --test e2e_native --test regressions
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
 
   macos:
     name: macOS build, launch and signature
-    # macos-13 is the last x86_64 image; macos-14 is arm64. This is the job that
+    # macos-15-intel is the x86_64 image; macos-14 is arm64. This is the job that
     # closes the D3 "awaits a Mac runner" gap: the darwin stub is built natively
     # here (there is no macOS cross toolchain on Linux) and its signature is
     # verified against the kernel's own requirement.
+    #
+    # Not macos-13. GitHub has withdrawn that label, and a withdrawn label is
+    # worse than a failing job: the parser accepts it, the job appears, no
+    # runner is ever assigned, and the whole *run* keeps the `queued` status —
+    # so `Required CI` never resolves and the pull request cannot merge however
+    # green everything else is. See
+    # tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             target: macos-x86_64
           - runner: macos-14
             target: macos-aarch64
@@ -285,8 +321,16 @@ jobs:
           mkdir -p target/stubs
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           cp target/stub/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
-      # Build a hello_ffi artifact against a dir: catalog ERTS, run it (its
+      # Build a hello_ffi artifact against the runner's own ERTS, run it (its
       # arguments, its greeting, exit 3), and verify the ad-hoc signature.
+      #
+      # The ERTS source is a `gleam.toml` setting and not a flag: `ginary build`
+      # has no `--erts` and never had one, and passing it killed this job at
+      # argument parsing on two consecutive runs. The line appended below is the
+      # one `scripts/smoke-matrix.sh` appends, with `dir:` instead of `catalog`
+      # because this job repacks no catalog. Appended to the *copy*, never to
+      # the committed fixture. See
+      # tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs.
       - name: Package, run and verify a hello_ffi artifact
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
@@ -294,10 +338,11 @@ jobs:
           otp_root="$(dirname "$(dirname "$(command -v erl)")")"
           work=$(mktemp -d)
           cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
+          printf '\n[tools.ginary.target."%s"]\nerts = "dir:%s"\n' \
+            "${{ matrix.target }}" "$otp_root" >> "$work/hello_ffi/gleam.toml"
           ( cd "$work/hello_ffi"
             "$GITHUB_WORKSPACE/target/release/ginary" build \
-              --target "${{ matrix.target }}" \
-              --erts "dir:${otp_root}" )
+              --target "${{ matrix.target }}" )
           artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
           "$artifact" 0 hello world
           set +e; "$artifact" 3; test $? -eq 3; set -e
@@ -340,11 +385,34 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # Forty minutes was the budget before this job also repacked the runtimes
+    # and stopped skipping nine end-to-end tests; the download, the repack and
+    # seven instrumented cross builds are all new work since.
+    timeout-minutes: 60
+    # The floor below is measured over the whole suite, and nine of its
+    # end-to-end tests need a cross-built stub. This job builds none, so it
+    # waits for the job that does and downloads what that one uploaded:
+    # without them those nine skip, 54 lines of reached code disappear and the
+    # same measurement is 89.92% against a 90% floor. Lowering the floor would
+    # be weakening a gate to go green; obtaining what the measurement assumes
+    # is the fix.
+    #
+    # The stubs are half of what the measurement assumes. Seven of those nine
+    # tests write `erts = "catalog"` into the fixture and build against
+    # dist/otp/catalog.json, and only the catalog is committed - .gitignore
+    # keeps the tarballs it names out of the tree - so with the stubs alone
+    # they stop skipping and start failing in the runtime resolver instead.
+    # Hence the repack step below, the same one smoke-matrix runs. See
+    # tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs.
+    needs: [cross-build]
     permissions:
       contents: read
     env:
       GINARY_REQUIRE_TOOLCHAIN: "1"
+      # This job now has the stubs, so a missing one is a broken download and
+      # not a machine without them.
+      GINARY_REQUIRE_STUBS: "1"
+      GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -360,13 +428,53 @@ jobs:
       - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: cargo-llvm-cov@0.9.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ginary-stub-*
+          path: target/stub-artifacts
+      # The upload names each artifact `ginary-stub-<target>`; the suite looks
+      # a stub up as `ginary-stub-<version>-<target>` (`stubfile::stub_file_name`),
+      # so the version goes back in here rather than into the artifact name the
+      # release workflow also consumes. The executable bit does not survive the
+      # artifact round trip and a stub is copied, gated and executed as a file,
+      # so it is restored explicitly. An empty download is a failure: this job
+      # promises the stubs to every test in it.
+      - name: Name the downloaded stubs the way the suite looks them up
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          mkdir -p target/stubs
+          found=0
+          for file in target/stub-artifacts/*/ginary-stub-*; do
+            test -f "$file" || continue
+            base=${file##*/}
+            cp "$file" "target/stubs/ginary-stub-$version-${base#ginary-stub-}"
+            found=$((found + 1))
+          done
+          test "$found" -ge 5 || {
+            echo "only $found stubs were downloaded; the coverage floor is measured with them" >&2
+            exit 1
+          }
+          chmod +x target/stubs/*
+          ls -l target/stubs
+      # The runtimes the catalog names, which the repository does not carry.
+      # Without this the seven catalog-built tests reach `ginary build` and die
+      # with `cannot use the catalog: ... No such file or directory`, which is
+      # where downloading the stubs moved the failure to.
+      - name: Repack the OTP runtimes the catalog-built tests bundle
+        run: |
+          cargo run --quiet --locked -- otp repack \
+            --upstream-tag OTP-29.0.5 \
+            --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
+            --out dist/otp
       # Line coverage, gated at 90%. The branch floor is documented as
       # nightly-only (it needs a `-Z coverage-options=branch` build); see
       # docs/dev/testing.md. The threshold lives here, not only in the script's
       # default, so it cannot be lowered without the diff showing it. The
       # full end-to-end suite runs under coverage (the toolchain is present and
-      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure), so the
-      # number reflects the whole tree rather than a toolchain-free subset.
+      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure, and the
+      # stubs downloaded above plus the runtimes repacked above keep the nine
+      # stub-gated tests in the run), so the number reflects the whole tree
+      # rather than a subset of it.
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info
       - run: scripts/ci/coverage-gate.sh target/lcov.info 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

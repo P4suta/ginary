@@ -34,7 +34,7 @@ matrix below.
 | `linux-x86_64-musl` | yes (cross) | yes (alpine container) | yes (smoke matrix) |
 | `linux-aarch64-gnu` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
 | `linux-aarch64-musl` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
-| `macos-x86_64` | no (needs a Mac) | no | yes (macos-13) |
+| `macos-x86_64` | no (needs a Mac) | no | yes (macos-15-intel) |
 | `macos-aarch64` | no (needs a Mac) | no | yes (macos-14) |
 | `windows-x86_64` | yes (stub, cross) | no | yes (windows-2022) |
 
@@ -717,7 +717,7 @@ What works, and is checked on every run of the suite:
   is recorded in `docs/dev/log/D3.md` as scoped out of this pass: it needs `repack_one`
   generalised over object format and a Mach-O-aware strip, neither of which exists yet.
 
-What only a Mac can confirm, and is the GitHub Actions milestone on a `macos-13`/`macos-14`
+What only a Mac can confirm, and is the GitHub Actions milestone on a `macos-15-intel`/`macos-14`
 runner:
 
 - **No darwin stub exists on this machine, because there is no macOS toolchain on Linux to build
@@ -732,7 +732,7 @@ runner:
 - **No Mach-O artifact has ever been executed.** Structurally: the section is there, the
   signature load command is there, the locator finds the payload back. Actually launching one —
   the BEAM starting, the port programs resolving, the whole pipeline this repository packages —
-  is untested until a `macos-13`/`macos-14` runner does it.
+  is untested until a `macos-15-intel`/`macos-14` runner does it.
 
 `docs/dev/log/D3.md` records why the crate the plan named did not end up as a dependency, the
 technique `sign_macos.rs` is built on instead, the injection and structural-verification

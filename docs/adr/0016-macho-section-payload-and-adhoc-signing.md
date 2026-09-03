@@ -101,7 +101,7 @@ validation rules, and `docs/dev/log/D3.md` for the crate and API this was implem
   structural: the section lands where `macho.rs` itself says it does, an `LC_CODE_SIGNATURE`
   load command is present exactly when signing was asked for, and `payload::locate` round-trips
   the exact bytes and digest that went in. `docs/dev/log/D3.md` records exactly that split, and
-  CI on a `macos-13`/`macos-14` runner is the GitHub Actions milestone that closes it.
+  CI on a `macos-15-intel`/`macos-14` runner is the GitHub Actions milestone that closes it.
 - A Mach-O object found *inside* a payload (a NIF, a port program) is not required to carry its
   own code signature: only the artifact itself, the one the kernel loads directly, needs one.
   Giving `ginary verify`'s native-object scan the same `cputype`/target awareness for an inner

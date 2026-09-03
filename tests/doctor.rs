@@ -323,6 +323,7 @@ fn a_priv_file_that_is_not_elf_is_not_native_code() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_nif_installed_as_a_symlink_is_still_native_code() {
     // The walk takes `symlink_metadata` so that a directory link cannot make
@@ -346,6 +347,7 @@ fn a_nif_installed_as_a_symlink_is_still_native_code() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_that_points_at_a_directory_is_never_descended_into() {
     let project = TempProject::named("notify");

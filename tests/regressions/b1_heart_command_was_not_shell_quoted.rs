@@ -20,6 +20,11 @@
 //! given to a real `sh -c`, and what the program sees is compared with what
 //! the plan was built from.
 
+// A unix file: `heart` hands `HEART_COMMAND` to `/bin/sh -c`, and the proof
+// below is that very shell running that very value. There is no `heart` and no
+// `/bin/sh` to hold it to on Windows.
+#![cfg(unix)]
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;

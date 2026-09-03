@@ -234,7 +234,10 @@ fn the_macos_job_builds_the_darwin_stub_natively_and_verifies_the_signature() {
     let ci = read(".github/workflows/ci.yml");
     let job = ci.split("macos:").nth(1).expect("a macos job");
     for needle in [
-        "macos-13",
+        // Both architectures, and neither of them a label GitHub has
+        // withdrawn: `tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs`
+        // owns the second half of that claim, and the two move together.
+        "macos-15-intel",
         "macos-14",
         "--no-default-features",
         "codesign",
@@ -273,6 +276,40 @@ fn the_smoke_matrix_job_bootstraps_binfmt_and_runs_the_committed_script() {
         assert!(
             job.contains(needle),
             "the smoke-matrix job is missing `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn the_coverage_job_obtains_the_stubs_its_floor_is_measured_with() {
+    // The floor is 90% and the measurement is 89.92% without the cross stubs:
+    // nine end-to-end tests skip for want of one, and the 54 lines they reach
+    // leave with them. So the job that enforces the floor has to acquire what
+    // the number assumes. The rule behind this — a job promises the stubs
+    // exactly when it obtains them — is asserted over every job of the
+    // workflow in
+    // tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs;
+    // this is the matrix's own record that the `coverage` job is one of them.
+    let ci = read(".github/workflows/ci.yml");
+    let job = job_text(&ci, "coverage").expect("a coverage job");
+    for needle in [
+        "needs: [cross-build]",
+        "download-artifact",
+        "ginary-stub-",
+        "GINARY_STUB_DIR",
+        "GINARY_REQUIRE_STUBS",
+        // Seven of those nine build with `erts = "catalog"`, and only the
+        // catalog is committed; the tarballs it names are gitignored. With the
+        // stubs but no repack they stop skipping and start failing instead.
+        "otp repack",
+        "--out dist/otp",
+        "coverage-gate.sh target/lcov.info 90",
+    ] {
+        assert!(
+            job.contains(needle),
+            "the coverage job is missing `{needle}`: without the cross stubs and the runtimes \
+             they build against, the 90% floor is measured against a tree where nine end-to-end \
+             tests skip or fail:\n{job}"
         );
     }
 }
@@ -650,12 +687,18 @@ fn the_ci_scripts_directory_holds_the_two_gates_ci_runs() {
             path.is_file(),
             "{script} is a gate CI runs; it is not committed"
         );
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111, "{script} has to be executable");
+        // The execute bit is checked where there is one to check. A Windows
+        // checkout has no mode bits at all, and the bit that matters is the
+        // one committed to the index, which the unix run asserts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{script} has to be executable");
+        }
     }
 }
 

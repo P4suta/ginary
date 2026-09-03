@@ -89,7 +89,7 @@ verify-then-publish discipline:
 1. `version-consistency.sh` proves the tag equals `Cargo.toml`.
 2. The build matrix produces, for all seven targets, the full `ginary` binary and the
    launcher-only `ginary-stub`: the four Linux targets via `cross`, the two macOS targets built
-   natively on `macos-13` and `macos-14`, and `windows-x86_64` on `windows-2022`. `ginary otp
+   natively on `macos-15-intel` and `macos-14`, and `windows-x86_64` on `windows-2022`. `ginary otp
    repack` produces the OTP catalog tarballs on the appropriate runners.
 3. `actions/attest-build-provenance` signs a provenance attestation for every asset, and a
    `SHA256SUMS` manifest is computed.

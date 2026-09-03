@@ -21,6 +21,10 @@
 //! rendering half is asserted in `tests/bundle.rs`, over a report whose
 //! numbers a test can choose.
 
+// A unix file: the input is a directory whose parent denies write permission,
+// which is a mode bit and therefore a unix idea.
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 

@@ -947,15 +947,23 @@ fn write_executable(path: &Path, bytes: &[u8]) {
 /// # Panics
 ///
 /// If the file's permissions cannot be read or written.
-#[cfg(unix)]
 pub fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut permissions = std::fs::metadata(path)
-        .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()))
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions)
-        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    // Portable on purpose: this is a fixture builder that `tests/assemble.rs`
+    // calls while assembling a tree every platform reads, so only the chmod is
+    // gated rather than the function. On Windows there is no execute bit and
+    // nothing to set.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Removes the execute bits from a file, so a test can prove they are checked.
