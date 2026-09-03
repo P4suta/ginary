@@ -295,3 +295,28 @@ pub fn plant_executable(root: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
     }
     path
 }
+
+// ------------------------------------------------------- the real ELF --
+
+/// The committed real ELF fixture: `erts-17.0.5/bin/inet_gethost` from the
+/// Erlang/OTP 29.0.5 toolchain, stripped — a genuine `x86_64` Linux ELF a
+/// linker wrote, with a real `PT_INTERP`, real `DT_NEEDED` (`libm.so.6`,
+/// `libc.so.6`, both on `verify`'s allowlist) and `e_machine` `EM_X86_64`.
+///
+/// This is the file the "plant a real ELF in the payload" tests are meant to
+/// carry, in place of this test run's own binary: a PE on Windows, an ELF on
+/// Linux, and so a native object whose machine depends on the host rather than
+/// on the file. See `tests/fixtures/elf/README.md` and `docs/dev/log/E9.md`.
+pub fn real_elf_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/elf/inet_gethost-x86_64-linux-gnu")
+}
+
+/// The bytes of [`real_elf_path`].
+///
+/// # Panics
+///
+/// If the fixture cannot be read, which would mean the repository itself is
+/// incomplete rather than that a test input was malformed.
+pub fn real_elf_bytes() -> Vec<u8> {
+    std::fs::read(real_elf_path()).expect("tests/fixtures/elf/ is committed to the repository")
+}

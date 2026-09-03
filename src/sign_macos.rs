@@ -1,60 +1,88 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Writing a macOS artifact: the payload section, and the ad-hoc signature
-//! over it.
+//! Writing a macOS artifact: the payload inside `__LINKEDIT`, and the ad-hoc
+//! signature over it.
 //!
 //! An ELF or a PE artifact is the stub with the payload and the trailer
-//! appended after it. A Mach-O cannot be built that way: bytes appended past
-//! `__LINKEDIT` fail `codesign --strict`, and an arm64 kernel refuses to map
-//! a page it cannot verify the signature of at all — an *unsigned* binary,
-//! not merely one whose signature does not match. See ADR
-//! [0016](../../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md)
-//! for the two findings and their sources.
+//! appended after it. A Mach-O cannot be built that way and left there: bytes
+//! appended past `__LINKEDIT` fail `codesign --strict`, and an arm64 kernel
+//! refuses to map a page it cannot verify the signature of at all — an
+//! *unsigned* binary, not merely one whose signature does not match.
 //!
-//! So this module does what every macOS app-bundler does: it writes the
-//! payload into a dedicated `__GINARY,__payload` section — a section is
-//! ordinary content a Mach-O carries, not an evasion of anything — and then
-//! applies a plain, unsigned, ad-hoc `CodeDirectory` over ginary's own
-//! output, which is what makes the kernel willing to load it. There is no
-//! signature stripping, no impersonation of another signer, and no identity
-//! claimed: an ad-hoc signature asserts nothing about who built the binary,
-//! only that these are the bytes it was built with.
+//! The obvious next idea — carve the payload into a brand new
+//! `__GINARY,__payload` section — is what ginary tried first, and two real
+//! Macs falsified it. A new section needs a new `LC_SEGMENT_64` load command,
+//! and a linker leaves almost no room in the load-command area (the sample
+//! stub has forty spare bytes and a section needs a hundred and fifty-two), so
+//! adding one forces every following byte of code and data to slide forward.
+//! Sliding it invalidates the entry point *and* every rebase target the
+//! `LC_DYLD_CHAINED_FIXUPS` stream encodes as an offset from the image base:
+//! the signature verifies (it covers whatever bytes are there) and the process
+//! still segfaults the instant dyld applies a fixup or the kernel jumps to the
+//! moved entry. See ADR
+//! [0016](../../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md)
+//! for the run that proved this.
+//!
+//! So this module moves nothing. It appends the payload after `__LINKEDIT`'s
+//! existing content, grows `__LINKEDIT`'s `filesize`/`vmsize` so the segment
+//! still ends the file, reuses the `LC_CODE_SIGNATURE` command the linker
+//! already left (no load command is added, so no content slides), and computes
+//! a fresh ad-hoc `CodeDirectory` over the finished bytes — payload included.
+//! This is exactly how `codesign` itself embeds a signature: as more bytes at
+//! the end of `__LINKEDIT`, covered by the hashes, described by no other load
+//! command. The entry point, every segment, and every fixup keep the file
+//! offsets and addresses the linker gave them.
+//!
+//! The payload is found again by [`crate::payload::locate`]: the finished file
+//! ends with the ad-hoc signature, and the 64-byte trailer sits immediately
+//! before it, so `locate` reads `LC_CODE_SIGNATURE`'s `dataoff` and parses the
+//! trailer at `dataoff - 64`. An unsigned build (only the tests ask for one)
+//! has no signature after it, so the trailer is the last thing in the file and
+//! the ordinary end-of-file reader finds it. There is no signature stripping,
+//! no impersonation of another signer, and no identity claimed: an ad-hoc
+//! signature asserts nothing about who built the binary, only that these are
+//! the bytes it was built with.
 //!
 //! Real code-signing verification (`codesign --verify`, Gatekeeper, an actual
-//! launch) needs a Mac and is out of scope on this host; see
-//! `docs/dev/log/D3.md` for exactly what was and was not checked here.
+//! launch) needs a Mac; the macOS CI runners are where it is confirmed.
 
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use crate::trailer::{TRAILER_LEN, Trailer};
+
 /// Whether [`inject_and_sign`] applies an ad-hoc signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeSign {
-    /// Apply a plain, unsigned ad-hoc `CodeDirectory` after the section is
-    /// written.
+    /// Grow `__LINKEDIT` over the payload and apply a plain, unsigned ad-hoc
+    /// `CodeDirectory` over the finished file.
     Adhoc,
-    /// Write the section and stop.
+    /// Append the payload after the file and stop, dropping any
+    /// `LC_CODE_SIGNATURE` the stub carried.
     ///
     /// Exists so that [`crate::payload::locate`] can be tested against a
-    /// Mach-O carrying the section without also depending on the signer.
+    /// Mach-O carrying a payload without also depending on the signer; a real
+    /// arm64 build always signs, because the kernel will not otherwise map it.
     None,
 }
 
 /// How [`inject_and_sign`] is asked to sign a stub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MacSignCfg {
-    /// Whether to sign after the section is written.
+    /// Whether to sign after the payload is written.
     pub codesign: CodeSign,
 }
 
 /// What [`inject_and_sign`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InjectReport {
-    /// The absolute file offset of the `__GINARY,__payload` section's first
-    /// byte, in the file [`inject_and_sign`] wrote.
-    pub section_offset: u64,
-    /// The section's size in bytes: the 64-byte trailer plus the payload.
-    pub section_size: u64,
+    /// The absolute file offset of the payload region's first byte — the
+    /// packed payload, immediately followed by its 64-byte trailer — in the
+    /// file [`inject_and_sign`] wrote.
+    pub payload_offset: u64,
+    /// The payload region's size in bytes: the payload plus its 64-byte
+    /// trailer.
+    pub payload_size: u64,
     /// Whether an ad-hoc signature was applied.
     pub signed: bool,
     /// The stub's `cputype`, spelled the way [`crate::macho::MachoFacts`]
@@ -76,11 +104,15 @@ pub enum SignMacosError {
     ///
     /// [`crate::macho::read`] does not refuse a fat binary itself — it is
     /// still a Mach-O — but this function needs exactly one architecture to
-    /// write a section into, so it is the one that checks
+    /// grow a segment of, so it is the one that checks
     /// [`crate::macho::MachoFacts::is_fat`] and refuses here.
     #[error("the stub is a fat Mach-O carrying more than one architecture; a thin one is required")]
     Fat,
     /// `stub_bytes` already carries a `__GINARY,__payload` section.
+    ///
+    /// Older ginary builds wrote the payload into a section; a stub that
+    /// already carries one is an artifact, not a fresh stub, and a payload
+    /// may not be added twice.
     #[error(
         "the stub already carries a __GINARY,__payload section; a payload may not be added twice"
     )]
@@ -96,16 +128,17 @@ pub enum SignMacosError {
     },
 }
 
-/// Writes `payload_with_trailer` into a `__GINARY,__payload` section of
-/// `stub_bytes` and, per `cfg`, applies an ad-hoc code signature, writing the
+/// Appends `payload_with_trailer` to `stub_bytes` inside its `__LINKEDIT`
+/// segment and, per `cfg`, applies an ad-hoc code signature, writing the
 /// result to `out`.
 ///
-/// `payload_with_trailer` is exactly what [`crate::payload::pack`] and
-/// [`crate::trailer::Trailer::to_bytes`] already produce for the ELF and PE
-/// path — the section's first 64 bytes are that trailer, with
-/// `payload_offset` relative to the section's own start rather than to the
-/// file, and the payload follows immediately after; see
-/// `docs/format.md` and [`crate::payload::locate`].
+/// `payload_with_trailer` is exactly what the ELF and PE path already
+/// produces: the 64-byte trailer from [`crate::trailer::Trailer::to_bytes`]
+/// followed by the packed payload. This function relays it into the layout a
+/// signed Mach-O needs — the packed bytes first, then a trailer whose
+/// `payload_offset` is absolute, so [`crate::payload::locate`] finds it the
+/// same way it finds an ELF's — and grows `__LINKEDIT` so the ad-hoc
+/// signature covers all of it. See `docs/format.md` and [`crate::payload::locate`].
 ///
 /// # Errors
 ///
@@ -113,8 +146,8 @@ pub enum SignMacosError {
 /// can read — including when its geometry cannot be safely rewritten, once
 /// reading has already confirmed it is a whole Mach-O — [`SignMacosError::Fat`]
 /// when it is a fat one, [`SignMacosError::AlreadySectioned`] when it already
-/// carries the section, and [`SignMacosError::Io`] when `out` could not be
-/// written.
+/// carries the section an older ginary wrote, and [`SignMacosError::Io`] when
+/// `out` could not be written.
 pub fn inject_and_sign(
     stub_bytes: &[u8],
     payload_with_trailer: &[u8],
@@ -154,16 +187,16 @@ pub fn inject_and_sign(
         payload_with_trailer,
         cfg.codesign == CodeSign::Adhoc,
     )?;
-    let body = writer.build()?;
+    let built = writer.build()?;
 
-    std::fs::write(out, &body).map_err(|source| SignMacosError::Io {
+    std::fs::write(out, &built.body).map_err(|source| SignMacosError::Io {
         path: out.to_path_buf(),
         source,
     })?;
 
     Ok(InjectReport {
-        section_offset: writer.section_fileoff,
-        section_size: writer.section_size,
+        payload_offset: built.payload_offset,
+        payload_size: built.payload_size,
         signed: cfg.codesign == CodeSign::Adhoc,
         cputype: facts.cputype,
     })
@@ -171,9 +204,10 @@ pub fn inject_and_sign(
 
 // ----------------------------------------------------------- the writer --
 
-/// The page alignment the payload segment's `vmsize` and `filesize` are
-/// rounded up to, matching Apple Silicon's page size. Nothing this crate
-/// reads depends on the exact value; only a real kernel's page-in would.
+/// The page alignment `__LINKEDIT`'s grown `vmsize` is rounded up to, matching
+/// Apple Silicon's page size. A segment's `vmsize` must be a whole number of
+/// pages; nothing this crate reads depends on the exact value, only a real
+/// kernel's page-in would.
 const SEGMENT_PAGE_ALIGN: u64 = 0x4000;
 
 /// The page size Apple's ad-hoc `CodeDirectory` hashes over, independent of
@@ -196,8 +230,7 @@ const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
 
 /// The identifier an ad-hoc `CodeDirectory` names, NUL-terminated.
 ///
-/// An ad-hoc signature asserts no identity, and a linker-signed one carries
-/// whatever the linker called its output. Nothing reads it back.
+/// An ad-hoc signature asserts no identity. Nothing reads it back.
 const AD_HOC_IDENTIFIER: &[u8] = b"a.out\0";
 
 /// The length of one SHA-256, the only hash this module writes.
@@ -255,60 +288,73 @@ impl AdHocLayout {
 const HEADER_LEN: usize = 32;
 /// The length of one `segment_command_64`, header fields only.
 const SEGMENT_CMD_LEN: usize = 72;
-/// The length of one `section_64`.
-const SECTION_LEN: usize = 80;
-/// The length of a `linkedit_data_command`.
-const LINKEDIT_DATA_CMD_LEN: usize = 16;
 
 const LC_SEGMENT_64: u32 = 0x19;
-const LC_SYMTAB: u32 = 0x2;
-const LC_DYSYMTAB: u32 = 0xb;
 const LC_CODE_SIGNATURE: u32 = 0x1d;
-const LC_DYLD_INFO: u32 = 0x22;
-const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
-const LC_FUNCTION_STARTS: u32 = 0x26;
-const LC_DATA_IN_CODE: u32 = 0x29;
-const LC_DYLIB_CODE_SIGN_DRS: u32 = 0x2b;
-const LC_DYLD_EXPORTS_TRIE: u32 = 0x8000_0033;
-const LC_DYLD_CHAINED_FIXUPS: u32 = 0x8000_0034;
 
 /// Everything [`inject_and_sign`] needs to write the finished file, planned
 /// once and then assembled by [`Writer::build`].
 ///
-/// The technique — insert the payload segment where `__LINKEDIT` used to
-/// start, push `__LINKEDIT` and every offset a `symtab`/`dysymtab`/`dyld_info`
-/// /`linkedit_data` command points into it by the same amount, and drop
-/// whatever `LC_CODE_SIGNATURE` the stub carried rather than trust a
-/// signature that covered different bytes — is adapted from `libsui` 0.16.4's
-/// `Macho::write_section` (`denoland/sui`, MIT, Copyright (c) 2024 Divy
-/// Srivastava and the Deno authors), not depended on directly: its arm64
-/// path hardcodes the new segment's name to `__SUI`, which this crate has no
-/// way to override from outside the crate, and this artifact needs
-/// `__GINARY`. `docs/dev/log/D3.md` records this decision in full; the ADR
-/// covers why the section goes before `__LINKEDIT` at all.
+/// No existing byte of the stub moves. The load commands are rewritten only to
+/// drop a stale `LC_CODE_SIGNATURE` (for an unsigned build) and to leave room
+/// for the fields [`Writer::build`] patches once the payload's size is known;
+/// the command area is padded back to the offset the stub's own content starts
+/// at, so every segment and section keeps the file offset the linker gave it.
 struct Writer {
+    /// The Mach-O header, `ncmds`/`sizeofcmds` patched in [`Writer::build`].
     header: [u8; HEADER_LEN],
+    /// The load commands to write, in order, with any stale
+    /// `LC_CODE_SIGNATURE` removed and, when signing, a fresh one kept.
     commands: Vec<Vec<u8>>,
+    /// The zero bytes written after the commands so the stub's own content
+    /// still begins at [`Writer::content`]'s original file offset.
     lc_padding: usize,
-    pre_linkedit: Vec<u8>,
-    section_data: Vec<u8>,
-    section_padding: usize,
-    post_linkedit: Vec<u8>,
-    section_fileoff: u64,
-    section_size: u64,
+    /// The stub's content from the end of its load commands up to
+    /// [`Writer::content_end`]: every segment and section, unchanged.
+    content: Vec<u8>,
+    /// The packed payload bytes, without any trailer.
+    payload: Vec<u8>,
+    /// SHA-256 of the payload, from the trailer the caller supplied.
+    payload_sha256: [u8; 32],
+    /// Whether an ad-hoc signature is applied over the finished file.
     sign: bool,
+    /// The index into [`Writer::commands`] of the `LC_CODE_SIGNATURE` to
+    /// patch, when signing.
     codesig_index: Option<usize>,
+    /// The index into [`Writer::commands`] of the `__LINKEDIT` segment to
+    /// grow, when signing.
     linkedit_index: Option<usize>,
+    /// `__TEXT`'s `fileoff`, for the `CodeDirectory`'s executable-segment base.
     text_fileoff: u64,
+    /// `__TEXT`'s `filesize`, for the executable-segment limit.
     text_filesize: u64,
 }
 
+/// What [`Writer::build`] produced.
+struct Built {
+    /// The finished file's bytes.
+    body: Vec<u8>,
+    /// The absolute file offset of the trailer that begins the payload region.
+    payload_offset: u64,
+    /// The trailer plus the payload, in bytes.
+    payload_size: u64,
+}
+
 impl Writer {
-    /// Reads `stub`'s load commands, drops any existing `LC_CODE_SIGNATURE`,
-    /// shifts everything `__LINKEDIT` and its referencing commands point at,
-    /// and plans the new `__GINARY,__payload` segment — without writing
-    /// anything yet.
-    fn plan(stub: &[u8], payload: &[u8], sign: bool) -> Result<Self, SignMacosError> {
+    /// Reads `stub`'s load commands, drops any stale `LC_CODE_SIGNATURE` when
+    /// not signing, and records where `__LINKEDIT`, `__TEXT` and the payload go
+    /// — without writing anything yet.
+    fn plan(stub: &[u8], payload_with_trailer: &[u8], sign: bool) -> Result<Self, SignMacosError> {
+        if (payload_with_trailer.len() as u64) < TRAILER_LEN {
+            return Err(parse_error(
+                "the payload handed to the Mach-O signer is shorter than its own trailer",
+            ));
+        }
+        let split = TRAILER_LEN as usize;
+        let payload = payload_with_trailer[split..].to_vec();
+        let mut payload_sha256 = [0u8; 32];
+        payload_sha256.copy_from_slice(&payload_with_trailer[24..56]);
+
         let mut header = [0u8; HEADER_LEN];
         header.copy_from_slice(
             stub.get(0..HEADER_LEN)
@@ -325,11 +371,10 @@ impl Writer {
             ));
         }
 
-        let mut commands: Vec<(u32, Vec<u8>)> = Vec::with_capacity(ncmds as usize);
+        let mut commands: Vec<Vec<u8>> = Vec::with_capacity(ncmds as usize);
         let mut offset = HEADER_LEN;
-        let mut had_old_codesig = false;
-        let mut old_linkedit_fileoff: Option<u64> = None;
-        let mut old_linkedit_vmaddr: u64 = 0;
+        let mut old_codesig_dataoff: Option<u64> = None;
+        let mut first_content_off: Option<u64> = None;
         for _ in 0..ncmds {
             let cmd = get_u32(stub, offset)?;
             let size_field = offset
@@ -350,216 +395,92 @@ impl Writer {
                 if raw.len() < SEGMENT_CMD_LEN {
                     return Err(parse_error("a segment command is shorter than 72 bytes"));
                 }
-                if segment_name(&raw) == "__LINKEDIT" {
-                    old_linkedit_fileoff = Some(get_u64(&raw, 40)?);
-                    old_linkedit_vmaddr = get_u64(&raw, 24)?;
-                }
+                first_content_off = min_section_offset(&raw, first_content_off)?;
             }
             if cmd == LC_CODE_SIGNATURE {
-                had_old_codesig = true;
+                old_codesig_dataoff = Some(u64::from(get_u32(&raw, 8)?));
+                // A stale signature covers the wrong bytes. It is kept only when
+                // this build will re-sign and patch it; otherwise it is dropped.
+                if sign {
+                    commands.push(raw);
+                }
             } else {
-                commands.push((cmd, raw));
+                commands.push(raw);
             }
             offset = end;
         }
 
-        // Every real Mach-O has `__LINKEDIT` last; a hand-fabricated stub
-        // with no load commands at all does not, and the payload simply
-        // lands at the end of the file — there is nothing else to shift.
-        let old_linkedit_fileoff = old_linkedit_fileoff.unwrap_or(stub.len() as u64);
-
-        let removed_len = if had_old_codesig {
-            LINKEDIT_DATA_CMD_LEN as u64
-        } else {
-            0
-        };
-        let added_len = (SEGMENT_CMD_LEN + SECTION_LEN) as u64
-            + if sign {
-                LINKEDIT_DATA_CMD_LEN as u64
-            } else {
-                0
-            };
-        // Always positive: one new segment-and-section command (152 bytes)
-        // is added unconditionally, and at most one 16-byte command is ever
-        // removed.
-        let header_growth = added_len
-            .checked_sub(removed_len)
-            .ok_or_else(|| parse_error("the load command area shrank unexpectedly"))?;
-
-        // The load-command area grows by `header_growth` bytes, but every byte
-        // of file content after it — and every segment's `vmaddr` — must move by
-        // a *whole page*, or the segments that follow `__TEXT` lose their page
-        // alignment and a real kernel refuses to map them (arm64's page is
-        // `0x4000`, and `header_growth` is 152). So content is shifted by
-        // `header_growth` rounded up to a page, and the gap between the load
-        // commands and the first byte of content is padded to make up the
-        // difference. `header_growth` still sizes the load-command area itself,
-        // which is what the header's `sizeofcmds` reports; `file_shift` moves
-        // everything the load commands sit in front of.
-        let file_shift = align_up(header_growth, SEGMENT_PAGE_ALIGN);
-        let lc_padding = usize::try_from(
-            file_shift
-                .checked_sub(header_growth)
-                .ok_or_else(|| parse_error("the load-command padding underflows"))?,
-        )
-        .map_err(|_| parse_error("the load-command padding overflows"))?;
-
-        let section_size = payload.len() as u64;
-        let section_filesize = align_up(section_size, SEGMENT_PAGE_ALIGN);
-
-        for (cmd, raw) in &mut commands {
-            match *cmd {
-                LC_SEGMENT_64 => {
-                    shift_segment(
-                        raw,
-                        file_shift,
-                        old_linkedit_fileoff,
-                        old_linkedit_vmaddr,
-                        section_filesize,
-                    )?;
-                }
-                LC_SYMTAB => {
-                    shift_fields(
-                        raw,
-                        &[8, 16],
-                        file_shift,
-                        old_linkedit_fileoff,
-                        section_filesize,
-                    )?;
-                }
-                LC_DYSYMTAB => {
-                    shift_fields(
-                        raw,
-                        &[32, 40, 48, 56, 64, 72],
-                        file_shift,
-                        old_linkedit_fileoff,
-                        section_filesize,
-                    )?;
-                }
-                LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
-                    shift_fields(
-                        raw,
-                        &[8, 16, 24, 32, 40],
-                        file_shift,
-                        old_linkedit_fileoff,
-                        section_filesize,
-                    )?;
-                }
-                LC_FUNCTION_STARTS
-                | LC_DATA_IN_CODE
-                | LC_DYLIB_CODE_SIGN_DRS
-                | LC_DYLD_EXPORTS_TRIE
-                | LC_DYLD_CHAINED_FIXUPS => {
-                    shift_fields(
-                        raw,
-                        &[8],
-                        file_shift,
-                        old_linkedit_fileoff,
-                        section_filesize,
-                    )?;
-                }
-                _ => {}
-            }
-        }
-
-        let section_fileoff = old_linkedit_fileoff
-            .checked_add(file_shift)
-            .ok_or_else(|| parse_error("the payload section's offset overflows"))?;
-        // The same shift, in VM address space: `__LINKEDIT`'s own `vmaddr`
-        // moves by `file_shift` for the same reason its `fileoff` does —
-        // the load-command area it sits after grew — and the new segment
-        // takes the address `__LINKEDIT` would have landed at without the
-        // payload segment's own `section_filesize` on top of that, exactly
-        // mirroring `section_fileoff` above.
-        let section_vmaddr = old_linkedit_vmaddr
-            .checked_add(file_shift)
-            .ok_or_else(|| parse_error("the payload section's vmaddr overflows"))?;
-
-        let mut seg_and_sect = Vec::with_capacity(SEGMENT_CMD_LEN + SECTION_LEN);
-        seg_and_sect.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
-        seg_and_sect.extend_from_slice(
-            &u32::try_from(SEGMENT_CMD_LEN + SECTION_LEN)
-                .unwrap_or(u32::MAX)
-                .to_le_bytes(),
-        );
-        seg_and_sect.extend_from_slice(&name16(crate::macho::PAYLOAD_SEGMENT));
-        seg_and_sect.extend_from_slice(&section_vmaddr.to_le_bytes()); // vmaddr
-        seg_and_sect.extend_from_slice(&section_filesize.to_le_bytes()); // vmsize
-        seg_and_sect.extend_from_slice(&section_fileoff.to_le_bytes()); // fileoff
-        seg_and_sect.extend_from_slice(&section_filesize.to_le_bytes()); // filesize
-        seg_and_sect.extend_from_slice(&1i32.to_le_bytes()); // maxprot: VM_PROT_READ
-        seg_and_sect.extend_from_slice(&1i32.to_le_bytes()); // initprot
-        seg_and_sect.extend_from_slice(&1u32.to_le_bytes()); // nsects
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // flags
-        seg_and_sect.extend_from_slice(&name16(crate::macho::PAYLOAD_SECTION));
-        seg_and_sect.extend_from_slice(&name16(crate::macho::PAYLOAD_SEGMENT));
-        seg_and_sect.extend_from_slice(&section_vmaddr.to_le_bytes()); // addr
-        seg_and_sect.extend_from_slice(&section_size.to_le_bytes()); // size
-        seg_and_sect.extend_from_slice(
-            &u32::try_from(section_fileoff)
-                .unwrap_or(u32::MAX)
-                .to_le_bytes(),
-        ); // offset
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // align
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reloff
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // nreloc
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // flags: S_REGULAR
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved1
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved2
-        seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved3
-        // The new segment sits at a lower `vmaddr` than the relocated
-        // `__LINKEDIT`, so it is inserted *before* it in load-command order:
-        // dyld expects a Mach-O's segments to be non-decreasing in `vmaddr`.
-        // A hand-fabricated stub with no `__LINKEDIT` at all gets it appended.
-        let insert_at = commands
-            .iter()
-            .position(|(cmd, raw)| *cmd == LC_SEGMENT_64 && segment_name(raw) == "__LINKEDIT")
-            .unwrap_or(commands.len());
-        commands.insert(insert_at, (LC_SEGMENT_64, seg_and_sect));
-
+        // A signed build needs a command to point at the signature. Adding one
+        // would grow the load-command area and slide the code that follows it,
+        // which is the very thing this writer exists to avoid; a linker always
+        // ad-hoc signs its output, so a stub without the command is not one a
+        // real build ever hands us.
         let codesig_index = if sign {
-            let mut cs = Vec::with_capacity(LINKEDIT_DATA_CMD_LEN);
-            cs.extend_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
-            cs.extend_from_slice(
-                &u32::try_from(LINKEDIT_DATA_CMD_LEN)
-                    .unwrap_or(u32::MAX)
-                    .to_le_bytes(),
-            );
-            cs.extend_from_slice(&0u32.to_le_bytes()); // dataoff, patched in `build`
-            cs.extend_from_slice(&0u32.to_le_bytes()); // datasize, patched in `build`
-            commands.push((LC_CODE_SIGNATURE, cs));
-            Some(commands.len() - 1)
+            let index = commands
+                .iter()
+                .position(|raw| get_u32(raw, 0).unwrap_or(0) == LC_CODE_SIGNATURE);
+            if index.is_none() {
+                return Err(parse_error(
+                    "cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse; its \
+                     load-command area cannot grow without relocating code",
+                ));
+            }
+            index
         } else {
             None
         };
 
-        let linkedit_index = commands
-            .iter()
-            .position(|(cmd, raw)| *cmd == LC_SEGMENT_64 && segment_name(raw) == "__LINKEDIT");
+        // Where the payload begins. A signed build drops the old signature's
+        // bytes and writes the payload where they were; an unsigned one keeps
+        // the whole stub and appends after it.
+        let content_end = match old_codesig_dataoff {
+            Some(dataoff) if sign => dataoff,
+            _ => stub.len() as u64,
+        };
+        let content_end = usize::try_from(content_end)
+            .ok()
+            .filter(|end| *end >= old_lc_end && *end <= stub.len())
+            .ok_or_else(|| parse_error("the payload boundary is outside the file"))?;
+
+        let new_sizeofcmds: usize = commands.iter().map(Vec::len).sum();
+        let new_lc_end = HEADER_LEN
+            .checked_add(new_sizeofcmds)
+            .ok_or_else(|| parse_error("the rewritten load command area overflows"))?;
+        // The command area only ever shrinks (a dropped signature) or stays the
+        // same, so it fits before the stub's first content byte with room to
+        // spare; the padding makes up the difference so nothing moves.
+        let lc_padding = old_lc_end
+            .checked_sub(new_lc_end)
+            .ok_or_else(|| parse_error("the rewritten load commands do not fit"))?;
+        if let Some(first) = first_content_off
+            && (new_lc_end as u64) > first
+        {
+            return Err(parse_error(
+                "the rewritten load commands would overwrite the stub's own content",
+            ));
+        }
+
+        let linkedit_index = commands.iter().position(|raw| {
+            get_u32(raw, 0).unwrap_or(0) == LC_SEGMENT_64 && segment_name(raw) == "__LINKEDIT"
+        });
+
         let (text_fileoff, text_filesize) = commands
             .iter()
-            .find(|(cmd, raw)| *cmd == LC_SEGMENT_64 && segment_name(raw) == "__TEXT")
-            .map(|(_, raw)| (get_u64(raw, 40).unwrap_or(0), get_u64(raw, 48).unwrap_or(0)))
+            .find(|raw| {
+                get_u32(raw, 0).unwrap_or(0) == LC_SEGMENT_64 && segment_name(raw) == "__TEXT"
+            })
+            .map(|raw| (get_u64(raw, 40).unwrap_or(0), get_u64(raw, 48).unwrap_or(0)))
             .unwrap_or((0, 0));
 
-        let split_at = old_linkedit_fileoff
-            .saturating_sub(old_lc_end as u64)
-            .min(stub.len().saturating_sub(old_lc_end) as u64) as usize;
-        let pre_linkedit = stub[old_lc_end..old_lc_end + split_at].to_vec();
-        let post_linkedit = stub[old_lc_end + split_at..].to_vec();
-
-        let section_padding = section_filesize.saturating_sub(section_size) as usize;
+        let content = stub[old_lc_end..content_end].to_vec();
 
         Ok(Self {
             header,
-            commands: commands.into_iter().map(|(_, raw)| raw).collect(),
+            commands,
             lc_padding,
-            pre_linkedit,
-            section_data: payload.to_vec(),
-            section_padding,
-            post_linkedit,
-            section_fileoff,
-            section_size,
+            content,
+            payload,
+            payload_sha256,
             sign,
             codesig_index,
             linkedit_index,
@@ -568,9 +489,9 @@ impl Writer {
         })
     }
 
-    /// Assembles the planned commands and file content into the finished
-    /// bytes, computing and appending the ad-hoc signature last, when asked.
-    fn build(&self) -> Result<Vec<u8>, SignMacosError> {
+    /// Assembles the header, the (unmoved) content, the payload and the ad-hoc
+    /// signature into the finished bytes.
+    fn build(&self) -> Result<Built, SignMacosError> {
         let new_sizeofcmds: usize = self.commands.iter().map(Vec::len).sum();
         let mut header = self.header;
         put_u32(
@@ -588,10 +509,9 @@ impl Writer {
             HEADER_LEN
                 + new_sizeofcmds
                 + self.lc_padding
-                + self.pre_linkedit.len()
-                + self.section_data.len()
-                + self.section_padding
-                + self.post_linkedit.len()
+                + self.content.len()
+                + self.payload.len()
+                + TRAILER_LEN as usize
                 + 1024,
         );
         body.extend_from_slice(&header);
@@ -601,36 +521,56 @@ impl Writer {
             command_offsets.push(body.len());
             body.extend_from_slice(raw);
         }
-        // Pad the load-command area up to the whole-page `file_shift`, so that
-        // every `fileoff` in `pre_linkedit` and after lands where the shifted
-        // load commands say it does and stays page-aligned. See `Writer::plan`.
+        // Pad the command area back to where the stub's content started, so
+        // every file offset the load commands name is still correct.
         body.extend(std::iter::repeat_n(0u8, self.lc_padding));
-        body.extend_from_slice(&self.pre_linkedit);
-        body.extend_from_slice(&self.section_data);
-        body.extend(std::iter::repeat_n(0u8, self.section_padding));
-        body.extend_from_slice(&self.post_linkedit);
+        body.extend_from_slice(&self.content);
+
+        let payload_len = self.payload.len() as u64;
 
         if self.sign {
-            // The signature starts on a 16-byte boundary, as every
-            // linker-produced one does; `codesign --verify --strict` reads
-            // `dataoff` and expects the superblob's magic there, and the
-            // padding is inside what the hashes cover.
-            let padding = usize::try_from(align_up(body.len() as u64, SIGNATURE_ALIGNMENT))
-                .unwrap_or(usize::MAX)
-                .saturating_sub(body.len());
-            body.extend(std::iter::repeat_n(0u8, padding));
+            // The payload and its trailer end exactly where the signature
+            // begins, on a 16-byte boundary, so `locate` reads the trailer at
+            // `dataoff - 64`. The alignment padding therefore goes *before* the
+            // payload, not after the trailer.
+            let projected = (body.len() as u64)
+                .saturating_add(payload_len)
+                .saturating_add(TRAILER_LEN);
+            let pad_before =
+                usize::try_from(align_up(projected, SIGNATURE_ALIGNMENT).saturating_sub(projected))
+                    .unwrap_or(0);
+            body.extend(std::iter::repeat_n(0u8, pad_before));
+
+            let payload_offset = body.len() as u64;
+            body.extend_from_slice(&self.payload);
+            body.extend_from_slice(
+                &Trailer {
+                    payload_offset,
+                    payload_len,
+                    payload_sha256: self.payload_sha256,
+                }
+                .to_bytes(),
+            );
 
             let sig_off = body.len();
-            let layout = AdHocLayout::at(sig_off);
-            let sz = layout.total_len;
+            let sig_size = AdHocLayout::at(sig_off).total_len;
 
-            // Every field the finished file carries is written *before* the
-            // pages are hashed. All four of these live in the load-command
-            // area, which is page 0, and a field patched after the hash is a
-            // page the kernel will refuse to map — which it reports by killing
-            // the process with `SIGKILL` rather than by saying so. That is
-            // exactly what both macOS runners did on 2026-09-03; see
-            // `docs/dev/log/E8.md`.
+            // Grow `__LINKEDIT` so it still ends the file, now with the payload
+            // and the signature inside it, and point `LC_CODE_SIGNATURE` at the
+            // signature. Both are patched before the pages are hashed: they live
+            // in page 0, and a field written after the hash is a page the kernel
+            // refuses to map — which it reports by killing the process rather
+            // than by saying so.
+            if let Some(index) = self.linkedit_index
+                && let Some(&at) = command_offsets.get(index)
+            {
+                let linkedit_fileoff = get_u64(&body, at + 40)?;
+                let filesize = (sig_off as u64)
+                    .saturating_add(sig_size as u64)
+                    .saturating_sub(linkedit_fileoff);
+                put_u64(&mut body, at + 48, filesize)?;
+                put_u64(&mut body, at + 32, align_up(filesize, SEGMENT_PAGE_ALIGN))?;
+            }
             if let Some(index) = self.codesig_index
                 && let Some(&at) = command_offsets.get(index)
             {
@@ -639,24 +579,38 @@ impl Writer {
                     at + 8,
                     u32::try_from(sig_off).unwrap_or(u32::MAX),
                 )?;
-                put_u32(&mut body, at + 12, u32::try_from(sz).unwrap_or(u32::MAX))?;
-            }
-            if let Some(index) = self.linkedit_index
-                && let Some(&at) = command_offsets.get(index)
-            {
-                let linkedit_fileoff = get_u64(&body, at + 40)?;
-                let seg_size = (sig_off as u64)
-                    .saturating_add(sz as u64)
-                    .saturating_sub(linkedit_fileoff);
-                put_u64(&mut body, at + 32, seg_size)?; // vmsize
-                put_u64(&mut body, at + 48, seg_size)?; // filesize
+                put_u32(
+                    &mut body,
+                    at + 12,
+                    u32::try_from(sig_size).unwrap_or(u32::MAX),
+                )?;
             }
 
             let blob = build_ad_hoc_signature(&body, self.text_fileoff, self.text_filesize);
             body.extend_from_slice(&blob);
-        }
 
-        Ok(body)
+            Ok(Built {
+                body,
+                payload_offset,
+                payload_size: payload_len.saturating_add(TRAILER_LEN),
+            })
+        } else {
+            let payload_offset = body.len() as u64;
+            body.extend_from_slice(&self.payload);
+            body.extend_from_slice(
+                &Trailer {
+                    payload_offset,
+                    payload_len,
+                    payload_sha256: self.payload_sha256,
+                }
+                .to_bytes(),
+            );
+            Ok(Built {
+                body,
+                payload_offset,
+                payload_size: payload_len.saturating_add(TRAILER_LEN),
+            })
+        }
     }
 }
 
@@ -664,10 +618,7 @@ impl Writer {
 /// wrapping one `CSMAGIC_CODEDIRECTORY` blob) over `body`, SHA-256 per
 /// [`CODE_DIRECTORY_PAGE`]-byte page — the same layout `codesign -s -`
 /// produces, asserting no identity beyond "these are the bytes ginary
-/// built". Adapted from `libsui` 0.16.4's `apple_codesign::MachoSigner`
-/// (`denoland/sui`, MIT, Copyright (c) 2024 Divy Srivastava and the Deno
-/// authors); see the note on [`Writer`] for why this crate is not depended
-/// on directly.
+/// built".
 fn build_ad_hoc_signature(body: &[u8], text_fileoff: u64, text_filesize: u64) -> Vec<u8> {
     let sig_off = body.len();
     let AdHocLayout {
@@ -691,7 +642,10 @@ fn build_ad_hoc_signature(body: &[u8], text_fileoff: u64, text_filesize: u64) ->
     out.extend_from_slice(&CSMAGIC_CODEDIRECTORY.to_be_bytes());
     out.extend_from_slice(&u32::try_from(cd_len).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(&0x0002_0400u32.to_be_bytes()); // version
-    out.extend_from_slice(&0x0002_0002u32.to_be_bytes()); // flags: adhoc | linkerSigned
+    // flags: CS_ADHOC only. ginary rewrote and re-signed this binary; it did
+    // not come out of a linker, so CS_LINKER_SIGNED (0x20000) would claim a
+    // provenance that is no longer true. See docs/dev/log/E9.md.
+    out.extend_from_slice(&0x0000_0002u32.to_be_bytes());
     out.extend_from_slice(&u32::try_from(hash_offset).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(
         &u32::try_from(ident_offset)
@@ -736,16 +690,50 @@ fn segment_name(raw: &[u8]) -> &str {
     std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
-/// `name`, NUL-padded to the fixed 16-byte width every Mach-O segment and
-/// section name field is; truncated rather than panicking if `name` is
-/// somehow longer; every name this module writes is a short internal
-/// constant, never truncated in practice.
-fn name16(name: &str) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    let bytes = name.as_bytes();
-    let take = bytes.len().min(16);
-    out[..take].copy_from_slice(&bytes[..take]);
-    out
+/// The smallest file offset any section in `raw` (a `segment_command_64`)
+/// begins at, folded with `current`, ignoring the `0` offset a `__bss`-style
+/// section or a header-mapping segment carries.
+///
+/// This is the first byte of real content after the load commands: the writer
+/// must not let the rewritten command area reach it.
+fn min_section_offset(raw: &[u8], current: Option<u64>) -> Result<Option<u64>, SignMacosError> {
+    let nsects = get_u32(raw, 64)?;
+    let mut found = current;
+    for index in 0..nsects {
+        let section_start = SEGMENT_CMD_LEN
+            .checked_add(
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(80))
+                    .ok_or_else(|| parse_error("a section index overflows"))?,
+            )
+            .ok_or_else(|| parse_error("a section's position overflows"))?;
+        let offset_field = section_start
+            .checked_add(48)
+            .ok_or_else(|| parse_error("a section's offset field overflows"))?;
+        if offset_field + 4 > raw.len() {
+            // A stub whose declared `nsects` runs past the command it sits in is
+            // one `macho::read` already refused; the writer never reaches here.
+            break;
+        }
+        let offset = u64::from(get_u32(raw, offset_field)?);
+        if offset > 0 {
+            found = Some(found.map_or(offset, |current| current.min(offset)));
+        }
+    }
+    Ok(found)
+}
+
+/// A [`SignMacosError::NotAMachO`] wrapping [`crate::macho::MachoError::Parse`],
+/// for the write path's own bounds and geometry checks: the stub read
+/// cleanly as a whole Mach-O by `macho::read`, and then turned out not to be
+/// one this function can safely rewrite.
+fn parse_error(message: &str) -> SignMacosError {
+    SignMacosError::NotAMachO {
+        source: crate::macho::MachoError::Parse {
+            message: message.to_owned(),
+        },
+    }
 }
 
 /// `value`, rounded up to the next multiple of `align`.
@@ -758,167 +746,6 @@ fn align_up(value: u64, align: u64) -> u64 {
         value
     } else {
         value.saturating_add(align - remainder)
-    }
-}
-
-/// Adds `file_shift` — the whole-page distance every byte of content moved,
-/// not the raw load-command growth `Writer::plan` rounded up to reach it — to
-/// `old`, and `extra` as well when `old` is at or
-/// past `old_linkedit_fileoff` — the one rule every offset a
-/// `symtab`/`dysymtab`/`dyld_info`/`linkedit_data` command carries follows,
-/// because every one of them points somewhere inside `__LINKEDIT`. `0` is
-/// left as `0`: every one of these fields uses it to mean "not present",
-/// never a real position.
-fn shift_value(old: u32, file_shift: u64, old_linkedit_fileoff: u64, extra: u64) -> u32 {
-    if old == 0 {
-        return 0;
-    }
-    let extra_here = if u64::from(old) >= old_linkedit_fileoff {
-        extra
-    } else {
-        0
-    };
-    let shifted = u64::from(old)
-        .saturating_add(file_shift)
-        .saturating_add(extra_here);
-    u32::try_from(shifted).unwrap_or(u32::MAX)
-}
-
-/// [`shift_value`]'s 64-bit counterpart, for the two fields that are `u64`
-/// rather than `u32`: a segment's own `vmaddr`, and a section's `addr`.
-/// Unlike `shift_value` there is no `0`-means-absent case to preserve — an
-/// `addr`/`vmaddr` of `0` is a real (if unusual) virtual address, not a
-/// sentinel — so every value is shifted unconditionally by `file_shift`,
-/// plus `extra` once `old` reaches `old_linkedit_boundary`, mirroring the
-/// `fileoff`/`old_linkedit_fileoff` rule [`shift_value`] applies to file
-/// offsets.
-fn shift_value_u64(
-    old: u64,
-    file_shift: u64,
-    old_linkedit_boundary: u64,
-    extra: u64,
-) -> Result<u64, SignMacosError> {
-    let extra_here = if old >= old_linkedit_boundary {
-        extra
-    } else {
-        0
-    };
-    old.checked_add(file_shift)
-        .and_then(|value| value.checked_add(extra_here))
-        .ok_or_else(|| parse_error("a 64-bit address field overflows"))
-}
-
-/// Applies [`shift_value`] to the `u32` field at each offset in
-/// `field_offsets`, within `raw`.
-fn shift_fields(
-    raw: &mut [u8],
-    field_offsets: &[usize],
-    file_shift: u64,
-    old_linkedit_fileoff: u64,
-    extra: u64,
-) -> Result<(), SignMacosError> {
-    for &field in field_offsets {
-        let old = get_u32(raw, field)?;
-        put_u32(
-            raw,
-            field,
-            shift_value(old, file_shift, old_linkedit_fileoff, extra),
-        )?;
-    }
-    Ok(())
-}
-
-/// Shifts one `segment_command_64`'s `fileoff` and `vmaddr` (or, when
-/// `fileoff` is `0` — the segment mapping the header itself, `__TEXT` in a
-/// real Mach-O — grows `filesize` and `vmsize` together instead, so the
-/// segment still reaches the same logical end on both axes) and every one of
-/// its sections' `offset`.
-///
-/// `vmaddr` is shifted by exactly the same rule `fileoff` is: unconditionally
-/// by `file_shift`, the page-aligned distance the grown load-command area (plus
-/// the padding that rounds it up) pushes every following segment forward, in VM
-/// address space exactly as in the file; and by `extra` as well once `vmaddr` reaches
-/// `old_linkedit_vmaddr`, mirroring the `fileoff`/`old_linkedit_fileoff` rule
-/// exactly — that is what keeps the new `__GINARY` segment and the relocated
-/// `__LINKEDIT` from ever landing on the same address (see
-/// `tests/regressions/d3_macho_segment_vmaddr_and_vmsize_were_wrong.rs`).
-fn shift_segment(
-    raw: &mut [u8],
-    file_shift: u64,
-    old_linkedit_fileoff: u64,
-    old_linkedit_vmaddr: u64,
-    extra: u64,
-) -> Result<(), SignMacosError> {
-    let fileoff = get_u64(raw, 40)?;
-    if fileoff == 0 {
-        let filesize = get_u64(raw, 48)?;
-        if filesize > 0 {
-            let grown = filesize
-                .checked_add(file_shift)
-                .ok_or_else(|| parse_error("a segment's filesize overflows"))?;
-            put_u64(raw, 48, grown)?;
-            let vmsize = get_u64(raw, 32)?;
-            let vmsize_grown = vmsize
-                .checked_add(file_shift)
-                .ok_or_else(|| parse_error("a segment's vmsize overflows"))?;
-            put_u64(raw, 32, vmsize_grown)?;
-        }
-    } else {
-        let extra_here = if fileoff >= old_linkedit_fileoff {
-            extra
-        } else {
-            0
-        };
-        let shifted_off = fileoff
-            .checked_add(file_shift)
-            .and_then(|value| value.checked_add(extra_here))
-            .ok_or_else(|| parse_error("a segment's fileoff overflows"))?;
-        put_u64(raw, 40, shifted_off)?;
-
-        let vmaddr = get_u64(raw, 24)?;
-        let shifted_vmaddr = shift_value_u64(vmaddr, file_shift, old_linkedit_vmaddr, extra)?;
-        put_u64(raw, 24, shifted_vmaddr)?;
-    }
-
-    let nsects = get_u32(raw, 64)?;
-    for index in 0..nsects {
-        let section_start = SEGMENT_CMD_LEN
-            .checked_add(
-                usize::try_from(index)
-                    .ok()
-                    .and_then(|index| index.checked_mul(SECTION_LEN))
-                    .ok_or_else(|| parse_error("a section index overflows"))?,
-            )
-            .ok_or_else(|| parse_error("a section's position overflows"))?;
-        let addr_field = section_start
-            .checked_add(32)
-            .ok_or_else(|| parse_error("a section's addr field overflows"))?;
-        let old_addr = get_u64(raw, addr_field)?;
-        let shifted_addr = shift_value_u64(old_addr, file_shift, old_linkedit_vmaddr, extra)?;
-        put_u64(raw, addr_field, shifted_addr)?;
-
-        let field = section_start
-            .checked_add(48)
-            .ok_or_else(|| parse_error("a section's offset field overflows"))?;
-        let old = get_u32(raw, field)?;
-        put_u32(
-            raw,
-            field,
-            shift_value(old, file_shift, old_linkedit_fileoff, extra),
-        )?;
-    }
-    Ok(())
-}
-
-/// A [`SignMacosError::NotAMachO`] wrapping [`crate::macho::MachoError::Parse`],
-/// for the write path's own bounds and geometry checks: the stub read
-/// cleanly as a whole Mach-O by `macho::read`, and then turned out not to be
-/// one this function can safely rewrite.
-fn parse_error(message: &str) -> SignMacosError {
-    SignMacosError::NotAMachO {
-        source: crate::macho::MachoError::Parse {
-            message: message.to_owned(),
-        },
     }
 }
 

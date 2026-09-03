@@ -26,7 +26,7 @@
 | `tests/manifest.rs` | `ginary.json` and `ginary.index.json`: the wire field order, the unknown-key round trip, `check_version`, the `launch` path rules, `created_at`, and the index over a staging root |
 | `tests/payload.rs` | the payload: deterministic packing, the round trip with modes, eight hand-built malicious archives, the two streaming reads, and three never-panic properties |
 | `tests/macho.rs` | read-only Mach-O inspection (D3), against a committed real arm64 binary and hand-fabricated headers: the four thin magics and the two fat, `cputype` for x86_64 and arm64, a known section's file offset and size, an `LC_CODE_SIGNATURE` load command present and absent, a fat header's `is_fat` without an error, the typed refusals for a non-Mach-O and a truncated one, and two never-panic properties |
-| `tests/payload_locate.rs` | `payload::locate` (D3): the end-of-file trailer unchanged for a plain artifact, the eof trailer winning over a Mach-O section when both are present, a `__GINARY,__payload` section's absolute offset, `None` for a Mach-O with no section, and the three typed errors — a section too small for a trailer, one whose first bytes carry no trailer magic, and one whose declared length disagrees with the section's own size — plus `TrailerError::Fat` for a fat Mach-O |
+| `tests/payload_locate.rs` | `payload::locate` (D3, extended E9): the end-of-file trailer unchanged for a plain artifact, the eof trailer winning over a Mach-O section when both are present, a `__GINARY,__payload` section's absolute offset, `None` for a Mach-O with no section, and the three typed errors — a section too small for a trailer, one whose first bytes carry no trailer magic, and one whose declared length disagrees with the section's own size — plus `TrailerError::Fat` for a fat Mach-O. E9 adds the guard on the `LC_CODE_SIGNATURE` path a signed macOS artifact locates through: a Mach-O whose `dataoff` names an offset past the end of the file is not a read error, it falls through to the section lookup and returns `None`, rather than surfacing a spurious `TrailerError::Io` from reading past EOF |
 | `tests/diag.rs` | the recorder through injected sinks: both output shapes, event order, elapsed time, and the four ways it stays off |
 | `src/error.rs` unit tests | the five exit codes, the message of each variant, the `hint:` second line, and the panic-hook line |
 | `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic; the magic and the route are `cfg(unix)`, the other two hold on either platform |
@@ -54,7 +54,7 @@
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub. D3 adds three darwin cases over a hand-fabricated Mach-O carrying an appended marker, against the real Mach-O arm of `check_object`: a matching `cputype` accepted, a mismatched one refused by the header, and one already carrying a `__GINARY,__payload` section refused as an artifact. The RED-phase placeholder `a_darwin_stub_cannot_be_checked_here_yet`, which pinned the old `StubError::NotYetSupported` answer, is gone — it asserted the very behaviour these three replace |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
-| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, extended E8; `cli`-gated): the section written at the offset and size `macho.rs` itself reports back, unsigned and ad-hoc signed, `payload::locate` round-tripping the exact bytes and digest injected, and the typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host. E8 added the *validity* half through `tests/common/codesign.rs`: every code slot is the SHA-256 of the page it stands for (the signature covers the finished file, not the bytes before the last four fields were patched in), the signature begins on a 16-byte boundary and is the last thing in the file, the `CodeDirectory` describes the file it is attached to (`codeLimit`, one slot per page, `execSeg` naming `__TEXT` as finally laid out), and the payload section stays inside what the signature covers — the geometry the E8 page-alignment fix must not disturb |
+| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, extended E8, reworked E9; `cli`-gated): E9 replaced the carve-a-new-section layout — which two real Macs proved verifies yet segfaults — with the append-inside-`__LINKEDIT` layout that also *runs*, so the tests move with it. The payload is appended after `__LINKEDIT`'s content and the segment grown to cover it, nothing slides, and `payload::locate` round-trips the exact bytes and digest injected — unsigned through `PayloadVia::EofTrailer` (its trailer is the last 64 bytes) and ad-hoc signed through `PayloadVia::MachOAppended` (its trailer sits just before the reused `LC_CODE_SIGNATURE`), each pinning the discriminant, `report.payload_offset`, the length and the bytes. Two E9 tests hold the run-AND-verify invariants a section layout broke: `an_injected_artifact_runs_the_stubs_own_entry_instructions` reads the bytes at the finished artifact's mapped entry (through `common::macho::entry_point`) and asserts they are the stub's own first instructions — the entry moved nowhere, because nothing moved — and `an_injected_artifact_does_not_claim_to_be_linker_signed` asserts the `CodeDirectory` `flags` carry `CS_ADHOC` and not the `CS_LINKER_SIGNED` a binary ginary rewrote must not claim. The typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — stand, against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host. E8's *validity* half through `tests/common/codesign.rs` stays: every code slot is the SHA-256 of the page it stands for (the signature covers the finished file, not the bytes before the last four fields were patched in), the signature begins on a 16-byte boundary and is the last thing in the file, the `CodeDirectory` describes the file it is attached to (`codeLimit`, one slot per page, `execSeg` naming `__TEXT` as finally laid out), and the appended payload stays inside what the signature covers and inside `__LINKEDIT`, which ends the file |
 | `tests/download.rs` | one HTTPS fetch against a hand-rolled loopback server: the body written and the part file gone, a checksum and a length mismatch naming both values, a 500 retried and a 404 asked exactly once, a truncated body retried, three failures exhausting the attempts, the offline refusal that opens no socket, and the policy — the part file's name, the backoff schedule, the retryable statuses, one spelling of a digest, the base overrides and the two environment variables; and the same six questions asked of `get_text`, the release-API reader — a body back verbatim under the GitHub accept header, a 500 retried, a 404 asked once, a body over `MAX_TEXT_BYTES` refused rather than read into memory, the offline refusal naming no file, and a read that goes through the base override |
 | `tests/catalog.rs` | the catalog: every field of schema 1 and an unknown key surviving at two levels, the schema and parse errors, the three sources with first-found winning the whole file, the selection rules — the host release, an exact version, the musl default, a named variant, ambiguity and each miss listing what is there — the version guard inside `select`, URL resolution against the catalog's own directory, and the cache: the completion marker, a warm cache needing no network, the whole cold path, a markerless extraction thrown away, the offline error travelling, a tarball keyed by its own digest, and the strict extractor's four refusals over hand-built archives — a symlink, a `..` path, an absolute path and a device node, each named and each leaving no runtime behind. D3 adds the `erlef/otp_builds` asset name for each arch, pinned against the real `OTP-29.0.5` release, and the commit guard that only admits an entry whose `otp_release` matches the host's own |
 | `tests/otp_repack.rs` | the local pipeline: the six-row upstream asset table and four combinations it has none for, the selector grammar, the tag-to-version rule, the prune list against components rather than substrings, the dereference and the assertion that guards the strict extractor, and the pipeline itself over a fake upstream asset — the entry's fields, `SOURCE_DATE_EPOCH`, URLs relative to the catalog, a mislabelled asset refused before anything is written, and the injected ELF reader's error travelling; and the release API driven against a scripted server through `Net`'s base override — the digest it reported pinned into the entry, a body that does not match it refused, an asset carrying no digest refused rather than pinned to nothing, a release holding another architecture's asset, and a document that is not a release |
@@ -360,9 +360,17 @@ file nobody packed, `appended` writes entries the packer never would — a secon
 directory entry, a symlink — and `target` makes the manifest claim another architecture. What
 comes out is a whole artifact whose *trailer digest matches its payload*, which is the point:
 `inspect --verify` passes on every one of them. It also carries the real ELF the synthetic tree
-deliberately has not got — `with_native_object` copies this test run's own binary in at
-`NATIVE_PATH`, and `patch_elf_machine` rewrites two bytes of its header so a test on one
-architecture has a binary for another with no cross toolchain.
+deliberately has not got — `with_native_object` plants `test_binary()` at `NATIVE_PATH`, and
+`patch_elf_machine` rewrites two bytes of its header so a test on one architecture has a binary
+for another with no cross toolchain. E7 pointed `test_binary()` at this test run's own binary; E9
+repointed it at the committed `tests/fixtures/elf/` ELF (read directly, so `repack` still builds
+under `--no-default-features`), because a test that plants "a real ELF" was planting a PE on
+Windows and a Mach-O on macOS, where `elf::inspect_bytes` refused it. With the fixture the plant
+is a genuine `x86_64` Linux ELF on every host, and the expectations read the object's own machine
+— `native_machine`/`native_target` off the fixture's `e_machine`, not `Target::host()` — so the
+row a healthy artifact lists is the one the payload really carries; `foreign_machine`/
+`foreign_target` are that value's opposite, the machine to rewrite the header to for the mismatch
+tests.
 
 `tests/common/cachefs.rs` is what B1 added, and it exists because pruning turns on two things a
 test cannot fake for itself: how old an entry is, and whether anybody is using it. `plant_entry`
@@ -555,9 +563,15 @@ which is a file that begins like an object and is not one. `plant` and `plant_ex
 fixture into a tree the test owns.
 
 One shape the file cannot fabricate is a position-independent *program*, because `DF_1_PIE` lives
-in a `DT_FLAGS_1` entry of a real dynamic section. The tests that need one use
-`repack::test_binary` — this test run's own binary, which `cargo` links `-pie` — and that is the
-better fixture for the claim anyway: the classification rule is about what real linkers emit.
+in a `DT_FLAGS_1` entry of a real dynamic section. The C4 tests that need one used
+`repack::test_binary` — this test run's own binary, which `cargo` links `-pie`. E9 turned that
+same accessor into the committed ELF fixture (see `tests/common/repack.rs` above), because a real
+ELF the *host* refuses is no ELF at all on Windows or macOS; `common::native::real_elf_bytes` /
+`real_elf_path` are the accessors for `tests/fixtures/elf/inet_gethost-x86_64-linux-gnu`, the
+committed `x86_64` Linux ELF that reads as one whatever host opens it. It parallels
+`tests/fixtures/macho/` exactly: a real, unmodified binary, committed rather than downloaded at
+test time, for the tests that must plant an object a real linker wrote rather than one this module
+fabricated.
 
 `tests/common/macho.rs` is what D3 added, and — like `tests/common/native.rs` before it — it has
 no macOS toolchain to build a real fixture with, so almost everything in it is written field by
@@ -575,12 +589,15 @@ for the one section shape `src/payload.rs::locate` and `src/sign_macos.rs` are w
 ahead of their own implementation: the 64-byte trailer struct at the section's own start,
 `payload_offset` fixed at `TRAILER_LEN` because the payload immediately follows it, and nothing
 else in the section — see "Payload section geometry" below for why that fixed layout, and not
-just the equation `Trailer::parse` checks, is what `locate` itself enforces. The other half of
-the file is `tests/fixtures/macho/`: a real, unmodified `aarch64-apple-darwin` binary
-(`tests/fixtures/macho/README.md` records its origin and licence), committed rather than
-downloaded at test time, for the tests — `inject_and_sign`'s among them — that have to hold
-against load commands and segment geometry a real linker wrote rather than one this module
-fabricated.
+just the equation `Trailer::parse` checks, is what `locate` itself enforces. E9 adds
+`entry_point`, a by-hand reader of `LC_MAIN` plus `__TEXT` that resolves the file offset a
+Mach-O's entry point maps to and returns the bytes there, so a test can assert the finished
+artifact's mapped entry still holds the stub's own first instructions — the invariant the
+segfaulting section layout broke. The other half of the file is `tests/fixtures/macho/`: a real,
+unmodified `aarch64-apple-darwin` binary (`tests/fixtures/macho/README.md` records its origin and
+licence), committed rather than downloaded at test time, for the tests — `inject_and_sign`'s
+among them — that have to hold against load commands and segment geometry a real linker wrote
+rather than one this module fabricated.
 
 `tests/common/codesign.rs` is what E8 added, and it is the reading half of the ad-hoc signature
 `src/sign_macos.rs` writes — the counterpart to `macho.rs`, and, crucially, one that goes nowhere

@@ -267,3 +267,104 @@ pub fn real_fixture_bytes() -> Vec<u8> {
     std::fs::read(real_fixture_path())
         .expect("tests/fixtures/macho/ is committed to the repository")
 }
+
+// -------------------------------------------- reading a finished Mach-O --
+//
+// The entry-point reader below reads a *whole, finished* thin 64-bit Mach-O —
+// the output of `sign_macos::inject_and_sign` — so a Linux test can hold that
+// output to an invariant a runnable artifact has to satisfy but `codesign`
+// cannot see: that the entry point still runs the stub's own instructions.
+// Segment, signature and `CodeDirectory` reading is `tests/common/codesign.rs`
+// already, so only `LC_MAIN` is parsed here. It parses by hand, like the
+// writers above, and never panics: a malformed input yields `None`, so a test
+// says what it expected with its own `expect`.
+
+/// `LC_SEGMENT_64`.
+const READ_LC_SEGMENT_64: u32 = 0x19;
+/// `LC_MAIN`, the load command naming a modern Mach-O's entry point as a file
+/// offset into `__TEXT`.
+const READ_LC_MAIN: u32 = 0x8000_0028;
+
+/// The little-endian `u32` at `at`, or `None` past the end.
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at.checked_add(4)?)?;
+    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// The little-endian `u64` at `at`, or `None` past the end.
+fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    let slice = bytes.get(at..at.checked_add(8)?)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(slice);
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Calls `visit` with `(cmd, offset)` for each load command of a thin 64-bit
+/// Mach-O, stopping the moment a command runs past the buffer. `None` only when
+/// the header itself cannot be read.
+fn each_load_command(bytes: &[u8], mut visit: impl FnMut(u32, usize)) -> Option<()> {
+    let ncmds = read_u32(bytes, 16)?;
+    let mut offset = HEADER_LEN as usize;
+    for _ in 0..ncmds {
+        let cmd = read_u32(bytes, offset)?;
+        let cmdsize = read_u32(bytes, offset + 4)? as usize;
+        if cmdsize < 8 || offset.checked_add(cmdsize)? > bytes.len() {
+            return Some(());
+        }
+        visit(cmd, offset);
+        offset = offset.checked_add(cmdsize)?;
+    }
+    Some(())
+}
+
+/// The `fileoff` of the segment named `name`, or `None`.
+fn segment_fileoff(bytes: &[u8], name: &str) -> Option<u64> {
+    let mut found = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd != READ_LC_SEGMENT_64 {
+            return;
+        }
+        let seg = bytes.get(at + 8..at + 24).unwrap_or(&[]);
+        let end = seg.iter().position(|&b| b == 0).unwrap_or(seg.len());
+        if String::from_utf8_lossy(&seg[..end]) == name {
+            found = read_u64(bytes, at + 40);
+        }
+    });
+    found
+}
+
+/// The absolute file offset the entry point resolves to, and `take` bytes of
+/// the machine code that sits there, read from a finished thin 64-bit Mach-O.
+pub struct EntryPoint {
+    /// The absolute file offset the entry point resolves to.
+    pub file_offset: u64,
+    /// The bytes found there.
+    pub bytes: Vec<u8>,
+}
+
+/// Reads the entry point of a finished thin 64-bit Mach-O, taking `take` bytes
+/// of code, or `None` when the file carries no `LC_MAIN` or no `__TEXT`.
+///
+/// The entry point is `LC_MAIN`'s `entryoff`, a file offset into `__TEXT`
+/// (`fileoff` `0` in an executable), so the absolute offset is
+/// `__TEXT.fileoff + entryoff`. The instrument reads the *bytes at the mapped
+/// entry*, not the `entryoff` field: an artifact runs its stub's first
+/// instructions iff those bytes survive the rewrite wherever the entry lands —
+/// whether a writer moved `__TEXT` and shifted `entryoff` to match, or left
+/// both untouched. See `docs/dev/log/E9.md`.
+pub fn entry_point(bytes: &[u8], take: usize) -> Option<EntryPoint> {
+    let text_fileoff = segment_fileoff(bytes, "__TEXT")?;
+    let mut entryoff = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd == READ_LC_MAIN {
+            entryoff = read_u64(bytes, at + 8);
+        }
+    });
+    let file_offset = text_fileoff.checked_add(entryoff?)?;
+    let start = usize::try_from(file_offset).ok()?;
+    let slice = bytes.get(start..start.checked_add(take)?)?;
+    Some(EntryPoint {
+        file_offset,
+        bytes: slice.to_vec(),
+    })
+}

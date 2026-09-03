@@ -1574,11 +1574,12 @@ fn write_artifact(
     Ok((packed.len, hex::encode(packed.sha256)))
 }
 
-/// [`write_artifact`]'s darwin arm: instead of appending a trailer, the
-/// payload goes into a `__GINARY,__payload` Mach-O section, ad-hoc signed
-/// once it is written. See [`crate::sign_macos`] and ADR
+/// [`write_artifact`]'s darwin arm: the payload is appended inside the stub's
+/// `__LINKEDIT` segment, which is grown to hold it, and the finished file is
+/// ad-hoc signed so the signature covers it. See [`crate::sign_macos`] and ADR
 /// [0016](../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md)
-/// for why a Mach-O cannot be built the ELF/PE way.
+/// for why a Mach-O cannot be built the plain ELF/PE way, and why the payload
+/// cannot live in a new section either.
 ///
 /// Unlike [`write_artifact`] above, this does not go through a temporary
 /// file and an atomic rename — [`crate::sign_macos::inject_and_sign`] writes

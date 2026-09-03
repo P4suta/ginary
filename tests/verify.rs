@@ -268,7 +268,7 @@ fn an_object_built_for_another_machine_is_a_mismatch() {
         report.issues,
         vec![Issue::MachineMismatch {
             path: NATIVE_PATH.to_owned(),
-            found: ginary::target::Target::host().arch.as_str().to_owned(),
+            found: repack::native_machine(),
             expected: foreign.arch.as_str().to_owned(),
         }]
     );
@@ -291,8 +291,8 @@ fn a_manifest_row_naming_native_code_the_artifact_does_not_carry_is_an_issue() {
                 NativeRef {
                     path: NATIVE_PATH.to_owned(),
                     kind: NativeKind::Elf,
-                    machine: Some(ginary::target::Target::host().arch.as_str().to_owned()),
-                    target: Some(ginary::target::Target::host()),
+                    machine: Some(repack::native_machine()),
+                    target: Some(repack::native_target()),
                     replaced: false,
                     source: None,
                 },
@@ -346,7 +346,7 @@ fn a_manifest_row_that_lies_about_an_objects_machine_is_an_issue() {
         vec![Issue::NativeMachineLie {
             path: NATIVE_PATH.to_owned(),
             recorded: "s390x".to_owned(),
-            actual: ginary::target::Target::host().arch.as_str().to_owned(),
+            actual: repack::native_machine(),
         }],
         "the manifest is held to the bytes the payload really carries"
     );

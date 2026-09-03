@@ -369,19 +369,57 @@ jobs:
             "$GITHUB_WORKSPACE/target/release/ginary" build \
               --target "${{ matrix.target }}" )
           artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
+          # Diagnostic: the stub's load commands beside the finished artifact's.
+          # A valid signature over a structurally broken image verifies and then
+          # segfaults on exec (exit 139), which is what both runners reported on
+          # run 33724862229: the E8 writer injected a new segment, and making
+          # room for its load command slid the code forward — invalidating the
+          # entry point and every LC_DYLD_CHAINED_FIXUPS rebase target, which the
+          # signature happily covered. E9 rewrote the writer to grow __LINKEDIT
+          # over the payload instead, moving nothing. These dumps are the
+          # evidence: __TEXT's fileoff/filesize, LC_MAIN's entryoff and every
+          # segment before __LINKEDIT must read identically in both columns, and
+          # only __LINKEDIT's filesize/vmsize and LC_CODE_SIGNATURE's
+          # dataoff/datasize may differ. They cost a second on the third round
+          # of this bug and stay for the fourth. See docs/dev/log/E9.md.
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          stub="$GITHUB_WORKSPACE/target/stubs/ginary-stub-${version}-${{ matrix.target }}"
+          fields='cmd |segname|fileoff|filesize |vmaddr|vmsize|entryoff|dataoff|datasize'
+          echo "== stub load commands =="
+          otool -l "$stub" | grep -E "$fields" || true
+          echo "== artifact load commands =="
+          otool -l "$artifact" | grep -E "$fields" || true
           # The signature is read and checked *before* the artifact is run, and
           # not only after it. An invalid ad-hoc signature is not a program
           # that starts and misbehaves: the kernel refuses to map a page whose
           # hash disagrees with the CodeDirectory and kills the process with
-          # SIGKILL before `main`, which is all both runners reported on
-          # 2026-09-03 — a bare `Killed: 9` and exit 137, with `codesign` never
-          # reached. Checking first turns that back into a sentence naming the
-          # defect, and `--display` prints the geometry a future one needs:
-          # the CDHash, the flags, the hash type and the executable segment.
-          # See docs/dev/log/E8.md.
+          # SIGKILL before `main`. Checking first turns that back into a sentence
+          # naming the defect, and `--display` prints the geometry a future one
+          # needs: the CDHash, the flags, the hash type and the executable
+          # segment. See docs/dev/log/E8.md and docs/dev/log/E9.md.
           codesign --display --verbose=4 "$artifact" || true
           codesign --verify --strict --verbose=4 "$artifact"
+          # Run the artifact, and on any non-zero exit print the crash report the
+          # runner keeps before failing: a low faulting address is a null deref
+          # in our own first instructions, a fault inside dyld is a malformed
+          # image. The exit code is still asserted — the diagnostics do not
+          # soften it.
+          set +e
           "$artifact" 0 hello world
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the hello_ffi artifact exited $status, not 0"
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \
+              -name '*.ips' 2>/dev/null || true
+            for report in "$HOME"/Library/Logs/DiagnosticReports/hello_ffi-*.ips; do
+              [ -f "$report" ] && { echo "== $report =="; cat "$report"; }
+            done
+            log show --last 5m \
+              --predicate 'process == "hello_ffi-${{ matrix.target }}"' 2>/dev/null \
+              | tail -n 40 || true
+            exit "$status"
+          fi
           set +e; "$artifact" 3; test $? -eq 3; set -e
           # And again afterwards: the artifact extracts its payload into a
           # cache directory and must not have touched its own file to do it.

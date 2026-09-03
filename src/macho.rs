@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Read-only inspection of Mach-O binaries.
 //!
-//! macOS is the one platform where the payload does not sit at the end of
-//! the file: appending bytes after a Mach-O's `__LINKEDIT` segment breaks
+//! macOS is the one platform where the payload does not sit plainly at the end
+//! of the file: appending bytes after a Mach-O's `__LINKEDIT` segment breaks
 //! `codesign --strict`, and the arm64 kernel refuses to map a page whose
-//! signature it cannot verify. So a macOS artifact carries its payload in a
-//! dedicated `__GINARY,__payload` section instead, ad-hoc signed after the
-//! section is written; see [`crate::sign_macos`] and `docs/format.md`.
+//! signature it cannot verify. So [`crate::sign_macos`] appends the payload
+//! *inside* `__LINKEDIT` — growing that segment so it still ends the file and
+//! the ad-hoc signature covers it — and [`crate::payload::locate`] finds the
+//! payload's trailer just before the signature by reading [`code_signature`].
+//! An older ginary wrote the payload into a dedicated `__GINARY,__payload`
+//! section, and this module still reads one; see `docs/format.md` and ADR
+//! [0016](../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md).
 //!
 //! This module answers the questions [`crate::payload::locate`] and
 //! `stub::verify` ask of a Mach-O file: which CPU it is built for, whether it
 //! is a fat binary (neither caller may proceed past one — a stub and a
 //! launcher both need one architecture, not a bundle of them, though saying
 //! so is [`MachoFacts::is_fat`] rather than a refusal this module makes on
-//! its own), whether it already carries a code signature, and where a named
-//! section is.
+//! its own), whether it already carries a code signature and where that
+//! signature is, and where a named section is.
 //!
 //! Like [`crate::elf`], every byte this module reads may have come from
 //! someone other than ginary, so nothing here may panic: a random byte
@@ -309,4 +313,56 @@ pub fn section(bytes: &[u8], segment: &str, section: &str) -> Option<(u64, u64)>
         .into_iter()
         .find(|(seg, sect, _, _)| seg == segment && sect == section)
         .map(|(_, _, offset, size)| (offset, size))
+}
+
+/// The `dataoff` and `datasize` of a thin Mach-O's `LC_CODE_SIGNATURE`, or
+/// [`None`] when it carries none.
+///
+/// A ginary-signed macOS artifact ends with its ad-hoc signature, and its
+/// payload's trailer sits immediately before that signature, so
+/// [`crate::payload::locate`] reads `dataoff` here and parses the trailer at
+/// `dataoff - TRAILER_LEN`. The two numbers are read straight from the load
+/// command rather than through [`MachoFacts`], the same reason [`section`] is
+/// its own function: the caller wants exactly a `pread`'s worth of arithmetic.
+pub fn code_signature(bytes: &[u8]) -> Option<(u64, u64)> {
+    // The load commands sit at the front of the file. `bytes` may be only the
+    // head of a large artifact, which is enough: this walks the command area
+    // by hand rather than through `object`, so it never needs a byte past the
+    // last load command it reads.
+    //
+    // The hand walk reads `ncmds` at offset 16 and starts the load commands at
+    // offset 32 with little-endian fields, which is the 64-bit little-endian
+    // header layout and only that one: a 32-bit [`MH_MAGIC`] header is 28 bytes
+    // and the byte-swapped [`MH_CIGAM`]/[`MH_CIGAM_64`] forms carry big-endian
+    // fields, so those magics would be misparsed here. ginary writes and signs
+    // only 64-bit little-endian Mach-O (macos-aarch64 and macos-x86_64), so
+    // this restricts to [`MH_MAGIC_64`] rather than parse the other three
+    // wrongly; a differently shaped Mach-O simply reports no signature.
+    let magic = magic_of(bytes)?;
+    if magic != MH_MAGIC_64 {
+        return None;
+    }
+    let read_u32_le = |at: usize| -> Option<u32> {
+        let four = bytes.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+    };
+    let ncmds = read_u32_le(16)?;
+    let mut offset = 32usize;
+    for _ in 0..ncmds {
+        let cmd = read_u32_le(offset)?;
+        let cmdsize = read_u32_le(offset.checked_add(4)?)? as usize;
+        if cmdsize < 8 {
+            return None;
+        }
+        // `LC_CODE_SIGNATURE`; `object::macho`'s own constant is a
+        // `LoadCommandType`, not the raw `u32` this hand walk reads.
+        const LC_CODE_SIGNATURE: u32 = 0x1d;
+        if cmd == LC_CODE_SIGNATURE {
+            let dataoff = read_u32_le(offset.checked_add(8)?)?;
+            let datasize = read_u32_le(offset.checked_add(12)?)?;
+            return Some((u64::from(dataoff), u64::from(datasize)));
+        }
+        offset = offset.checked_add(cmdsize)?;
+    }
+    None
 }

@@ -15,11 +15,14 @@ platform and the launcher code inside it is the same code that ships in the CLI.
 +-----------------------------+  offset = file_len
 ```
 
-On macOS the trailer and payload are not appended: they are placed in a `__GINARY,__payload`
-Mach-O section, with the same 64-byte structure at the start of the section and
-`payload_offset` relative to the section start. Appending bytes to a Mach-O file breaks
-`codesign --strict` and is killed by the kernel on arm64. Everything downstream of the locator
-sees only a `(file, offset, len)` stream, so ELF, PE and Mach-O share one implementation.
+On macOS the payload is not appended *after* the file: it is appended *inside* the stub's
+`__LINKEDIT` segment, which is grown to cover it, and the finished file is ad-hoc signed so the
+signature covers the payload too. Appending bytes after `__LINKEDIT` breaks `codesign --strict`
+and the arm64 kernel refuses an unsigned page; carving a new section instead makes room for its
+load command by sliding the code, which invalidates the entry point and every chained-fixup
+target — the image verifies and segfaults. Growing `__LINKEDIT` adds no load command and moves
+no byte. Everything downstream of the locator sees only a `(file, offset, len)` stream, so ELF,
+PE and Mach-O share one implementation.
 
 ## Trailer
 
@@ -55,57 +58,63 @@ missing magic means "this is the tool"; a broken magic means "this is a broken a
 The cache key is the first eight bytes of `sha256`, in lower-case hexadecimal: sixteen
 characters, `Trailer::cache_key`.
 
-### Mach-O section container
+### Mach-O `__LINKEDIT` container
 
-Appending bytes after a Mach-O's `__LINKEDIT` segment — which the layout above does for ELF and
-PE — breaks `codesign --strict`, and the arm64 kernel refuses to map a page whose signature it
-cannot verify at all, not merely one whose signature disagrees. So a macOS artifact carries its
-payload a different way: a dedicated `__GINARY,__payload` section, written by `sign_macos.rs`
-and read back by `macho.rs`, with an ad-hoc `CodeDirectory` applied over the whole file
-afterwards. See `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for why a section and
-not a different offset within the file.
+Appending bytes *after* a Mach-O's `__LINKEDIT` segment — which the layout above does for ELF
+and PE — breaks `codesign --strict`, and the arm64 kernel refuses to map a page whose signature
+it cannot verify at all, not merely one whose signature disagrees. Carving a new
+`__GINARY,__payload` section instead was tried and falsified on two Macs: a new section needs a
+new load command, making room for it slides the code, and sliding the code invalidates the entry
+point and every `LC_DYLD_CHAINED_FIXUPS` target — the image verifies and segfaults. So a macOS
+artifact carries its payload a third way: it is appended *inside* `__LINKEDIT`, which is grown to
+cover it, with an ad-hoc `CodeDirectory` over the whole file afterwards. No load command is added
+and no existing byte moves. `sign_macos.rs` writes it, `macho.rs` and `payload::locate` read it
+back. See `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for the run that forced this.
 
 ```
-+-----------------------------------------------+
-|  stub (a ginary Mach-O, unmodified)            |
-|    ... its own segments and sections ...       |
-|  __GINARY,__payload section                    |
-|  +-------------------------------------------+ |  section offset 0
-|  |  trailer (64 bytes, payload_offset = 64)   | |
-|  +-------------------------------------------+ |  section offset 64
-|  |  payload (zstd stream)                     | |
-|  +-------------------------------------------+ |  section offset 64 + payload_len
-|  ... an LC_CODE_SIGNATURE load command and its |
-|      CodeDirectory, appended after signing ... |
++-------------------------------------------------+
+|  stub (a ginary Mach-O; code and segments        |
+|   byte-for-byte unchanged, __LINKEDIT grown)     |
+|    ... __TEXT, __DATA*, __LINKEDIT content ...    |
+|  +-------------------------------------------+   |  payload_offset (absolute)
+|  |  payload (zstd stream)                     |   |
+|  +-------------------------------------------+   |  payload_offset + payload_len
+|  |  trailer (64 bytes, payload_offset absolute)|  |
+|  +-------------------------------------------+   |  = LC_CODE_SIGNATURE dataoff
+|  |  ad-hoc CodeDirectory (the signature)      |   |
+|  +-------------------------------------------+   |  end of file, end of __LINKEDIT
 +-------------------------------------------------+
 ```
 
-The section's first 64 bytes are the same trailer struct the table above describes, with one
-field read differently: `payload_offset` is relative to the *section's* first byte rather than
-to the file's, and this format fixes it at exactly 64 — the payload immediately follows the
-trailer, and nothing else is in the section. `payload::locate` converts that to an absolute file
-offset as `section_file_offset + 64` before handing a `(file, offset, len)` stream to any reader,
-which is why nothing downstream of it — the launcher, `ginary inspect`, `ginary verify`,
-`cache::ensure_extracted` — has to know which container produced it.
+The trailer is the same 64-byte struct the table above describes, read exactly as an ELF's or a
+PE's is: `payload_offset` is an absolute file offset. It sits immediately before the ad-hoc
+signature, so it is not the last 64 bytes of the file the way an ELF's is — the signature is —
+and `payload::locate` finds it by reading `LC_CODE_SIGNATURE`'s `dataoff` and parsing the 64
+bytes that end there. An **unsigned** build (only the tests ask for one) drops the stale
+`LC_CODE_SIGNATURE` and writes nothing after the trailer, so its trailer *is* the last 64 bytes
+and the ordinary end-of-file reader finds it. Everything downstream of the locator is handed a
+`(file, offset, len)` stream and never learns which container produced it.
 
-Validation, over the section's raw bytes:
+Validation, in `payload::locate` order:
 
-1. `payload::locate` tries the end-of-file trailer first, unconditionally, for every target: an
-   ELF or a PE artifact is answered exactly as before this format existed, and a Mach-O is only
-   read as a section when the last 64 bytes of the file are not a trailer.
-2. If the file does not begin with a Mach-O magic (thin or fat), there is no section to look
-   up and the answer is the same `Ok(None)` a plain ginary command-line binary gets.
-3. A fat Mach-O carries more than one architecture and therefore no single section:
+1. The end-of-file trailer is tried first, unconditionally, for every target: an ELF, a PE and an
+   unsigned macOS build are answered exactly as before this container existed. A signed macOS
+   artifact ends in its signature, whose last 64 bytes are not a trailer, so it falls through.
+2. If the file does not begin with a Mach-O magic (thin or fat), the answer is the same
+   `Ok(None)` a plain ginary command-line binary gets.
+3. A fat Mach-O carries more than one architecture and therefore no single payload to find:
    `TrailerError::Fat`.
-4. If the file is thin and carries no `__GINARY,__payload` section, the answer is `Ok(None)`:
-   it is a plain macOS ginary stub or command-line binary.
-5. If the section is smaller than 64 bytes, or its first 64 bytes do not carry the trailer
-   magic, the section cannot hold a trailer at all: `TrailerError::Section`.
-6. Otherwise the 64 bytes are read as a trailer with the section's own size, plus the 64-byte
-   trailer length, in place of the file length the end-of-file case checks against: a
-   `payload_offset` or `payload_len` that does not make `64 + payload_len` equal the section's
-   size is `TrailerError::Geometry`, the same variant and the same message a truncated or
-   appended-to ELF or PE gets.
+4. If the thin file carries an `LC_CODE_SIGNATURE`, the 64 bytes ending at its `dataoff` are read
+   as a trailer, with `dataoff` in place of the file length: a `payload_offset`/`payload_len`
+   that does not make `payload_offset + payload_len + 64` equal `dataoff` is
+   `TrailerError::Geometry`. A signature with no ginary trailer in front of it is a plain signed
+   Mach-O, not an error, so a missing trailer magic falls through to the next step.
+5. As a compatibility path, a `__GINARY,__payload` section an older ginary wrote is still read:
+   its first 64 bytes are the same trailer with `payload_offset` relative to the section start
+   (fixed at 64), converted to an absolute offset as `section_file_offset + 64`. A section
+   smaller than 64 bytes or without the trailer magic is `TrailerError::Section`; a well-formed
+   one whose lengths disagree with its size is `TrailerError::Geometry`. A thin file with neither
+   an appended trailer nor such a section is `Ok(None)`.
 
 Only the artifact itself, the outermost Mach-O, has to be signed for the kernel to load it: an
 inner object inside the payload (a NIF, a port program) carries no such requirement. `macho.rs`

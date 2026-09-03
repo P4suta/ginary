@@ -19,8 +19,10 @@
 mod common;
 
 use common::codesign;
+use common::codesign::{CS_ADHOC, CS_LINKER_SIGNED};
 use common::macho::{
-    CPU_TYPE_X86_64, MH_EXECUTE, fat_header, real_fixture_bytes, thin_header, with_payload_section,
+    CPU_TYPE_X86_64, MH_EXECUTE, entry_point, fat_header, real_fixture_bytes, thin_header,
+    with_payload_section,
 };
 use ginary::macho::{self, MachoError};
 use ginary::payload::{PayloadVia, locate};
@@ -58,7 +60,7 @@ fn open(bytes: &[u8]) -> (std::fs::File, tempfile::TempDir) {
 }
 
 #[test]
-fn inject_and_sign_writes_a_section_that_locate_round_trips_unsigned() {
+fn inject_and_sign_appends_a_payload_that_locate_round_trips_unsigned() {
     let stub = real_fixture_bytes();
     let payload = b"the payload bytes a macOS artifact carries, unsigned run";
     let with_trailer = payload_with_trailer(payload, DIGEST);
@@ -77,33 +79,23 @@ fn inject_and_sign_writes_a_section_that_locate_round_trips_unsigned() {
 
     assert_eq!(report.cputype, "arm64");
     assert!(!report.signed, "CodeSign::None must not sign");
-    assert_eq!(report.section_size, TRAILER_LEN + payload.len() as u64);
+    assert_eq!(report.payload_size, TRAILER_LEN + payload.len() as u64);
 
     let written = std::fs::read(&out).expect("the output was written");
     let facts = macho::read(&written).expect("the output is still a whole Mach-O");
     assert!(
-        facts
-            .sections
-            .iter()
-            .any(|(seg, sect, offset, size)| seg == "__GINARY"
-                && sect == "__payload"
-                && *offset == report.section_offset
-                && *size == report.section_size),
-        "expected a (__GINARY, __payload, {}, {}) section among {:?}",
-        report.section_offset,
-        report.section_size,
-        facts.sections
-    );
-    assert!(
         !facts.has_code_signature,
-        "no LC_CODE_SIGNATURE was asked for"
+        "an unsigned build drops the stale LC_CODE_SIGNATURE, so there is none"
     );
 
+    // Unsigned, so nothing sits after the payload: its trailer is the last 64
+    // bytes of the file, exactly the shape every ELF and PE artifact has.
     let (file, _dir2) = open(&written);
     let found = locate(&file)
         .expect("the written artifact locates")
         .expect("its payload is there");
-    assert_eq!(found.via, PayloadVia::MachOSection);
+    assert_eq!(found.via, PayloadVia::EofTrailer);
+    assert_eq!(found.offset, report.payload_offset);
     assert_eq!(found.len, payload.len() as u64);
     assert_eq!(found.sha256, DIGEST);
     assert_eq!(
@@ -144,7 +136,20 @@ fn inject_and_sign_applies_an_adhoc_signature_when_asked() {
     let found = locate(&file)
         .expect("the signed artifact still locates")
         .expect("its payload is there");
+    // The signed artifact ends with its ad-hoc signature, so its payload is
+    // located through `LC_CODE_SIGNATURE`, not the end of the file — the
+    // production path a real signed macOS artifact takes. Pin the
+    // discriminant and the geometry to the same strength as the unsigned
+    // twin, so this branch is asserted rather than merely digested.
+    assert_eq!(found.via, PayloadVia::MachOAppended);
+    assert_eq!(found.offset, report.payload_offset);
+    assert_eq!(found.len, payload.len() as u64);
     assert_eq!(found.sha256, DIGEST);
+    assert_eq!(
+        &written[found.offset as usize..(found.offset + found.len) as usize],
+        payload,
+        "locate's offset must point at the exact payload bytes that were injected"
+    );
 }
 
 #[test]
@@ -383,7 +388,7 @@ fn the_ad_hoc_code_directory_describes_the_file_it_is_attached_to() {
 }
 
 #[test]
-fn the_payload_section_is_inside_what_the_ad_hoc_signature_covers() {
+fn the_payload_is_inside_what_the_ad_hoc_signature_covers() {
     let stub = real_fixture_bytes();
     let payload = b"a payload the signature has to be taken over, not around";
     let with_trailer = payload_with_trailer(payload, DIGEST);
@@ -403,16 +408,21 @@ fn the_payload_section_is_inside_what_the_ad_hoc_signature_covers() {
     let signature = codesign::signature(&written).expect("a signed artifact carries a signature");
 
     assert!(
-        report.section_offset + report.section_size <= signature.code_directory.code_limit,
-        "ADR 0016 puts the payload in a section so that the signature can cover it: the section \
-         is {}..{} and the hashes stop at {}",
-        report.section_offset,
-        report.section_offset + report.section_size,
+        report.payload_offset + report.payload_size <= signature.code_directory.code_limit,
+        "ADR 0016 grows __LINKEDIT over the payload so the signature covers it: the payload is \
+         {}..{} and the hashes stop at {}",
+        report.payload_offset,
+        report.payload_offset + report.payload_size,
         signature.code_directory.code_limit
     );
 
     let linkedit =
         codesign::segment(&written, "__LINKEDIT").expect("a Mach-O program carries __LINKEDIT");
+    assert!(
+        linkedit.fileoff <= report.payload_offset,
+        "the payload lives inside __LINKEDIT, which starts at {}",
+        linkedit.fileoff
+    );
     assert!(
         linkedit.fileoff <= signature.data_offset,
         "the signature lives inside __LINKEDIT, which starts at {}",
@@ -421,6 +431,95 @@ fn the_payload_section_is_inside_what_the_ad_hoc_signature_covers() {
     assert_eq!(
         linkedit.fileoff + linkedit.filesize,
         written.len() as u64,
-        "__LINKEDIT's filesize is grown to hold the signature that was appended to it"
+        "__LINKEDIT's filesize is grown to hold the payload and the signature appended to it"
+    );
+}
+
+// ------------------------------------------------- E9: verifies AND runs --
+//
+// On both macOS runners of CI run 33724862229 the artifact's signature was
+// valid (`codesign --verify --strict --verbose=4` exited 0) and the binary
+// then segfaulted on exec (exit 139). A valid signature over a structurally
+// broken image is exactly what these tests catch on Linux: they hold the
+// output of the real `inject_and_sign` to two invariants a runnable Mach-O has
+// that `codesign` does not check. See docs/dev/log/E9.md.
+
+/// The finished artifact must run the stub's own first instructions.
+///
+/// `inject_and_sign` inserts the payload segment where `__LINKEDIT` began and
+/// shifts every following byte of file content forward by a whole page, but it
+/// does not move `LC_MAIN`'s `entryoff` with them: the entry point still names
+/// the file offset the code used to sit at, which now holds load-command bytes.
+/// The kernel jumps there and the process faults. The invariant is expressed
+/// against the *bytes at the mapped entry*, so it holds whichever way the fix
+/// keeps them there.
+#[test]
+fn an_injected_artifact_runs_the_stubs_own_entry_instructions() {
+    let stub = real_fixture_bytes();
+    let stub_entry = entry_point(&stub, 32).expect("the stub is a Mach-O with an LC_MAIN entry");
+
+    let payload = b"a macOS artifact that must run, not merely verify";
+    let with_trailer = payload_with_trailer(payload, DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+    inject_and_sign(
+        &stub,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect("injecting and signing a real thin Mach-O stub succeeds");
+    let written = std::fs::read(&out).expect("the output was written");
+
+    let out_entry = entry_point(&written, 32).expect("the finished artifact still has an entry");
+    assert_eq!(
+        out_entry.bytes, stub_entry.bytes,
+        "the finished artifact's entry point (file offset {}) must hold the stub's own first \
+         instructions (from file offset {}); a validly signed image that jumps into its own load \
+         commands is the segfault CI saw",
+        out_entry.file_offset, stub_entry.file_offset
+    );
+}
+
+/// The finished artifact must not claim to have been linker-signed.
+///
+/// The ad-hoc `CodeDirectory` `inject_and_sign` writes sets `flags` to
+/// `CS_ADHOC | CS_LINKER_SIGNED` (`0x20002`), which `codesign --display`
+/// renders as `flags=0x20002(adhoc,linker-signed)`. ginary rewrote and
+/// re-signed this binary; it did not come out of a linker, so the
+/// `CS_LINKER_SIGNED` bit asserts a provenance that is no longer true. Only
+/// `CS_ADHOC` may stand.
+#[test]
+fn an_injected_artifact_does_not_claim_to_be_linker_signed() {
+    let stub = real_fixture_bytes();
+    let payload = b"a macOS artifact ginary rewrote and signed itself";
+    let with_trailer = payload_with_trailer(payload, DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+    inject_and_sign(
+        &stub,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect("injecting and signing a real thin Mach-O stub succeeds");
+    let written = std::fs::read(&out).expect("the output was written");
+
+    let signature =
+        codesign::signature(&written).expect("a signed artifact carries an embedded signature");
+    let flags = signature.code_directory.flags;
+    assert_eq!(
+        flags & CS_LINKER_SIGNED,
+        0,
+        "a binary ginary rewrote must not claim CS_LINKER_SIGNED; flags were {flags:#x}"
+    );
+    assert_eq!(
+        flags & CS_ADHOC,
+        CS_ADHOC,
+        "the signature is still ad-hoc; flags were {flags:#x}"
     );
 }

@@ -73,10 +73,15 @@ pub enum PayloadVia {
     /// The 64-byte trailer at the end of the file — every ELF, every PE, and
     /// every artifact this crate wrote before its D3 milestone.
     EofTrailer,
-    /// The `__GINARY,__payload` Mach-O section: a macOS artifact, whose
-    /// payload cannot be appended after the file's own `__LINKEDIT` without
-    /// breaking code signing. See `docs/format.md`.
+    /// The `__GINARY,__payload` Mach-O section an older ginary wrote. Read
+    /// still, no longer written. See `docs/format.md`.
     MachOSection,
+    /// A macOS artifact whose payload was appended inside `__LINKEDIT`, just
+    /// before the ad-hoc signature that ends the file: the 64-byte trailer sits
+    /// at `LC_CODE_SIGNATURE`'s `dataoff` minus its own length. This is what
+    /// [`crate::sign_macos`] writes; see `docs/format.md` and ADR
+    /// [0016](../../docs/adr/0016-macho-section-payload-and-adhoc-signing.md).
+    MachOAppended,
 }
 
 /// Where a packaged application's payload is, however its container found
@@ -101,17 +106,19 @@ pub struct PayloadLoc {
 /// Finds where `file`'s payload is.
 ///
 /// The end-of-file trailer is tried first, which is what every ELF, every PE
-/// and every artifact this crate wrote before D3 already carries: reading it
-/// is unchanged, so nothing that already locates a payload this way has to
-/// know this function exists. Only when the last 64 bytes are not a trailer,
-/// and only when the file begins with a Mach-O magic, does `locate` look up
-/// the `__GINARY,__payload` section through [`crate::macho`]: its first 64
-/// bytes are the same trailer struct, with `payload_offset` relative to the
-/// section's own start rather than to the file, which this function converts
-/// to an absolute offset.
+/// and an unsigned macOS build carry: reading it is unchanged, so nothing that
+/// already locates a payload this way has to know this function exists. Only
+/// when the last 64 bytes are not a trailer, and only when the file begins with
+/// a Mach-O magic, does `locate` look further. A ginary-signed macOS artifact
+/// ends with its ad-hoc signature, with the payload's trailer just before it,
+/// so `locate` reads `LC_CODE_SIGNATURE`'s `dataoff` and parses the trailer at
+/// `dataoff - 64`. Failing that, it looks up the `__GINARY,__payload` section
+/// an older ginary wrote, whose first 64 bytes are the same trailer struct with
+/// `payload_offset` relative to the section's own start.
 ///
 /// Returns [`None`] when `file` carries no payload at all: it is the ginary
-/// command line tool, or a Mach-O with no `__GINARY,__payload` section.
+/// command line tool, or a Mach-O with neither an appended payload nor a
+/// `__GINARY,__payload` section.
 ///
 /// # Errors
 ///
@@ -150,6 +157,40 @@ pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
     if facts.is_fat {
         return Err(TrailerError::Fat);
     }
+
+    // A ginary-signed macOS artifact ends with its ad-hoc signature, so the
+    // payload's trailer cannot be the last 64 bytes of the file; it sits
+    // immediately before the signature. Read `LC_CODE_SIGNATURE`'s `dataoff`
+    // and parse the trailer that ends there, with `dataoff` standing in for
+    // the file length the same way the section path passes its own region
+    // length below. A signature with no ginary trailer in front of it is not
+    // an error here — it is a plain signed Mach-O with no payload — so a
+    // trailer whose magic is absent falls through to the section lookup.
+    //
+    // `head` is only the front of the file, so `code_signature` cannot check
+    // `dataoff` against the real length: a malformed or truncated image can
+    // name a `dataoff` past EOF. Reading the trailer there would fail and
+    // surface as a spurious `TrailerError::Io`, so the trailer window is
+    // range-checked against `file_len` first, and an out-of-range signature
+    // falls through to the section lookup exactly as a magicless one does.
+    if let Some((dataoff, _datasize)) = crate::macho::code_signature(&head)
+        && let Some(trailer_at) = dataoff.checked_sub(TRAILER_LEN)
+        && trailer_at
+            .checked_add(TRAILER_LEN)
+            .is_some_and(|end| end <= file_len)
+    {
+        let mut inner = [0u8; TRAILER_LEN as usize];
+        crate::trailer::read_exact_at(file, &mut inner, trailer_at).map_err(TrailerError::Io)?;
+        if let Some(trailer) = Trailer::parse(&inner, dataoff)? {
+            return Ok(Some(PayloadLoc {
+                offset: trailer.payload_offset,
+                len: trailer.payload_len,
+                sha256: trailer.payload_sha256,
+                via: PayloadVia::MachOAppended,
+            }));
+        }
+    }
+
     let Some((section_offset, section_size)) = crate::macho::section(
         &head,
         crate::macho::PAYLOAD_SEGMENT,

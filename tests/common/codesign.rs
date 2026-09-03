@@ -36,6 +36,11 @@ pub const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
 pub const CSSLOT_CODEDIRECTORY: u32 = 0;
 /// `CS_ADHOC`: the signature asserts no identity.
 pub const CS_ADHOC: u32 = 0x0000_0002;
+/// `CS_LINKER_SIGNED`: the flag a linker sets on a signature it produced as
+/// part of the link. A binary ginary rewrote and re-signed did not come from a
+/// linker, so it may not carry this: the flag claims a provenance that is no
+/// longer true. See `docs/dev/log/E9.md`.
+pub const CS_LINKER_SIGNED: u32 = 0x0002_0000;
 /// The alignment `ld` gives the code signature, and `codesign` expects.
 pub const SIGNATURE_ALIGNMENT: u64 = 16;
 

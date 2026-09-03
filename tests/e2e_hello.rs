@@ -780,10 +780,13 @@ fn build_fixture_with(args: &[&str]) -> BuiltProject {
 
 /// `build/ginary/<app>-<host target>`, the name an explicit `--target` writes.
 fn suffixed_artifact(project: &BuiltProject) -> std::path::PathBuf {
-    project
-        .root()
-        .join("build/ginary")
-        .join(format!("{APP}-{}", Target::host().name()))
+    // The artifact carries the host target's executable suffix — `.exe` on
+    // Windows, nothing elsewhere — the same as the file `ginary build` writes.
+    project.root().join("build/ginary").join(format!(
+        "{APP}-{}{}",
+        Target::host().name(),
+        Target::host().exe_suffix()
+    ))
 }
 
 #[test]
@@ -893,7 +896,10 @@ fn the_same_target_named_twice_produces_one_artifact() {
 
     assert_eq!(
         written,
-        vec![format!("{APP}-{host}"), format!("{APP}-{host}.json")],
+        vec![
+            format!("{APP}-{host}{}", Target::host().exe_suffix()),
+            format!("{APP}-{host}.json")
+        ],
         "`host` and the host's own name are one target, so one artifact and one manifest"
     );
 }

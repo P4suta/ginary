@@ -44,3 +44,14 @@ path = ["tests/fixtures/macho/inet_gethost-aarch64-apple-darwin"]
 precedence = "override"
 SPDX-FileCopyrightText = "Ericsson AB and the Erlang/OTP contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# `erts-17.0.5/bin/inet_gethost` from the Erlang/OTP 29.0.5 toolchain, stripped
+# of symbols, debug and notes, so the tests that plant a real ELF in a payload
+# have a genuine x86_64 Linux binary a linker wrote rather than the test's own
+# executable. A binary carries no SPDX header; the path is declared here
+# instead. See tests/fixtures/elf/README.md.
+[[annotations]]
+path = ["tests/fixtures/elf/inet_gethost-x86_64-linux-gnu"]
+precedence = "override"
+SPDX-FileCopyrightText = "Ericsson AB and the Erlang/OTP contributors"
+SPDX-License-Identifier = "Apache-2.0"

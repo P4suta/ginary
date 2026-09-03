@@ -161,9 +161,15 @@ pub fn resolve(env: &EnvSnapshot, os: Os) -> Result<CacheDir, CacheDirError> {
 mod tests {
     use super::*;
 
-    /// [`resolve`] for the host, which is what every rule below is about.
+    /// [`resolve`] for a host that reads `GINARY_CACHE_DIR`/`XDG_CACHE_HOME`/
+    /// `HOME` — every rule below is one of that unix precedence, so it is
+    /// pinned to [`Os::Linux`] rather than to `platform::HOST`. On Linux the two
+    /// are the same; on Windows `platform::HOST` selects the `%LOCALAPPDATA%`
+    /// resolver instead (that dispatch is [`crate::platform::has_local_app_data`]'s
+    /// own unit test, and the Windows base its own regression), so asking these
+    /// unix-variable rules of it would answer `Unresolved` and prove nothing.
     fn resolve_host(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
-        resolve(env, crate::platform::HOST)
+        resolve(env, crate::target::Os::Linux)
     }
 
     fn snapshot(ginary: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> EnvSnapshot {
