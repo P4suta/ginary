@@ -366,7 +366,7 @@ pub fn staging_tree(root: &Path) -> StagingTree {
         files.push(StagedFile {
             path: path.to_owned(),
             size: data.len() as u64,
-            mode,
+            mode: recorded_mode(mode, false),
             category,
         });
     }
@@ -397,6 +397,23 @@ pub fn staging_tree(root: &Path) -> StagingTree {
     StagingTree {
         root: root.to_path_buf(),
         listing,
+    }
+}
+
+/// The mode a file written with [`set_mode`] actually carries afterwards.
+///
+/// `requested` where the filesystem has permission bits, and
+/// [`ginary::platform::modeless_mode`] where it has none — which is what
+/// `ginary.index.json` records there and what `HeaderMode::Deterministic`
+/// writes into the payload header. A staging listing that claims `0o755` on a
+/// platform whose [`set_mode`] is a no-op is a listing that disagrees with the
+/// tree it describes, and `ginary verify` reported exactly that against a
+/// healthy artifact on the first Windows runner; see `docs/dev/log/E8.md`.
+pub fn recorded_mode(requested: u32, is_dir: bool) -> u32 {
+    if ginary::platform::has_unix_modes(ginary::platform::HOST) {
+        requested
+    } else {
+        ginary::platform::modeless_mode(is_dir)
     }
 }
 

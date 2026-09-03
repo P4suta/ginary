@@ -54,7 +54,7 @@
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub. D3 adds three darwin cases over a hand-fabricated Mach-O carrying an appended marker, against the real Mach-O arm of `check_object`: a matching `cputype` accepted, a mismatched one refused by the header, and one already carrying a `__GINARY,__payload` section refused as an artifact. The RED-phase placeholder `a_darwin_stub_cannot_be_checked_here_yet`, which pinned the old `StubError::NotYetSupported` answer, is gone — it asserted the very behaviour these three replace |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
-| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, `cli`-gated): the section written at the offset and size `macho.rs` itself reports back, unsigned and ad-hoc signed, `payload::locate` round-tripping the exact bytes and digest injected, and the typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host |
+| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, extended E8; `cli`-gated): the section written at the offset and size `macho.rs` itself reports back, unsigned and ad-hoc signed, `payload::locate` round-tripping the exact bytes and digest injected, and the typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host. E8 added the *validity* half through `tests/common/codesign.rs`: every code slot is the SHA-256 of the page it stands for (the signature covers the finished file, not the bytes before the last four fields were patched in), the signature begins on a 16-byte boundary and is the last thing in the file, the `CodeDirectory` describes the file it is attached to (`codeLimit`, one slot per page, `execSeg` naming `__TEXT` as finally laid out), and the payload section stays inside what the signature covers — the geometry the E8 page-alignment fix must not disturb |
 | `tests/download.rs` | one HTTPS fetch against a hand-rolled loopback server: the body written and the part file gone, a checksum and a length mismatch naming both values, a 500 retried and a 404 asked exactly once, a truncated body retried, three failures exhausting the attempts, the offline refusal that opens no socket, and the policy — the part file's name, the backoff schedule, the retryable statuses, one spelling of a digest, the base overrides and the two environment variables; and the same six questions asked of `get_text`, the release-API reader — a body back verbatim under the GitHub accept header, a 500 retried, a 404 asked once, a body over `MAX_TEXT_BYTES` refused rather than read into memory, the offline refusal naming no file, and a read that goes through the base override |
 | `tests/catalog.rs` | the catalog: every field of schema 1 and an unknown key surviving at two levels, the schema and parse errors, the three sources with first-found winning the whole file, the selection rules — the host release, an exact version, the musl default, a named variant, ambiguity and each miss listing what is there — the version guard inside `select`, URL resolution against the catalog's own directory, and the cache: the completion marker, a warm cache needing no network, the whole cold path, a markerless extraction thrown away, the offline error travelling, a tarball keyed by its own digest, and the strict extractor's four refusals over hand-built archives — a symlink, a `..` path, an absolute path and a device node, each named and each leaving no runtime behind. D3 adds the `erlef/otp_builds` asset name for each arch, pinned against the real `OTP-29.0.5` release, and the commit guard that only admits an entry whose `otp_release` matches the host's own |
 | `tests/otp_repack.rs` | the local pipeline: the six-row upstream asset table and four combinations it has none for, the selector grammar, the tag-to-version rule, the prune list against components rather than substrings, the dereference and the assertion that guards the strict extractor, and the pipeline itself over a fake upstream asset — the entry's fields, `SOURCE_DATE_EPOCH`, URLs relative to the catalog, a mislabelled asset refused before anything is written, and the injected ELF reader's error travelling; and the release API driven against a scripted server through `Net`'s base override — the digest it reported pinned into the entry, a body that does not match it refused, an asset carrying no digest refused rather than pinned to nothing, a release holding another architecture's asset, and a document that is not a release |
@@ -403,7 +403,18 @@ developer had Erlang installed has proved nothing.
 `tests/common/payload.rs` is what A3a added, and it builds no tree at all in the `FakeOtp` sense:
 it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
 (`staging_tree`), and the two instruments those tests read through, `CountingReader` and
-`SharedSink`. The two policy sections below say why each exists.
+`SharedSink`. The two policy sections below say why each exists. E8 added `recorded_mode(requested,
+is_dir)`: the mode a staging fixture records for a file — the value asked for where the host has
+permission bits, and `platform::modeless_mode` where it does not — so a fixture built on a Windows
+host records the same `0o644`/`0o755` its filesystem and the `tar` header do, rather than a mode
+the filesystem discarded. It was the fixture-side half of A1 (the `0o755` a no-op `set_mode` left
+in the listing was what `ginary verify` reported five mismatches over), and `staging_tree` now
+routes every file's mode through it.
+
+`tests/common/native.rs` gained `host_object_target` in E8's Fix round 2: the target an object
+built with `host_machine()` and `host_interp()` actually describes. It is a Linux ELF with a
+glibc or musl `PT_INTERP` whatever machine wrote it, and a test that expected `Target::host()`
+out of `native::scan_shipment` was reading the two as one value because on a Linux host they are.
 
 `tests/common/stubfile.rs` is what C2 added, and it builds the two shapes of fixture the stub
 half needs. `Marker` is the four fields of an identity marker held as *text*, so a test can write
@@ -485,6 +496,21 @@ so a test that asserted a real artifact verifies with no findings at all was ass
 property of one machine's OTP build. The expectation is computed from the installation, which
 makes the two sides of that assertion two different files.
 
+E8's Fix round 2 added the rule that decides when a test may be scoped to one platform at all,
+because the Windows runner made the difference matter. **A test may be scoped to a platform when
+its subject only exists there; it may not be scoped to a platform to avoid a failure that is
+about the product.** The first kind is a claim whose fixture the other platform cannot supply —
+`tests/elf.rs`'s reads of `current_exe` and of the host OTP tree's `beam.smp` (only a Linux host
+links an ELF and ships an ELF emulator), `tests/cli.rs`'s three `elf deps` claims about the
+binary this run built, and `tests/native.rs`'s seven hook claims (`native::HOOK_SHELL` is
+`/bin/sh` on every host by decision, so a host without a POSIX shell gets the documented
+`NativeError::HookProcess` instead). Every one of those leaves an ungated test that holds the
+contract on all three platforms — the not-an-ELF path, the format-blind half of `tests/elf.rs`,
+and `tests/regressions/c4_the_hook_shell_was_cmd_on_a_windows_host.rs`. The second kind is what
+`src/platform.rs` is for: a fact about an operating system, written once and asserted for every
+`Os` on the machine ginary is developed on. `docs/dev/log/E8.md` §16 keeps the ledger of which
+Windows failures are which.
+
 A scan is a proxy, and a better check exists on any machine with docker. `mingw-w64` is all a
 Linux host needs to type-check the whole tree for Windows, which is what the C sources of
 `zstd-sys` had made look impossible:
@@ -555,6 +581,20 @@ the file is `tests/fixtures/macho/`: a real, unmodified `aarch64-apple-darwin` b
 downloaded at test time, for the tests — `inject_and_sign`'s among them — that have to hold
 against load commands and segment geometry a real linker wrote rather than one this module
 fabricated.
+
+`tests/common/codesign.rs` is what E8 added, and it is the reading half of the ad-hoc signature
+`src/sign_macos.rs` writes — the counterpart to `macho.rs`, and, crucially, one that goes nowhere
+near `src/sign_macos.rs`, so a test written against it checks the signer rather than restating
+it. It walks the load commands to find `LC_CODE_SIGNATURE`, parses the `CSMAGIC_EMBEDDED_SIGNATURE`
+superblob and then the `CodeDirectory` field by field from Apple's `cs_blobs.h` layout (`version`,
+`flags`, `codeLimit`, `hashSize`/`hashType`/`pageSize`, `execSegBase`/`execSegLimit`, the code
+slots), and recomputes the SHA-256 of every 4096-byte page of the file below the signature with
+`sha2` — the value a kernel computes for itself as it faults each page in. `first_bad_slot` is the
+whole point: it returns the first slot whose stored hash is not the page's own (and the count
+disagreement first, so a directory claiming more slots than the file has pages is not read as
+agreement), which is the state that gets a Mach-O `SIGKILL`ed before `main`. `segments` and
+`segment` expose the load map for the page-alignment checks. It is not `cli`-gated, for the reason
+`macho.rs` is not.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,

@@ -29,7 +29,7 @@ use ginary::erts_source::{
     self, ElfFacts, ErtsError, ErtsSourceSpec, ResolvedErts, SpecError, emulator_path,
 };
 use ginary::manifest::{LibcRequirement, OtpProvenance};
-use ginary::target::{Linkage, Target};
+use ginary::target::{Libc, Linkage, Os, Target};
 
 use crate::common::fake_otp::FakeOtp;
 use crate::common::tools::require_tools;
@@ -576,6 +576,30 @@ fn the_emulator_of_a_root_is_the_beam_smp_under_its_erts_bin() {
 
 // ------------------------------------------------------ the real thing --
 
+/// Asserts the minimum-glibc a host runtime reports, whichever host runs it.
+///
+/// Only a dynamically-linked gnu Linux emulator carries a glibc floor
+/// ([`ginary::erts_source::resolve`] reads it off the ELF); a musl host, a
+/// macOS host ([`resolve_macos`]) and a Windows host ([`resolve_windows`]) all
+/// report [`None`], and a test that hard-coded `expect("a gnu host reports a
+/// minimum glibc")` failed on the first Windows runner against a runtime that
+/// was healthy. The rule is a property of the host's own libc, so it is stated
+/// here and holds on every machine the suite runs on.
+fn assert_host_libc_min(libc_min: Option<&str>) {
+    if Target::host().libc == Libc::Gnu {
+        let min = libc_min.expect("a gnu host reports a minimum glibc");
+        assert!(
+            min.split('.').all(|part| part.parse::<u32>().is_ok()),
+            "the minimum is a version and not a sentence: {min}"
+        );
+    } else {
+        assert_eq!(
+            libc_min, None,
+            "a host without gnu libc has no glibc floor to report"
+        );
+    }
+}
+
 #[test]
 fn the_host_runtime_resolves_to_the_host_target() {
     let Some(_tools) = require_tools(&["erl"]) else {
@@ -592,14 +616,7 @@ fn the_host_runtime_resolves_to_the_host_target() {
         "a distribution's own emulator is dynamically linked"
     );
     assert!(resolved.nif_loading, "and therefore loads NIFs");
-    let min = resolved
-        .libc_min
-        .as_deref()
-        .expect("a gnu host reports a minimum glibc");
-    assert!(
-        min.split('.').all(|part| part.parse::<u32>().is_ok()),
-        "the minimum is a version and not a sentence: {min}"
-    );
+    assert_host_libc_min(resolved.libc_min.as_deref());
     assert_eq!(
         resolved.provenance,
         format!("host:{}", resolved.otp.root.display()),
@@ -631,6 +648,12 @@ fn the_host_emulator_is_a_file_the_elf_reader_can_read() {
     let Some(_tools) = require_tools(&["erl"]) else {
         return;
     };
+    if Target::host().os != Os::Linux {
+        // Only a Linux host's emulator is an ELF; a macOS host ships a Mach-O
+        // and a Windows host a PE, each read by its own reader. The ELF path
+        // is what this test is about, so it runs where there is one.
+        return;
+    }
     let host = ginary::otp::discover(None).expect("the host runtime is discoverable");
     let emulator: &Path = &emulator_path(&host);
 

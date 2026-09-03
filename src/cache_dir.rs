@@ -13,18 +13,29 @@
 //! [`CacheDirError::Unresolved`], because a tool that silently wrote its
 //! output into `/tmp` would be a tool nobody could find the output of.
 //!
-//! The precedence is:
+//! The precedence on unix is:
 //!
 //! 1. `GINARY_CACHE_DIR` — used verbatim, the escape hatch for read-only or
 //!    `noexec` home directories;
 //! 2. `XDG_CACHE_HOME` — must be an absolute path, `ginary` is appended;
 //! 3. `HOME` — `.cache/ginary` is appended.
 //!
-//! Platform-specific bases (`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on
-//! Windows) are a later milestone; today every host follows the rules above.
+//! On Windows it is `GINARY_CACHE_DIR`, then `%LOCALAPPDATA%\ginary`, which is
+//! [`crate::cache::resolve_windows`]'s precedence and therefore the directory a
+//! packaged application on that machine already uses. A machine that sets none
+//! of them is [`CacheDirError::Unresolved`] on either platform. Which of the
+//! two rules applies is [`crate::platform::has_local_app_data`], asked of a
+//! named [`crate::target::Os`] rather than of a `#[cfg]`, so both answers are
+//! unit tested wherever ginary is built.
+//!
+//! `~/Library/Caches` on macOS is still a later milestone: macOS follows the
+//! unix rules above, as it does in the launcher.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+
+use crate::platform;
+use crate::target::Os;
 
 /// The environment variables cache resolution reads.
 ///
@@ -37,6 +48,8 @@ pub struct EnvSnapshot {
     pub xdg_cache_home: Option<OsString>,
     /// Value of `HOME`.
     pub home: Option<OsString>,
+    /// Value of `LOCALAPPDATA`, read only on Windows.
+    pub local_app_data: Option<OsString>,
 }
 
 impl EnvSnapshot {
@@ -46,6 +59,7 @@ impl EnvSnapshot {
             ginary_cache_dir: std::env::var_os("GINARY_CACHE_DIR"),
             xdg_cache_home: std::env::var_os("XDG_CACHE_HOME"),
             home: std::env::var_os("HOME"),
+            local_app_data: std::env::var_os(crate::cache::LOCALAPPDATA_VAR),
         }
     }
 }
@@ -59,6 +73,8 @@ pub enum Source {
     XdgCacheHome,
     /// `HOME` was set.
     Home,
+    /// `LOCALAPPDATA` was set, on Windows.
+    LocalAppData,
 }
 
 impl Source {
@@ -68,6 +84,7 @@ impl Source {
             Self::GinaryCacheDir => "GINARY_CACHE_DIR",
             Self::XdgCacheHome => "XDG_CACHE_HOME",
             Self::Home => "HOME",
+            Self::LocalAppData => crate::cache::LOCALAPPDATA_VAR,
         }
     }
 }
@@ -97,37 +114,40 @@ pub enum CacheDirError {
 /// common shell accident and an empty path would silently mean the current
 /// working directory. A relative `XDG_CACHE_HOME` is ignored, as the XDG base
 /// directory specification requires.
-pub fn resolve(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
-    // One implementation of the precedence, in `cache::resolve`. This is its
-    // build-side projection: the same three rules, and an error where the
-    // launcher has a `${TMPDIR}` fallback, because a build tool that silently
-    // wrote into `/tmp` would be a build tool nobody could find the output of.
+pub fn resolve(env: &EnvSnapshot, os: Os) -> Result<CacheDir, CacheDirError> {
+    // One implementation of the precedence, in `cache::resolve` and
+    // `cache::resolve_windows`. This is their build-side projection: the same
+    // rules, dispatched on the same platform question the launcher asks, and
+    // an error where the launcher has a fallback, because a build tool that
+    // silently wrote its output into a temporary directory would be a build
+    // tool nobody could find the output of.
     let mut pairs: Vec<(OsString, OsString)> = Vec::new();
     for (name, value) in [
         (crate::cache::GINARY_CACHE_DIR_VAR, &env.ginary_cache_dir),
         (crate::cache::XDG_CACHE_HOME_VAR, &env.xdg_cache_home),
         (crate::cache::HOME_VAR, &env.home),
+        (crate::cache::LOCALAPPDATA_VAR, &env.local_app_data),
     ] {
         if let Some(value) = value {
             pairs.push((OsString::from(name), value.clone()));
         }
     }
+    let snapshot = crate::cache::Env::from_pairs(pairs);
 
-    // The uid only ever reaches the fallback root, and the fallback is exactly
-    // the case this function refuses, so its value cannot be observed.
-    let resolved = crate::cache::resolve(&crate::cache::Env::from_pairs(pairs), 0);
+    // The uid and the user name only ever reach a fallback root, and both
+    // fallbacks are exactly the case this function refuses, so neither value
+    // can be observed in an `Ok`.
+    let resolved = if platform::has_local_app_data(os) {
+        crate::cache::resolve_windows(&snapshot, crate::cache::UNKNOWN_USER)
+    } else {
+        crate::cache::resolve(&snapshot, 0)
+    };
     let source = match resolved.origin {
         crate::cache::Origin::GinaryCacheDir => Source::GinaryCacheDir,
         crate::cache::Origin::XdgCacheHome => Source::XdgCacheHome,
         crate::cache::Origin::Home => Source::Home,
-        crate::cache::Origin::Fallback => return Err(CacheDirError::Unresolved),
-        // Unreachable: the snapshot above holds only the three portable
-        // variables, so `resolve` has nothing to reach a Windows root with.
-        // The build side's own Windows directory is not this function's — a
-        // stub cache under `%LOCALAPPDATA%` is a decision nothing has needed
-        // yet — and inventing a source here would be a projection of a rule
-        // that does not exist.
-        crate::cache::Origin::LocalAppData | crate::cache::Origin::WindowsFallback => {
+        crate::cache::Origin::LocalAppData => Source::LocalAppData,
+        crate::cache::Origin::Fallback | crate::cache::Origin::WindowsFallback => {
             return Err(CacheDirError::Unresolved);
         }
     };
@@ -141,17 +161,23 @@ pub fn resolve(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
 mod tests {
     use super::*;
 
+    /// [`resolve`] for the host, which is what every rule below is about.
+    fn resolve_host(env: &EnvSnapshot) -> Result<CacheDir, CacheDirError> {
+        resolve(env, crate::platform::HOST)
+    }
+
     fn snapshot(ginary: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> EnvSnapshot {
         EnvSnapshot {
             ginary_cache_dir: ginary.map(OsString::from),
             xdg_cache_home: xdg.map(OsString::from),
             home: home.map(OsString::from),
+            local_app_data: None,
         }
     }
 
     #[test]
     fn ginary_cache_dir_wins_and_is_used_verbatim() {
-        let resolved = resolve(&snapshot(
+        let resolved = resolve_host(&snapshot(
             Some("/srv/ginary-cache"),
             Some("/xdg"),
             Some("/home/u"),
@@ -163,29 +189,31 @@ mod tests {
 
     #[test]
     fn xdg_cache_home_gets_a_ginary_component() {
-        let resolved = resolve(&snapshot(None, Some("/xdg"), Some("/home/u"))).expect("resolves");
+        let resolved =
+            resolve_host(&snapshot(None, Some("/xdg"), Some("/home/u"))).expect("resolves");
         assert_eq!(resolved.path, PathBuf::from("/xdg/ginary"));
         assert_eq!(resolved.source, Source::XdgCacheHome);
     }
 
     #[test]
     fn home_gets_dot_cache_ginary() {
-        let resolved = resolve(&snapshot(None, None, Some("/home/u"))).expect("resolves");
+        let resolved = resolve_host(&snapshot(None, None, Some("/home/u"))).expect("resolves");
         assert_eq!(resolved.path, PathBuf::from("/home/u/.cache/ginary"));
         assert_eq!(resolved.source, Source::Home);
     }
 
     #[test]
     fn empty_values_count_as_unset() {
-        let resolved = resolve(&snapshot(Some(""), Some(""), Some("/home/u"))).expect("resolves");
+        let resolved =
+            resolve_host(&snapshot(Some(""), Some(""), Some("/home/u"))).expect("resolves");
         assert_eq!(resolved.path, PathBuf::from("/home/u/.cache/ginary"));
         assert_eq!(resolved.source, Source::Home);
     }
 
     #[test]
     fn a_relative_xdg_cache_home_is_ignored() {
-        let resolved =
-            resolve(&snapshot(None, Some("relative/cache"), Some("/home/u"))).expect("resolves");
+        let resolved = resolve_host(&snapshot(None, Some("relative/cache"), Some("/home/u")))
+            .expect("resolves");
         assert_eq!(resolved.path, PathBuf::from("/home/u/.cache/ginary"));
         assert_eq!(resolved.source, Source::Home);
     }
@@ -194,7 +222,7 @@ mod tests {
     fn a_relative_ginary_cache_dir_is_still_honoured() {
         // Unlike XDG_CACHE_HOME this is an explicit ginary override, so the user
         // gets exactly what they asked for.
-        let resolved = resolve(&snapshot(Some("cache"), None, None)).expect("resolves");
+        let resolved = resolve_host(&snapshot(Some("cache"), None, None)).expect("resolves");
         assert_eq!(resolved.path, PathBuf::from("cache"));
         assert_eq!(resolved.source, Source::GinaryCacheDir);
     }
@@ -202,11 +230,11 @@ mod tests {
     #[test]
     fn nothing_set_is_an_error() {
         assert_eq!(
-            resolve(&snapshot(None, None, None)),
+            resolve_host(&snapshot(None, None, None)),
             Err(CacheDirError::Unresolved)
         );
         assert_eq!(
-            resolve(&snapshot(None, Some("relative"), Some(""))),
+            resolve_host(&snapshot(None, Some("relative"), Some(""))),
             Err(CacheDirError::Unresolved)
         );
     }
@@ -216,5 +244,6 @@ mod tests {
         assert_eq!(Source::GinaryCacheDir.variable(), "GINARY_CACHE_DIR");
         assert_eq!(Source::XdgCacheHome.variable(), "XDG_CACHE_HOME");
         assert_eq!(Source::Home.variable(), "HOME");
+        assert_eq!(Source::LocalAppData.variable(), "LOCALAPPDATA");
     }
 }

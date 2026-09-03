@@ -180,6 +180,77 @@ const SEGMENT_PAGE_ALIGN: u64 = 0x4000;
 /// [`SEGMENT_PAGE_ALIGN`]: `page_size` field value `12`, `log2(4096)`.
 const CODE_DIRECTORY_PAGE: usize = 4096;
 
+/// The boundary a code signature begins on, as every linker-produced one does.
+///
+/// `codesign --verify --strict` reads `LC_CODE_SIGNATURE`'s `dataoff` and
+/// expects a superblob there; an unaligned one is a shape no `ld` emits and
+/// nothing else in the file needs, so the gap is padded and the padding is
+/// inside what the hashes cover.
+const SIGNATURE_ALIGNMENT: u64 = 16;
+
+/// `CSMAGIC_EMBEDDED_SIGNATURE`, the superblob a signed Mach-O carries.
+const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
+
+/// `CSMAGIC_CODEDIRECTORY`, the one blob this module writes inside it.
+const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
+
+/// The identifier an ad-hoc `CodeDirectory` names, NUL-terminated.
+///
+/// An ad-hoc signature asserts no identity, and a linker-signed one carries
+/// whatever the linker called its output. Nothing reads it back.
+const AD_HOC_IDENTIFIER: &[u8] = b"a.out\0";
+
+/// The length of one SHA-256, the only hash this module writes.
+const AD_HOC_HASH_LEN: usize = 32;
+
+/// The fixed part of a `CodeDirectory` blob, up to `execSegFlags`: version
+/// `0x0002_0400`, which is `CS_SUPPORTSEXECSEG`.
+const AD_HOC_CD_HEADER_LEN: usize = 88;
+
+/// `CSMAGIC_EMBEDDED_SIGNATURE`'s own header plus the one blob index entry
+/// that follows it.
+const AD_HOC_SUPERBLOB_AND_BLOB_LEN: usize = 20;
+
+/// Where each part of the ad-hoc signature written at a given file offset
+/// lands, and how long the whole of it is.
+///
+/// One producer for the length. [`Writer::build`] has to write `datasize` into
+/// the load commands *before* it hashes the pages those commands sit on, so it
+/// needs the size of a blob that does not exist yet; deriving it twice, once
+/// there and once in [`build_ad_hoc_signature`], is two things that can drift
+/// apart. Every field is a function of `sig_off` alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdHocLayout {
+    /// One code slot per [`CODE_DIRECTORY_PAGE`]-byte page below `sig_off`.
+    n_hashes: usize,
+    /// Where [`AD_HOC_IDENTIFIER`] starts, relative to the blob.
+    ident_offset: usize,
+    /// Where code slot 0 starts, relative to the blob.
+    hash_offset: usize,
+    /// The `CodeDirectory` blob's own length.
+    cd_len: usize,
+    /// The whole superblob's length: `datasize`.
+    total_len: usize,
+}
+
+impl AdHocLayout {
+    /// The layout of the signature that begins at `sig_off` and covers
+    /// everything below it.
+    const fn at(sig_off: usize) -> Self {
+        let n_hashes = sig_off.div_ceil(CODE_DIRECTORY_PAGE);
+        let ident_offset = AD_HOC_CD_HEADER_LEN;
+        let hash_offset = ident_offset + AD_HOC_IDENTIFIER.len();
+        let cd_len = hash_offset + n_hashes * AD_HOC_HASH_LEN;
+        Self {
+            n_hashes,
+            ident_offset,
+            hash_offset,
+            cd_len,
+            total_len: AD_HOC_SUPERBLOB_AND_BLOB_LEN + cd_len,
+        }
+    }
+}
+
 /// The length of a 64-bit Mach-O header.
 const HEADER_LEN: usize = 32;
 /// The length of one `segment_command_64`, header fields only.
@@ -218,6 +289,7 @@ const LC_DYLD_CHAINED_FIXUPS: u32 = 0x8000_0034;
 struct Writer {
     header: [u8; HEADER_LEN],
     commands: Vec<Vec<u8>>,
+    lc_padding: usize,
     pre_linkedit: Vec<u8>,
     section_data: Vec<u8>,
     section_padding: usize,
@@ -314,6 +386,24 @@ impl Writer {
             .checked_sub(removed_len)
             .ok_or_else(|| parse_error("the load command area shrank unexpectedly"))?;
 
+        // The load-command area grows by `header_growth` bytes, but every byte
+        // of file content after it — and every segment's `vmaddr` — must move by
+        // a *whole page*, or the segments that follow `__TEXT` lose their page
+        // alignment and a real kernel refuses to map them (arm64's page is
+        // `0x4000`, and `header_growth` is 152). So content is shifted by
+        // `header_growth` rounded up to a page, and the gap between the load
+        // commands and the first byte of content is padded to make up the
+        // difference. `header_growth` still sizes the load-command area itself,
+        // which is what the header's `sizeofcmds` reports; `file_shift` moves
+        // everything the load commands sit in front of.
+        let file_shift = align_up(header_growth, SEGMENT_PAGE_ALIGN);
+        let lc_padding = usize::try_from(
+            file_shift
+                .checked_sub(header_growth)
+                .ok_or_else(|| parse_error("the load-command padding underflows"))?,
+        )
+        .map_err(|_| parse_error("the load-command padding overflows"))?;
+
         let section_size = payload.len() as u64;
         let section_filesize = align_up(section_size, SEGMENT_PAGE_ALIGN);
 
@@ -322,7 +412,7 @@ impl Writer {
                 LC_SEGMENT_64 => {
                     shift_segment(
                         raw,
-                        header_growth,
+                        file_shift,
                         old_linkedit_fileoff,
                         old_linkedit_vmaddr,
                         section_filesize,
@@ -332,7 +422,7 @@ impl Writer {
                     shift_fields(
                         raw,
                         &[8, 16],
-                        header_growth,
+                        file_shift,
                         old_linkedit_fileoff,
                         section_filesize,
                     )?;
@@ -341,7 +431,7 @@ impl Writer {
                     shift_fields(
                         raw,
                         &[32, 40, 48, 56, 64, 72],
-                        header_growth,
+                        file_shift,
                         old_linkedit_fileoff,
                         section_filesize,
                     )?;
@@ -350,7 +440,7 @@ impl Writer {
                     shift_fields(
                         raw,
                         &[8, 16, 24, 32, 40],
-                        header_growth,
+                        file_shift,
                         old_linkedit_fileoff,
                         section_filesize,
                     )?;
@@ -363,7 +453,7 @@ impl Writer {
                     shift_fields(
                         raw,
                         &[8],
-                        header_growth,
+                        file_shift,
                         old_linkedit_fileoff,
                         section_filesize,
                     )?;
@@ -373,16 +463,16 @@ impl Writer {
         }
 
         let section_fileoff = old_linkedit_fileoff
-            .checked_add(header_growth)
+            .checked_add(file_shift)
             .ok_or_else(|| parse_error("the payload section's offset overflows"))?;
         // The same shift, in VM address space: `__LINKEDIT`'s own `vmaddr`
-        // moves by `header_growth` for the same reason its `fileoff` does —
+        // moves by `file_shift` for the same reason its `fileoff` does —
         // the load-command area it sits after grew — and the new segment
         // takes the address `__LINKEDIT` would have landed at without the
         // payload segment's own `section_filesize` on top of that, exactly
         // mirroring `section_fileoff` above.
         let section_vmaddr = old_linkedit_vmaddr
-            .checked_add(header_growth)
+            .checked_add(file_shift)
             .ok_or_else(|| parse_error("the payload section's vmaddr overflows"))?;
 
         let mut seg_and_sect = Vec::with_capacity(SEGMENT_CMD_LEN + SECTION_LEN);
@@ -417,7 +507,15 @@ impl Writer {
         seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved1
         seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved2
         seg_and_sect.extend_from_slice(&0u32.to_le_bytes()); // reserved3
-        commands.push((LC_SEGMENT_64, seg_and_sect));
+        // The new segment sits at a lower `vmaddr` than the relocated
+        // `__LINKEDIT`, so it is inserted *before* it in load-command order:
+        // dyld expects a Mach-O's segments to be non-decreasing in `vmaddr`.
+        // A hand-fabricated stub with no `__LINKEDIT` at all gets it appended.
+        let insert_at = commands
+            .iter()
+            .position(|(cmd, raw)| *cmd == LC_SEGMENT_64 && segment_name(raw) == "__LINKEDIT")
+            .unwrap_or(commands.len());
+        commands.insert(insert_at, (LC_SEGMENT_64, seg_and_sect));
 
         let codesig_index = if sign {
             let mut cs = Vec::with_capacity(LINKEDIT_DATA_CMD_LEN);
@@ -455,6 +553,7 @@ impl Writer {
         Ok(Self {
             header,
             commands: commands.into_iter().map(|(_, raw)| raw).collect(),
+            lc_padding,
             pre_linkedit,
             section_data: payload.to_vec(),
             section_padding,
@@ -488,6 +587,7 @@ impl Writer {
         let mut body = Vec::with_capacity(
             HEADER_LEN
                 + new_sizeofcmds
+                + self.lc_padding
                 + self.pre_linkedit.len()
                 + self.section_data.len()
                 + self.section_padding
@@ -501,16 +601,36 @@ impl Writer {
             command_offsets.push(body.len());
             body.extend_from_slice(raw);
         }
+        // Pad the load-command area up to the whole-page `file_shift`, so that
+        // every `fileoff` in `pre_linkedit` and after lands where the shifted
+        // load commands say it does and stays page-aligned. See `Writer::plan`.
+        body.extend(std::iter::repeat_n(0u8, self.lc_padding));
         body.extend_from_slice(&self.pre_linkedit);
         body.extend_from_slice(&self.section_data);
         body.extend(std::iter::repeat_n(0u8, self.section_padding));
         body.extend_from_slice(&self.post_linkedit);
 
         if self.sign {
-            let sig_off = body.len();
-            let blob = build_ad_hoc_signature(&body, self.text_fileoff, self.text_filesize);
-            let sz = blob.len();
+            // The signature starts on a 16-byte boundary, as every
+            // linker-produced one does; `codesign --verify --strict` reads
+            // `dataoff` and expects the superblob's magic there, and the
+            // padding is inside what the hashes cover.
+            let padding = usize::try_from(align_up(body.len() as u64, SIGNATURE_ALIGNMENT))
+                .unwrap_or(usize::MAX)
+                .saturating_sub(body.len());
+            body.extend(std::iter::repeat_n(0u8, padding));
 
+            let sig_off = body.len();
+            let layout = AdHocLayout::at(sig_off);
+            let sz = layout.total_len;
+
+            // Every field the finished file carries is written *before* the
+            // pages are hashed. All four of these live in the load-command
+            // area, which is page 0, and a field patched after the hash is a
+            // page the kernel will refuse to map — which it reports by killing
+            // the process with `SIGKILL` rather than by saying so. That is
+            // exactly what both macOS runners did on 2026-09-03; see
+            // `docs/dev/log/E8.md`.
             if let Some(index) = self.codesig_index
                 && let Some(&at) = command_offsets.get(index)
             {
@@ -531,6 +651,8 @@ impl Writer {
                 put_u64(&mut body, at + 32, seg_size)?; // vmsize
                 put_u64(&mut body, at + 48, seg_size)?; // filesize
             }
+
+            let blob = build_ad_hoc_signature(&body, self.text_fileoff, self.text_filesize);
             body.extend_from_slice(&blob);
         }
 
@@ -547,27 +669,21 @@ impl Writer {
 /// authors); see the note on [`Writer`] for why this crate is not depended
 /// on directly.
 fn build_ad_hoc_signature(body: &[u8], text_fileoff: u64, text_filesize: u64) -> Vec<u8> {
-    const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
-    const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
-    const CD_HEADER_LEN: usize = 88;
-    const HASH_LEN: usize = 32;
-    const SUPERBLOB_AND_BLOB_LEN: usize = 20;
-
-    let id: &[u8] = b"a.out\0";
     let sig_off = body.len();
-    let n_hashes = sig_off.div_ceil(CODE_DIRECTORY_PAGE);
-    let ident_offset = CD_HEADER_LEN;
-    let hash_offset = ident_offset + id.len();
-    let cd_len = hash_offset + n_hashes * HASH_LEN;
-    let total_len = SUPERBLOB_AND_BLOB_LEN + cd_len;
-
+    let AdHocLayout {
+        n_hashes,
+        ident_offset,
+        hash_offset,
+        cd_len,
+        total_len,
+    } = AdHocLayout::at(sig_off);
     let mut out = Vec::with_capacity(total_len);
     out.extend_from_slice(&CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
     out.extend_from_slice(&u32::try_from(total_len).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(&1u32.to_be_bytes()); // count
     out.extend_from_slice(&0u32.to_be_bytes()); // CSSLOT_CODEDIRECTORY
     out.extend_from_slice(
-        &u32::try_from(SUPERBLOB_AND_BLOB_LEN)
+        &u32::try_from(AD_HOC_SUPERBLOB_AND_BLOB_LEN)
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
     );
@@ -585,7 +701,7 @@ fn build_ad_hoc_signature(body: &[u8], text_fileoff: u64, text_filesize: u64) ->
     out.extend_from_slice(&0u32.to_be_bytes()); // n_special_slots
     out.extend_from_slice(&u32::try_from(n_hashes).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(&u32::try_from(sig_off).unwrap_or(u32::MAX).to_be_bytes()); // code_limit
-    out.push(u8::try_from(HASH_LEN).unwrap_or(u8::MAX)); // hash_size
+    out.push(u8::try_from(AD_HOC_HASH_LEN).unwrap_or(u8::MAX)); // hash_size
     out.push(2); // hash_type: SHA-256
     out.push(0); // pad1
     out.push(12); // page_size: log2(4096)
@@ -597,7 +713,7 @@ fn build_ad_hoc_signature(body: &[u8], text_fileoff: u64, text_filesize: u64) ->
     out.extend_from_slice(&text_fileoff.to_be_bytes()); // exec_seg_base
     out.extend_from_slice(&text_filesize.to_be_bytes()); // exec_seg_limit
     out.extend_from_slice(&1u64.to_be_bytes()); // exec_seg_flags: CS_EXECSEG_MAIN_BINARY
-    out.extend_from_slice(id);
+    out.extend_from_slice(AD_HOC_IDENTIFIER);
 
     let mut hasher = Sha256::new();
     let mut done = 0usize;
@@ -645,13 +761,15 @@ fn align_up(value: u64, align: u64) -> u64 {
     }
 }
 
-/// Adds `header_growth` to `old`, and `extra` as well when `old` is at or
+/// Adds `file_shift` — the whole-page distance every byte of content moved,
+/// not the raw load-command growth `Writer::plan` rounded up to reach it — to
+/// `old`, and `extra` as well when `old` is at or
 /// past `old_linkedit_fileoff` — the one rule every offset a
 /// `symtab`/`dysymtab`/`dyld_info`/`linkedit_data` command carries follows,
 /// because every one of them points somewhere inside `__LINKEDIT`. `0` is
 /// left as `0`: every one of these fields uses it to mean "not present",
 /// never a real position.
-fn shift_value(old: u32, header_growth: u64, old_linkedit_fileoff: u64, extra: u64) -> u32 {
+fn shift_value(old: u32, file_shift: u64, old_linkedit_fileoff: u64, extra: u64) -> u32 {
     if old == 0 {
         return 0;
     }
@@ -661,7 +779,7 @@ fn shift_value(old: u32, header_growth: u64, old_linkedit_fileoff: u64, extra: u
         0
     };
     let shifted = u64::from(old)
-        .saturating_add(header_growth)
+        .saturating_add(file_shift)
         .saturating_add(extra_here);
     u32::try_from(shifted).unwrap_or(u32::MAX)
 }
@@ -670,13 +788,13 @@ fn shift_value(old: u32, header_growth: u64, old_linkedit_fileoff: u64, extra: u
 /// rather than `u32`: a segment's own `vmaddr`, and a section's `addr`.
 /// Unlike `shift_value` there is no `0`-means-absent case to preserve — an
 /// `addr`/`vmaddr` of `0` is a real (if unusual) virtual address, not a
-/// sentinel — so every value is shifted unconditionally by `header_growth`,
+/// sentinel — so every value is shifted unconditionally by `file_shift`,
 /// plus `extra` once `old` reaches `old_linkedit_boundary`, mirroring the
 /// `fileoff`/`old_linkedit_fileoff` rule [`shift_value`] applies to file
 /// offsets.
 fn shift_value_u64(
     old: u64,
-    header_growth: u64,
+    file_shift: u64,
     old_linkedit_boundary: u64,
     extra: u64,
 ) -> Result<u64, SignMacosError> {
@@ -685,7 +803,7 @@ fn shift_value_u64(
     } else {
         0
     };
-    old.checked_add(header_growth)
+    old.checked_add(file_shift)
         .and_then(|value| value.checked_add(extra_here))
         .ok_or_else(|| parse_error("a 64-bit address field overflows"))
 }
@@ -695,7 +813,7 @@ fn shift_value_u64(
 fn shift_fields(
     raw: &mut [u8],
     field_offsets: &[usize],
-    header_growth: u64,
+    file_shift: u64,
     old_linkedit_fileoff: u64,
     extra: u64,
 ) -> Result<(), SignMacosError> {
@@ -704,7 +822,7 @@ fn shift_fields(
         put_u32(
             raw,
             field,
-            shift_value(old, header_growth, old_linkedit_fileoff, extra),
+            shift_value(old, file_shift, old_linkedit_fileoff, extra),
         )?;
     }
     Ok(())
@@ -717,17 +835,16 @@ fn shift_fields(
 /// its sections' `offset`.
 ///
 /// `vmaddr` is shifted by exactly the same rule `fileoff` is: unconditionally
-/// by `header_growth`, because growing the load-command area of the segment
-/// mapping the header (`__TEXT`) pushes every following segment's VM address
-/// forward by that much, the same way it pushes every following segment's
-/// file offset forward; and by `extra` as well once `vmaddr` reaches
+/// by `file_shift`, the page-aligned distance the grown load-command area (plus
+/// the padding that rounds it up) pushes every following segment forward, in VM
+/// address space exactly as in the file; and by `extra` as well once `vmaddr` reaches
 /// `old_linkedit_vmaddr`, mirroring the `fileoff`/`old_linkedit_fileoff` rule
 /// exactly — that is what keeps the new `__GINARY` segment and the relocated
 /// `__LINKEDIT` from ever landing on the same address (see
 /// `tests/regressions/d3_macho_segment_vmaddr_and_vmsize_were_wrong.rs`).
 fn shift_segment(
     raw: &mut [u8],
-    header_growth: u64,
+    file_shift: u64,
     old_linkedit_fileoff: u64,
     old_linkedit_vmaddr: u64,
     extra: u64,
@@ -737,12 +854,12 @@ fn shift_segment(
         let filesize = get_u64(raw, 48)?;
         if filesize > 0 {
             let grown = filesize
-                .checked_add(header_growth)
+                .checked_add(file_shift)
                 .ok_or_else(|| parse_error("a segment's filesize overflows"))?;
             put_u64(raw, 48, grown)?;
             let vmsize = get_u64(raw, 32)?;
             let vmsize_grown = vmsize
-                .checked_add(header_growth)
+                .checked_add(file_shift)
                 .ok_or_else(|| parse_error("a segment's vmsize overflows"))?;
             put_u64(raw, 32, vmsize_grown)?;
         }
@@ -753,13 +870,13 @@ fn shift_segment(
             0
         };
         let shifted_off = fileoff
-            .checked_add(header_growth)
+            .checked_add(file_shift)
             .and_then(|value| value.checked_add(extra_here))
             .ok_or_else(|| parse_error("a segment's fileoff overflows"))?;
         put_u64(raw, 40, shifted_off)?;
 
         let vmaddr = get_u64(raw, 24)?;
-        let shifted_vmaddr = shift_value_u64(vmaddr, header_growth, old_linkedit_vmaddr, extra)?;
+        let shifted_vmaddr = shift_value_u64(vmaddr, file_shift, old_linkedit_vmaddr, extra)?;
         put_u64(raw, 24, shifted_vmaddr)?;
     }
 
@@ -777,7 +894,7 @@ fn shift_segment(
             .checked_add(32)
             .ok_or_else(|| parse_error("a section's addr field overflows"))?;
         let old_addr = get_u64(raw, addr_field)?;
-        let shifted_addr = shift_value_u64(old_addr, header_growth, old_linkedit_vmaddr, extra)?;
+        let shifted_addr = shift_value_u64(old_addr, file_shift, old_linkedit_vmaddr, extra)?;
         put_u64(raw, addr_field, shifted_addr)?;
 
         let field = section_start
@@ -787,7 +904,7 @@ fn shift_segment(
         put_u32(
             raw,
             field,
-            shift_value(old, header_growth, old_linkedit_fileoff, extra),
+            shift_value(old, file_shift, old_linkedit_fileoff, extra),
         )?;
     }
     Ok(())

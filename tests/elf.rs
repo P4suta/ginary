@@ -11,7 +11,9 @@
 //!
 //! Everything that reads `current_exe` is `cfg(target_os = "linux")`: on macOS
 //! that file is a Mach-O and the assertions would be about the wrong format.
-//! The rest — the magic check, the version comparison, the never-panic
+//! So is the one test that reads the host OTP tree's `beam.smp`: only a Linux
+//! installation has one, and only a gnu one carries the glibc libraries it
+//! names. The rest — the magic check, the version comparison, the never-panic
 //! properties — is portable and always runs.
 // The command line half of the suite: every claim in this file is about a
 // module the `cli` feature carries, so a `--no-default-features` build has
@@ -23,6 +25,8 @@ mod common;
 use ginary::elf::{self, ELF_MAGIC, ElfError};
 use proptest::prelude::*;
 
+// Read only by the one test that needs a Linux OTP tree, and gated with it.
+#[cfg(target_os = "linux")]
 use crate::common::tools::require_tools;
 
 /// Writes `bytes` into a fresh temporary file and hands back both.
@@ -183,6 +187,14 @@ fn a_truncated_binary_is_an_error_rather_than_a_panic() {
     }
 }
 
+// The libraries named below are glibc's and the file read is an ELF, so this
+// is a claim about a Linux OTP tree. A Windows installation has no `beam.smp`
+// at all — its emulator is the `beam.smp.dll` `erl.exe` loads, which
+// `src/erts_source.rs` already knows about — and a macOS one is a Mach-O. The
+// runner reported the Windows half as `beam.smp is an ELF file: Io { path:
+// "...\\erts-17.0.5\\bin\\beam.smp", kind: NotFound }`; see
+// `docs/dev/log/E8.md` section 14.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_host_beam_smp_needs_the_three_libraries_a_packaged_runtime_carries_nothing_for() {
     let Some(_tools) = require_tools(&["erl"]) else {

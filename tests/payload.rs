@@ -18,8 +18,8 @@ use std::io::Read;
 
 use common::payload::{
     CountingReader, RawEntry, RawTar, TYPE_CHAR_DEVICE, TYPE_DIRECTORY, TYPE_FIFO,
-    TYPE_GNU_LONG_NAME, TYPE_HARDLINK, TYPE_SYMLINK, sample_manifest, sample_manifest_json, sha256,
-    staging_tree, tree_listing, zstd_bytes,
+    TYPE_GNU_LONG_NAME, TYPE_HARDLINK, TYPE_SYMLINK, recorded_mode, sample_manifest,
+    sample_manifest_json, sha256, staging_tree, tree_listing, zstd_bytes,
 };
 // A mode is a unix idea, and so is the one assertion that reads one.
 #[cfg(unix)]
@@ -268,15 +268,15 @@ fn the_packed_headers_keep_the_mode_the_file_has_on_disk() {
             .iter()
             .find(|(path, _)| path == "erts-17.0.5/bin/erlexec")
             .map(|(_, mode)| *mode),
-        Some(0o755),
-        "the execute bit survives packing: {modes:?}"
+        Some(recorded_mode(0o755, false)),
+        "the execute bit survives packing where the filesystem has one: {modes:?}"
     );
     assert_eq!(
         modes
             .iter()
             .find(|(path, _)| path == "lib/hello/priv/greeting.txt")
             .map(|(_, mode)| *mode),
-        Some(0o644),
+        Some(recorded_mode(0o644, false)),
         "and a plain file does not gain one: {modes:?}"
     );
 }

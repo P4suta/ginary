@@ -1465,7 +1465,7 @@ fn an_explicit_host_target_still_gets_the_suffix_and_a_manifest_copy() {
     assert_eq!(
         options.artifact_path(host),
         root.join(DEFAULT_OUTPUT)
-            .join(format!("plain_app-{}", host.name()))
+            .join(format!("plain_app-{}{}", host.name(), host.exe_suffix()))
     );
     assert_eq!(
         options.manifest_copy_path(host),
@@ -1505,7 +1505,7 @@ fn a_configured_target_name_puts_itself_in_the_file_name_the_flag_would() {
     assert_eq!(
         options.artifact_path(host),
         root.join(DEFAULT_OUTPUT)
-            .join(format!("plain_app-{}", host.name()))
+            .join(format!("plain_app-{}{}", host.name(), host.exe_suffix()))
     );
     assert_eq!(
         options.manifest_copy_path(host),

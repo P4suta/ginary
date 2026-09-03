@@ -823,8 +823,15 @@ fn verify(module: &Staged) -> Result<(), StripError> {
 /// The name of a compiled module.
 const BEAM_SUFFIX: &str = ".beam";
 
-/// The runtime's own launcher, under `<otp root>/bin`.
-const ERL_PROGRAM: &str = "erl";
+/// The runtime's own launcher, under `<otp root>/bin`, as this host spells it.
+///
+/// `erl.exe` on Windows. The name was the constant `"erl"` until the first
+/// Windows runner reported the whole beam half skipped — "the OTP installation
+/// has no `d:/a/_temp/.setup-beam/otp\bin\erl`" — with the installation and
+/// the program both present. [`crate::platform::erl_program`] is the rule, so
+/// that the spelling is a value a Linux machine can assert rather than one
+/// only a Windows runner can find.
+const ERL_PROGRAM: &str = crate::platform::erl_program(crate::platform::HOST);
 
 /// Whether a file's first four bytes are the ELF magic.
 ///

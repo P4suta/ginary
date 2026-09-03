@@ -75,10 +75,12 @@ pub const LAUNCH_PROGRAM: &str = crate::target::LAUNCH_PROGRAM;
 /// The sentence a Windows build with no Windows runtime is refused with.
 ///
 /// A Windows ERTS tree is `otp_win64_<version>.zip` from `erlang/otp`, and
-/// nothing on a Linux build machine produces one: there is no host runtime to
-/// fall back to and no way to build one. So the refusal names where such a
-/// tree comes from rather than what is missing, and a build that already has
-/// one unpacked says so with `erts = "dir:<path>"`.
+/// nothing on a Linux or macOS build machine produces one: there is no host
+/// runtime to fall back to there and no way to build one. So the refusal names
+/// where such a tree comes from rather than what is missing, and a build that
+/// already has one unpacked says so with `erts = "dir:<path>"`. A Windows host
+/// is the exception [`check_windows_erts`] makes: its own installation is such
+/// a tree, so it never reaches this sentence.
 pub const WINDOWS_ERTS_FROM_CATALOG: &str =
     "windows ERTS trees arrive with the windows catalog entry";
 
@@ -93,6 +95,12 @@ pub const WINDOWS_ERTS_FROM_CATALOG: &str =
 /// A target that is not Windows is always accepted: this check has nothing to
 /// say about it.
 ///
+/// `host_os` is the platform the build is *running* on, and it is an argument
+/// rather than a `#[cfg]` because it is the whole of what the rule turns on:
+/// on a Windows machine the host runtime **is** a Windows ERTS tree, so
+/// `erts = "host"` names one and is accepted. Refusing it there was a Linux
+/// assumption written into a rule that claims to be about the target.
+///
 /// # Errors
 ///
 /// [`BundleError::WindowsErtsUnavailable`] naming the source that was asked
@@ -100,11 +108,18 @@ pub const WINDOWS_ERTS_FROM_CATALOG: &str =
 pub fn check_windows_erts(
     target: Target,
     spec: &crate::erts_source::ErtsSourceSpec,
+    host_os: crate::target::Os,
 ) -> Result<(), BundleError> {
     if target.os != crate::target::Os::Windows {
         return Ok(());
     }
     if matches!(spec, ErtsSourceSpec::Dir(_)) {
+        return Ok(());
+    }
+    // The host runtime on a Windows machine *is* a Windows ERTS tree, so the
+    // one source that could never hold one on Linux is the ordinary answer
+    // there. Every other spelling is refused on every host.
+    if host_os == crate::target::Os::Windows && matches!(spec, ErtsSourceSpec::Host) {
         return Ok(());
     }
     Err(BundleError::WindowsErtsUnavailable {
@@ -583,8 +598,11 @@ struct TargetStub {
 ///
 /// [`BundleError::CacheDir`] when no cache root can be resolved at all.
 fn stub_opts(opts: &BuildOptions) -> Result<StubOpts, BundleError> {
-    let cache = crate::cache_dir::resolve(&crate::cache_dir::EnvSnapshot::from_env())
-        .map_err(BundleError::CacheDir)?;
+    let cache = crate::cache_dir::resolve(
+        &crate::cache_dir::EnvSnapshot::from_env(),
+        crate::platform::HOST,
+    )
+    .map_err(BundleError::CacheDir)?;
     Ok(StubOpts {
         explicit: opts.stub.clone(),
         env_dir: std::env::var_os(crate::stub::STUB_DIR_VAR).map(PathBuf::from),
@@ -761,7 +779,10 @@ fn runtime_sources(
         return Ok(None);
     }
 
-    let dirs = crate::cache_dir::resolve(&crate::cache_dir::EnvSnapshot::from_env())?;
+    let dirs = crate::cache_dir::resolve(
+        &crate::cache_dir::EnvSnapshot::from_env(),
+        crate::platform::HOST,
+    )?;
     let host_release = crate::otp::discover(None)?.release;
     let cache_root = crate::catalog::cache_root(&dirs.path);
     Ok(Some(RuntimeSources {
@@ -856,7 +877,7 @@ fn build_each_target(
         // downloaded and then found to be the wrong operating system costs the
         // user minutes and tells them nothing they could not have been told
         // from `gleam.toml`.
-        check_windows_erts(*target, &spec)?;
+        check_windows_erts(*target, &spec, crate::platform::HOST)?;
         let erts = {
             let _phase = diag.phase("erts");
             match &sources {

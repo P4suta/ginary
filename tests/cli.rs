@@ -909,6 +909,16 @@ fn beam_chunks_without_a_path_is_a_usage_error() {
     ginary().args(["beam", "chunks"]).assert().code(2);
 }
 
+// `ginary elf deps` reads an ELF, and the only file a test can point it at
+// without a toolchain or a checked-in blob is the binary this run built. That
+// is an ELF on Linux, a Mach-O on macOS and a PE on Windows, so the three
+// claims about what it *contains* — its `libc.so.6`, its glibc floor, its
+// `ET_DYN` — are claims only a host whose linker writes ELF can be asked. The
+// format-blind half of the command, `elf_deps_reports_a_file_that_is_not_an_elf_
+// and_exits_one`, is ungated and runs everywhere. This is the same scoping
+// `tests/elf.rs` applies to `current_exe` and E8's Fix round 1 applied to
+// `tests/erts_source.rs`; see `docs/dev/log/E8.md` section 14.
+#[cfg(target_os = "linux")]
 #[test]
 fn elf_deps_prints_what_the_binary_needs() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
@@ -937,6 +947,8 @@ fn elf_deps_prints_what_the_binary_needs() {
     assert!(stdout.contains("libc.so.6"), "{stdout}");
 }
 
+// A host whose linker writes ELF, for the reason above.
+#[cfg(target_os = "linux")]
 #[test]
 fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
     // Two files, so the text form's per-file separator and its whole
@@ -968,6 +980,8 @@ fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
     );
 }
 
+// A host whose linker writes ELF, for the reason above.
+#[cfg(target_os = "linux")]
 #[test]
 fn elf_deps_json_carries_the_documented_keys() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
@@ -1023,9 +1037,13 @@ fn elf_deps_json_carries_the_documented_keys() {
 
 /// The same ELF with `e_type` set to `ET_EXEC`.
 ///
+/// Reachable only from `elf_deps_json_carries_the_documented_keys`, which is
+/// gated on a host whose linker writes ELF, so this is too.
+///
 /// `e_type` is the two bytes at offset 16 of the header, in the file's own
 /// byte order; every target ginary builds for is little-endian, and the
 /// assertion below says so rather than assuming it.
+#[cfg(target_os = "linux")]
 fn et_exec(elf: &[u8]) -> Vec<u8> {
     const ELFDATA2LSB: u8 = 1;
     const ET_EXEC: u16 = 2;

@@ -1226,7 +1226,8 @@ fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     let synced = syncfs(&handle);
     if !synced {
         for path in files_under(tmp).map_err(|error| LauncherError::cache(tmp, error))? {
-            let file = File::open(&path).map_err(|source| LauncherError::cache(&path, source))?;
+            let file =
+                open_for_flush(&path).map_err(|source| LauncherError::cache(&path, source))?;
             file.sync_all()
                 .map_err(|source| LauncherError::cache(&path, source))?;
         }
@@ -1263,11 +1264,40 @@ fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
 #[cfg(windows)]
 fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     for path in files_under(tmp).map_err(|error| LauncherError::cache(tmp, error))? {
-        let file = File::open(&path).map_err(|source| LauncherError::cache(&path, source))?;
+        let file = open_for_flush(&path).map_err(|source| LauncherError::cache(&path, source))?;
         file.sync_all()
             .map_err(|source| LauncherError::cache(&path, source))?;
     }
     Ok(false)
+}
+
+/// Opens one just-written file for the durability barrier that follows.
+///
+/// Read access is what a flush conceptually needs and it is all a unix flush
+/// asks for: `fsync(2)` says nothing about the descriptor's access mode, and a
+/// staged tree holds files a build has already made read-only, so asking for
+/// write access unconditionally would fail for the opposite reason. Windows'
+/// barrier is `FlushFileBuffers`, which the kernel refuses with
+/// `ERROR_ACCESS_DENIED` on a handle that was not opened for writing — every
+/// cold-cache extraction on the first Windows runner stopped on the first file
+/// because of it. [`crate::platform::flush_needs_write_access`] is the rule,
+/// so there is one function here rather than two `#[cfg]` arms, and the claim
+/// is checkable on a machine with no Windows kernel on it.
+fn open_for_flush(path: &Path) -> std::io::Result<File> {
+    let (read, write) = flush_open_options(crate::platform::HOST);
+    File::options().read(read).write(write).open(path)
+}
+
+/// The `(read, write)` access an extraction opens a file with before it flushes
+/// it to disk on `os`.
+///
+/// Read is always asked for; write only where
+/// [`crate::platform::flush_needs_write_access`] says the durability barrier
+/// needs it. A pure function of `os` so that the *wiring* — that the opener
+/// consults the platform at all — is asserted on a machine with no Windows
+/// kernel on it, not only the rule it consults.
+fn flush_open_options(os: crate::target::Os) -> (bool, bool) {
+    (true, crate::platform::flush_needs_write_access(os))
 }
 
 /// One `syncfs(2)` for the whole filesystem the tree is on.
@@ -1443,6 +1473,64 @@ pub const TRASH_PREFIX: &str = "trash-";
 /// Seconds in a day, for turning [`PruneOptions::days`] into an age.
 const SECONDS_PER_DAY: u64 = 86_400;
 
+/// Renames a locked cache entry aside, giving `lock` up in the order the
+/// platform allows.
+///
+/// The lock proves nobody is using the entry and the rename is the claim, so
+/// making the claim while still holding the proof is the order that leaves no
+/// window for another process to take the entry in between. A platform that
+/// refuses to rename a directory it still holds a handle inside —
+/// [`crate::platform::rename_refuses_open_children`], which is Windows, and
+/// which `FILE_SHARE_DELETE` on `<entry>/.lock` does not buy back — cannot
+/// have both at once, and there the lock is released first: the alternative is
+/// an entry that can never be pruned or uninstalled at all, which is what the
+/// first Windows runner reported for every complete entry it found.
+///
+/// Answers whether the rename happened. `lock` is consumed either way, so a
+/// caller cannot keep holding a lock on a directory that is no longer there.
+fn rename_aside(path: &Path, aside: &Path, lock: crate::cache_lock::ExclusiveLock) -> bool {
+    match rename_aside_order(crate::platform::HOST) {
+        RenameAsideOrder::DropThenRename => {
+            drop(lock);
+            std::fs::rename(path, aside).is_ok()
+        }
+        RenameAsideOrder::RenameThenDrop => {
+            let renamed = std::fs::rename(path, aside).is_ok();
+            drop(lock);
+            renamed
+        }
+    }
+}
+
+/// Whether [`rename_aside`] drops the exclusive lock before or after the
+/// rename on `os`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenameAsideOrder {
+    /// Drop the lock, then rename: the platform refuses to rename a directory
+    /// it still holds an open handle inside, so the proof has to be released
+    /// before the claim is made. This reopens the window between "nobody holds
+    /// this" and "it is gone", which is the accepted price on such a platform.
+    DropThenRename,
+    /// Rename while still holding the lock, then drop it: the order that leaves
+    /// no window, available where a rename does not mind an open child.
+    RenameThenDrop,
+}
+
+/// Which order [`rename_aside`] performs the lock-drop and the rename in on
+/// `os`.
+///
+/// [`crate::platform::rename_refuses_open_children`] is the rule; splitting the
+/// decision out from the `drop`/`rename` calls makes the *wiring* — that the
+/// order is chosen from the platform and not hard-coded — a pure function a
+/// Linux machine can assert both answers of.
+fn rename_aside_order(os: crate::target::Os) -> RenameAsideOrder {
+    if crate::platform::rename_refuses_open_children(os) {
+        RenameAsideOrder::DropThenRename
+    } else {
+        RenameAsideOrder::RenameThenDrop
+    }
+}
+
 /// Prunes the *siblings* of one entry, best effort, never failing.
 ///
 /// `keep` is the entry this process is about to run out of and is never
@@ -1515,14 +1603,13 @@ pub fn prune_app(
         };
 
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
-        if std::fs::rename(&path, &aside).is_err() {
+        if !rename_aside(&path, &aside, lock) {
             // Nobody holds it and it is old enough to go; the file system
             // refused. Reported rather than dropped: a `kept` column that
             // silently omits an entry makes the summary a count of nothing.
             report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
-        drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
             report.removed.push(reported(&path));
         } else {
@@ -1615,13 +1702,12 @@ pub fn uninstall(app_dir: &Path) -> PruneReport {
             continue;
         };
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
-        if std::fs::rename(&path, &aside).is_err() {
+        if !rename_aside(&path, &aside, lock) {
             // Nobody holds it: the file system refused, which is a different
             // thing to tell a user and a different thing to do about it.
             report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
-        drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
             report.removed.push(reported(&path));
         } else {
@@ -1813,6 +1899,36 @@ fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::Os;
+
+    #[test]
+    fn flush_open_options_asks_for_write_only_where_the_barrier_needs_it() {
+        // The wiring, not just the rule: `open_for_flush` consults the
+        // platform, so a Linux machine can assert every answer of it. Windows
+        // needs a writable handle for `FlushFileBuffers`; unix flushes a
+        // read-only one, and must, because a staged tree holds read-only files.
+        assert_eq!(flush_open_options(Os::Linux), (true, false));
+        assert_eq!(flush_open_options(Os::Macos), (true, false));
+        assert_eq!(flush_open_options(Os::Windows), (true, true));
+    }
+
+    #[test]
+    fn rename_aside_drops_the_lock_first_only_where_a_rename_refuses_open_children() {
+        assert_eq!(
+            rename_aside_order(Os::Windows),
+            RenameAsideOrder::DropThenRename,
+            "a Windows rename refuses a directory it holds a handle inside, so the lock is \
+             released first"
+        );
+        assert_eq!(
+            rename_aside_order(Os::Linux),
+            RenameAsideOrder::RenameThenDrop
+        );
+        assert_eq!(
+            rename_aside_order(Os::Macos),
+            RenameAsideOrder::RenameThenDrop
+        );
+    }
 
     fn env(pairs: &[(&str, &str)]) -> Env {
         Env::from_pairs(

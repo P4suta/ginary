@@ -24,7 +24,7 @@ use crate::elf;
 use crate::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use crate::otp;
 use crate::process::{NULL_DEVICE, run_with_timeout};
-use crate::target::Target;
+use crate::target::{Os, Target};
 
 /// Searching `PATH` for a program, re-exported from [`crate::process`].
 ///
@@ -206,8 +206,15 @@ impl CacheProbe {
     }
 }
 
-/// The probe program: the smallest thing a kernel will exec.
-const PROBE_PROGRAM: &[u8] = b"#!/bin/sh\nexit 0\n";
+/// The probe program: the smallest thing this platform will start.
+///
+/// [`crate::platform::probe_program`] is the rule; this is the one the running
+/// build writes. Both halves matter — the bytes and the file name's suffix
+/// ([`probe_file_name`]) — because on Windows it is the suffix that makes the
+/// bytes a program at all.
+fn probe_program() -> &'static [u8] {
+    crate::platform::probe_program(crate::platform::HOST)
+}
 
 /// The mode the probe file is given, which is the mode the cache gives every
 /// program under an extracted bindir.
@@ -242,8 +249,16 @@ static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// other's, and `sequence` keeps two probes of one process apart: `doctor`
 /// probes once, but its tests run in threads of one binary and a pid alone is
 /// not unique between them.
-fn probe_file_name(pid: u32, sequence: u64) -> String {
-    format!(".ginary-doctor-probe-{pid}-{sequence}")
+///
+/// The suffix is [`crate::platform::probe_suffix`]'s: empty on unix, where the
+/// execute bit decides and the name is free, and `.cmd` on Windows, where the
+/// extension is the whole of the decision and an extensionless dot-file is
+/// data whatever it holds.
+fn probe_file_name(pid: u32, sequence: u64, os: Os) -> String {
+    format!(
+        ".ginary-doctor-probe-{pid}-{sequence}{}",
+        crate::platform::probe_suffix(os)
+    )
 }
 
 /// Creates a file in `dir`, makes it executable and tries to run it.
@@ -268,6 +283,7 @@ pub fn probe_cache_dir(dir: &Path) -> CacheProbe {
     let path = dir.join(probe_file_name(
         std::process::id(),
         PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        crate::platform::HOST,
     ));
     if let Err(error) = write_probe(&path) {
         let _ = std::fs::remove_file(&path);
@@ -296,7 +312,7 @@ pub fn probe_cache_dir(dir: &Path) -> CacheProbe {
 
 /// Writes the probe program and makes it executable.
 fn write_probe(path: &Path) -> std::io::Result<()> {
-    std::fs::write(path, PROBE_PROGRAM)?;
+    std::fs::write(path, probe_program())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1398,10 +1414,11 @@ impl Report {
             .map(|probe| probe_tool(probe, path_var))
             .collect();
 
-        let (cache_dir, cache_dir_source, cache_dir_error) = match cache_dir::resolve(env) {
-            Ok(resolved) => (Some(resolved.path), Some(resolved.source.variable()), None),
-            Err(error) => (None, None, Some(error.to_string())),
-        };
+        let (cache_dir, cache_dir_source, cache_dir_error) =
+            match cache_dir::resolve(env, crate::platform::HOST) {
+                Ok(resolved) => (Some(resolved.path), Some(resolved.source.variable()), None),
+                Err(error) => (None, None, Some(error.to_string())),
+            };
         let cache_probe = cache_dir.as_deref().map(probe_cache_dir);
 
         Self {
@@ -1544,6 +1561,35 @@ mod tests {
 
     #[cfg(unix)]
     use crate::process::test_support::script;
+
+    #[test]
+    fn the_probe_file_is_named_the_way_its_platform_decides_what_to_start() {
+        // The wiring, not the rule: reverting `probe_file_name` to the
+        // extensionless name every platform used to get leaves every Linux
+        // assertion in the suite green, so the Windows arm is asserted here.
+        assert_eq!(
+            [
+                probe_file_name(7, 0, Os::Linux),
+                probe_file_name(7, 0, Os::Macos),
+                probe_file_name(7, 0, Os::Windows),
+            ],
+            [
+                ".ginary-doctor-probe-7-0".to_owned(),
+                ".ginary-doctor-probe-7-0".to_owned(),
+                ".ginary-doctor-probe-7-0.cmd".to_owned(),
+            ],
+            "the probe file carries the suffix that makes its contents a program"
+        );
+    }
+
+    #[test]
+    fn the_probe_program_this_build_writes_is_the_one_its_platform_starts() {
+        assert_eq!(
+            probe_program(),
+            crate::platform::probe_program(crate::platform::HOST),
+            "the running build writes the rule's answer for its own platform"
+        );
+    }
 
     #[test]
     fn gleam_version_is_the_trailing_token() {

@@ -18,6 +18,7 @@
 
 mod common;
 
+use common::codesign;
 use common::macho::{
     CPU_TYPE_X86_64, MH_EXECUTE, fat_header, real_fixture_bytes, thin_header, with_payload_section,
 };
@@ -258,5 +259,168 @@ fn inject_and_sign_never_panics_on_a_truncated_thin_magic() {
             SignMacosError::NotAMachO { source } if matches!(source, MachoError::Parse { .. })
         ),
         "expected NotAMachO(Parse), got {error:?}"
+    );
+}
+
+// ------------------------------------------- the signature the kernel reads --
+
+// Everything below is about the *validity* of the ad-hoc signature rather
+// than about its presence. `inject_and_sign_applies_an_adhoc_signature_when_
+// asked` above asks whether an `LC_CODE_SIGNATURE` command is there; a kernel
+// asks something stricter, and on 2026-09-03 both macOS runners answered it
+// for the first time:
+//
+// ```text
+// /Users/runner/work/_temp/84fd6172-....sh: line 10:  7695 Killed: 9  "$artifact" 0 hello world
+// ##[error]Process completed with exit code 137.
+// ```
+//
+// Line 10 is the artifact's own run, not `codesign` — which never got to
+// start. 137 is 128+9, and `Killed: 9` is what the kernel does to a Mach-O
+// whose `CodeDirectory` does not match the pages it is mapping. See
+// `docs/dev/log/E8.md`.
+//
+// (`macOS build, launch and signature (macos-14, macos-aarch64)`
+// <https://github.com/P4suta/ginary/actions/runs/33712111530/job/100513644659>.)
+
+/// The signed artifact the tests below read, and the bytes it was written
+/// from.
+fn signed_artifact() -> (Vec<u8>, tempfile::TempDir) {
+    let stub = real_fixture_bytes();
+    let payload = b"the payload bytes a macOS artifact carries, and the signature must cover";
+    let with_trailer = payload_with_trailer(payload, DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+
+    let report = inject_and_sign(
+        &stub,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect("injecting and ad-hoc signing a real, valid thin Mach-O stub succeeds");
+    assert!(report.signed, "CodeSign::Adhoc must sign");
+
+    (std::fs::read(&out).expect("the output was written"), dir)
+}
+
+#[test]
+fn the_ad_hoc_code_directory_hashes_the_bytes_that_were_finally_written() {
+    let (written, _dir) = signed_artifact();
+    let signature = codesign::signature(&written).expect("a signed artifact carries a signature");
+    let directory = &signature.code_directory;
+
+    assert_eq!(
+        codesign::first_bad_slot(&written, directory),
+        None,
+        "every code slot is the SHA-256 of the page it stands for. A slot that is not is a page \
+         the kernel refuses to map, and it kills the process rather than reporting it: the \
+         signature has to be computed over the *finished* file, after the last field written \
+         into it"
+    );
+}
+
+#[test]
+fn the_ad_hoc_signature_starts_where_the_loader_expects_to_find_it() {
+    let (written, _dir) = signed_artifact();
+    let signature = codesign::signature(&written).expect("a signed artifact carries a signature");
+
+    assert_eq!(
+        signature.data_offset % codesign::SIGNATURE_ALIGNMENT,
+        0,
+        "the code signature begins on a {}-byte boundary, as every linker-produced one does; it \
+         began at {}",
+        codesign::SIGNATURE_ALIGNMENT,
+        signature.data_offset
+    );
+    assert_eq!(
+        signature.data_offset + signature.data_size,
+        written.len() as u64,
+        "the signature is the last thing in the file"
+    );
+}
+
+#[test]
+fn the_ad_hoc_code_directory_describes_the_file_it_is_attached_to() {
+    let (written, _dir) = signed_artifact();
+    let signature = codesign::signature(&written).expect("a signed artifact carries a signature");
+    let directory = &signature.code_directory;
+
+    assert_eq!(signature.magic, codesign::CSMAGIC_EMBEDDED_SIGNATURE);
+    assert_eq!(signature.blob_count, 1, "one blob: the CodeDirectory");
+    assert_eq!(signature.first_slot, codesign::CSSLOT_CODEDIRECTORY);
+    assert_eq!(
+        directory.flags & codesign::CS_ADHOC,
+        codesign::CS_ADHOC,
+        "the signature asserts no identity, and says so"
+    );
+    assert_eq!(directory.hash_type, 2, "SHA-256");
+    assert_eq!(directory.hash_size, 32);
+    assert_eq!(directory.page_size_log2, 12, "4096-byte pages");
+    assert_eq!(directory.n_special_slots, 0);
+
+    assert_eq!(
+        directory.code_limit, signature.data_offset,
+        "the hashes cover everything below the signature and nothing else"
+    );
+    assert_eq!(
+        directory.n_code_slots as usize,
+        usize::try_from(directory.code_limit)
+            .expect("a code limit that fits")
+            .div_ceil(directory.page_size()),
+        "one slot per page of what is covered"
+    );
+
+    let text = codesign::segment(&written, "__TEXT").expect("a Mach-O program carries __TEXT");
+    assert_eq!(
+        (directory.exec_seg_base, directory.exec_seg_limit),
+        (text.fileoff, text.filesize),
+        "the executable segment the CodeDirectory names is __TEXT as the finished file lays it \
+         out, not as the stub did"
+    );
+}
+
+#[test]
+fn the_payload_section_is_inside_what_the_ad_hoc_signature_covers() {
+    let stub = real_fixture_bytes();
+    let payload = b"a payload the signature has to be taken over, not around";
+    let with_trailer = payload_with_trailer(payload, DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+
+    let report = inject_and_sign(
+        &stub,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect("injecting and ad-hoc signing a real, valid thin Mach-O stub succeeds");
+    let written = std::fs::read(&out).expect("the output was written");
+    let signature = codesign::signature(&written).expect("a signed artifact carries a signature");
+
+    assert!(
+        report.section_offset + report.section_size <= signature.code_directory.code_limit,
+        "ADR 0016 puts the payload in a section so that the signature can cover it: the section \
+         is {}..{} and the hashes stop at {}",
+        report.section_offset,
+        report.section_offset + report.section_size,
+        signature.code_directory.code_limit
+    );
+
+    let linkedit =
+        codesign::segment(&written, "__LINKEDIT").expect("a Mach-O program carries __LINKEDIT");
+    assert!(
+        linkedit.fileoff <= signature.data_offset,
+        "the signature lives inside __LINKEDIT, which starts at {}",
+        linkedit.fileoff
+    );
+    assert_eq!(
+        linkedit.fileoff + linkedit.filesize,
+        written.len() as u64,
+        "__LINKEDIT's filesize is grown to hold the signature that was appended to it"
     );
 }

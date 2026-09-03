@@ -32,7 +32,7 @@ use ginary::doctor::{
 use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use ginary::native::{self, NativeKind, Verdict};
 use ginary::otp::{OtpError, OtpInfo};
-use ginary::target::{Linkage, Target};
+use ginary::target::{Libc, Linkage, Target};
 use serde_json::Value;
 
 use crate::common::fake_otp::FakeOtp;
@@ -851,14 +851,25 @@ fn the_host_row_carries_the_two_facts_read_off_its_own_emulator() {
         Some("dynamic"),
         "a distribution's emulator is dynamically linked: {probes:?}"
     );
-    let min = probes[0]
-        .libc_min
-        .as_deref()
-        .expect("a gnu host reports a minimum glibc");
-    assert!(
-        min.split('.').all(|part| part.parse::<u32>().is_ok()),
-        "the minimum is a version and not a sentence: {min}"
-    );
+    // Only a dynamically-linked gnu Linux emulator carries a glibc floor; a
+    // musl, macOS or Windows host reports none, and a test that always expected
+    // one failed on the first Windows runner against a healthy runtime. The
+    // rule is a property of the host's own libc.
+    if Target::host().libc == Libc::Gnu {
+        let min = probes[0]
+            .libc_min
+            .as_deref()
+            .expect("a gnu host reports a minimum glibc");
+        assert!(
+            min.split('.').all(|part| part.parse::<u32>().is_ok()),
+            "the minimum is a version and not a sentence: {min}"
+        );
+    } else {
+        assert_eq!(
+            probes[0].libc_min, None,
+            "a host without gnu libc has no glibc floor to report"
+        );
+    }
 }
 
 #[test]

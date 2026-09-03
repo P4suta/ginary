@@ -191,6 +191,7 @@ pub mod native;
 #[cfg(feature = "cli")]
 pub mod otp;
 pub mod payload;
+pub mod platform;
 pub mod process;
 #[cfg(feature = "cli")]
 pub mod report;

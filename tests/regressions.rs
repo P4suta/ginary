@@ -296,3 +296,28 @@ mod e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path;
 
 #[path = "regressions/e7_a_cargo_test_step_could_stop_at_the_first_failing_target.rs"]
 mod e7_a_cargo_test_step_could_stop_at_the_first_failing_target;
+
+#[path = "regressions/e8_a_listing_path_was_spelled_the_way_the_platform_does.rs"]
+mod e8_a_listing_path_was_spelled_the_way_the_platform_does;
+#[path = "regressions/e8_a_removal_renamed_a_directory_it_still_held_open.rs"]
+mod e8_a_removal_renamed_a_directory_it_still_held_open;
+#[cfg(feature = "cli")]
+#[path = "regressions/e8_a_windows_build_could_not_locate_its_cache_directory.rs"]
+mod e8_a_windows_build_could_not_locate_its_cache_directory;
+#[cfg(feature = "cli")]
+#[path = "regressions/e8_a_windows_host_could_not_bundle_its_own_runtime.rs"]
+mod e8_a_windows_host_could_not_bundle_its_own_runtime;
+#[path = "regressions/e8_the_ad_hoc_signature_did_not_cover_the_finished_file.rs"]
+mod e8_the_ad_hoc_signature_did_not_cover_the_finished_file;
+#[path = "regressions/e8_the_beam_step_looked_for_a_program_windows_spells_otherwise.rs"]
+mod e8_the_beam_step_looked_for_a_program_windows_spells_otherwise;
+#[cfg(feature = "cli")]
+#[path = "regressions/e8_the_cache_probe_wrote_a_program_the_platform_cannot_start.rs"]
+mod e8_the_cache_probe_wrote_a_program_the_platform_cannot_start;
+#[path = "regressions/e8_the_extraction_flushed_handles_it_had_opened_read_only.rs"]
+mod e8_the_extraction_flushed_handles_it_had_opened_read_only;
+#[cfg(feature = "cli")]
+#[path = "regressions/e8_the_injected_segment_broke_page_alignment.rs"]
+mod e8_the_injected_segment_broke_page_alignment;
+#[path = "regressions/e8_two_producers_disagreed_about_one_files_mode.rs"]
+mod e8_two_producers_disagreed_about_one_files_mode;

@@ -369,8 +369,22 @@ jobs:
             "$GITHUB_WORKSPACE/target/release/ginary" build \
               --target "${{ matrix.target }}" )
           artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
+          # The signature is read and checked *before* the artifact is run, and
+          # not only after it. An invalid ad-hoc signature is not a program
+          # that starts and misbehaves: the kernel refuses to map a page whose
+          # hash disagrees with the CodeDirectory and kills the process with
+          # SIGKILL before `main`, which is all both runners reported on
+          # 2026-09-03 — a bare `Killed: 9` and exit 137, with `codesign` never
+          # reached. Checking first turns that back into a sentence naming the
+          # defect, and `--display` prints the geometry a future one needs:
+          # the CDHash, the flags, the hash type and the executable segment.
+          # See docs/dev/log/E8.md.
+          codesign --display --verbose=4 "$artifact" || true
+          codesign --verify --strict --verbose=4 "$artifact"
           "$artifact" 0 hello world
           set +e; "$artifact" 3; test $? -eq 3; set -e
+          # And again afterwards: the artifact extracts its payload into a
+          # cache directory and must not have touched its own file to do it.
           codesign --verify --strict --verbose=4 "$artifact"
 
   windows:

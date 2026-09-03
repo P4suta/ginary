@@ -109,3 +109,52 @@ validation rules, and `docs/dev/log/D3.md` for the crate and API this was implem
   scoped out of this pass rather than silently skipped — the scan's `DT_NEEDED` allowlist logic
   is Linux-specific throughout, and building its macOS counterpart honestly needs the same kind
   of care this ADR gave the artifact-level signature, not a quick pattern match bolted on.
+
+## 2026-09-03 — what a Mac reported (provisional; sufficiency not yet re-run)
+
+The `macos-14` and `macos-15-intel` runners of
+<https://github.com/P4suta/ginary/actions/runs/33712111530> are the milestone the Consequences
+above named, and they ran this decision for the first time. **The section-plus-ad-hoc-signature
+shape is not in question** — the payload belongs in a `__GINARY,__payload` section and the
+artifact carries an ad-hoc `CodeDirectory`. What is recorded below is *provisional*: no macOS
+runner has yet executed the fixed writer, so the *sufficiency* of the fix — that
+`codesign --verify --strict` accepts the artifact and it runs to `exit 3` — is unverified until
+a runner passes. What the runners falsified was the writer, not the ADR, and two independent
+writer defects were found, one of them only on a later review pass.
+
+Both jobs died at the same line, before `codesign` was reached at all:
+
+```text
+/Users/runner/work/_temp/84fd6172-....sh: line 10:  7695 Killed: 9   "$artifact" 0 hello world
+##[error]Process completed with exit code 137.
+```
+
+`Killed: 9` before a program prints anything is the kernel refusing to map a page whose SHA-256
+does not match the slot the `CodeDirectory` holds for it — and an *invalid* signature turns out
+to be worse than no signature on x86_64 as well as on arm64, which is a fact this ADR's second
+bullet stated only for arm64.
+
+**Defect one — hash ordering.** `Writer::build` hashed the assembled body and *then* wrote
+four more fields into it: `LC_CODE_SIGNATURE`'s `dataoff` and `datasize`, and `__LINKEDIT`'s
+`vmsize` and `filesize`. All four live in the load-command area, which is page 0, so slot 0
+described a page that no longer existed by the time the file was closed. The signature now
+covers the finished file: the section is injected, the signature's own offset and size and
+`__LINKEDIT`'s grown extent are patched in, the signature is aligned to a 16-byte boundary as
+every linker-produced one is, and only then are the pages hashed. This is proven on Linux by
+`tests/regressions/e8_the_ad_hoc_signature_did_not_cover_the_finished_file.rs` and
+`tests/sign_macos.rs`, which parse the superblob field by field and recompute every page hash
+without going through `src/sign_macos.rs`.
+
+**Defect two — segment page alignment (found on the Fix round 1 review, not by the runner).**
+The `Killed: 9` above does not, on its own, isolate the ordering defect as the *only* cause: a
+misaligned load map is an independent reason the same binary cannot be mapped, and the writer
+had one. The new `__GINARY` segment was inserted by shifting every following byte forward by the
+raw load-command growth (152 bytes), which is not a multiple of a page, so on arm64 every
+segment after `__TEXT` lost `0x4000` alignment and `round_page(__TEXT.vmsize)` swallowed
+`__DATA_CONST` and `__DATA`. `Writer::plan` now rounds the shift up to a whole page and pads the
+load-command area to match, and emits `__GINARY` before `__LINKEDIT` so segments stay in
+increasing `vmaddr` order; this too is pure arithmetic and is pinned on Linux by
+`tests/regressions/e8_the_injected_segment_broke_page_alignment.rs`. Whether these two together
+are *sufficient* — whether the artifact now maps, runs, and passes `codesign --verify --strict`
+— is the open question a macOS runner has still to answer. `docs/dev/log/E8.md` records both
+defects and the run.

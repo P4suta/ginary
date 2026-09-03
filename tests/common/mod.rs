@@ -16,6 +16,7 @@ pub mod built;
 pub mod cachefs;
 #[cfg(feature = "cli")]
 pub mod catalog;
+pub mod codesign;
 pub mod coverage;
 pub mod deps;
 pub mod digest;

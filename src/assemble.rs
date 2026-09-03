@@ -936,7 +936,14 @@ fn build(
         // Relative to the staged root, which is what every other entry in the
         // account is: an absolute path here would name the temporary directory
         // this build happened to use.
-        junk_removed.push((relative(root, &staged_bin.join(WINDOWS_ERL_INI)), size));
+        junk_removed.push((
+            listed_relative(
+                root,
+                &staged_bin.join(WINDOWS_ERL_INI),
+                crate::platform::HOST,
+            ),
+            size,
+        ));
         junk_removed.sort();
     }
 
@@ -1509,7 +1516,7 @@ fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, A
         if obj.is_dir() {
             let bytes = tree_bytes(&obj)?;
             remove_dir(&obj)?;
-            removed.push((relative(root, &obj), bytes));
+            removed.push((listed_relative(root, &obj, crate::platform::HOST), bytes));
         }
 
         let lib = priv_dir.join("lib");
@@ -1524,7 +1531,7 @@ fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, A
                     path: path.clone(),
                     source,
                 })?;
-                removed.push((relative(root, &path), bytes));
+                removed.push((listed_relative(root, &path, crate::platform::HOST), bytes));
             }
         }
     }
@@ -1682,19 +1689,31 @@ fn size_of(path: &Path) -> Result<u64, AssembleError> {
         })
 }
 
-/// The permission bits of a file, or zero on a platform without them.
+/// The permission bits of a file, as the listing records them.
+///
+/// `st_mode & 0o7777` where the filesystem has a mode word, and
+/// [`crate::platform::modeless_mode`] where it has none. Zero was the old
+/// answer on such a platform and it was wrong twice over: it is not a mode any
+/// file has, and it disagreed with the two other producers of the same column
+/// — [`crate::manifest::Index::from_staged`] and the payload's `tar` header —
+/// so `ginary verify` reported a mismatch nobody had introduced. One rule, one
+/// answer; `docs/dev/log/E8.md` records the run that found it.
 #[cfg(feature = "cli")]
 fn mode_of(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
-    {
+    let raw_mode = {
         use std::os::unix::fs::PermissionsExt as _;
         metadata.permissions().mode() & 0o7777
-    }
+    };
+    // A modeless filesystem has no `st_mode` to read; `recorded_mode` discards
+    // this value there, so `0` stands for "unread".
     #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        0
-    }
+    let raw_mode = 0u32;
+    crate::platform::recorded_mode(
+        crate::platform::has_unix_modes(crate::platform::HOST),
+        raw_mode,
+        metadata.is_dir(),
+    )
 }
 
 /// A path relative to the staged root, or the path itself if it is not under
@@ -1702,6 +1721,32 @@ fn mode_of(metadata: &std::fs::Metadata) -> u32 {
 #[cfg(feature = "cli")]
 fn relative(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+/// A path relative to the staged root, spelled the way the listing carries it.
+///
+/// The junk table is read against `ginary.stage.json`, and that document is
+/// `/`-separated on every platform. A path joined out of an application's own
+/// `/`-separated directory and a walked `OsStr` carries the platform's
+/// separator into the middle of it — the first Windows runner produced
+/// `lib/crypto-5.9.2\priv\obj` — so the report is respelled once, here,
+/// rather than at each of the three places that push a row.
+///
+/// [`crate::winpath::slash_path_str`] is the rule, and it is applied to a
+/// Windows path only: `\` is an ordinary character in a unix file name, and
+/// rewriting one would name a different file rather than respell this one.
+#[cfg(feature = "cli")]
+fn listed_relative(root: &Path, path: &Path, os: crate::target::Os) -> PathBuf {
+    let relative = relative(root, path);
+    if !crate::platform::separates_paths_with_backslash(os) {
+        return relative;
+    }
+    match relative.to_str() {
+        Some(text) => PathBuf::from(crate::winpath::slash_path_str(text)),
+        // Not text, so there is no listing path to respell it into: the caller
+        // is given the walked spelling rather than a guess.
+        None => relative,
+    }
 }
 
 /// A relative path as the listing writes it: `/`-separated, whatever the
@@ -1827,4 +1872,37 @@ fn canonical(path: &Path) -> Result<PathBuf, AssembleError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::{listed_relative, relative};
+    use crate::target::Os;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn listed_relative_respells_a_windows_row_and_leaves_a_unix_backslash_name_alone() {
+        // `strip_prefix` fails for a path that is not under `root`, so
+        // `relative` hands the path straight through and only the respelling
+        // is under test.
+        let root = Path::new("/staged/root");
+
+        let windows_row = Path::new(r"lib/crypto-5.9.2\priv\lib\libcrypto_static.a");
+        assert_eq!(
+            listed_relative(root, windows_row, Os::Windows),
+            PathBuf::from("lib/crypto-5.9.2/priv/lib/libcrypto_static.a"),
+            "a Windows-spelled row is respelled the way ginary.stage.json carries it"
+        );
+
+        let unix_name = Path::new(r"lib/odd\name/thing.beam");
+        assert_eq!(
+            listed_relative(root, unix_name, Os::Linux),
+            PathBuf::from(r"lib/odd\name/thing.beam"),
+            "a backslash is an ordinary character in a unix file name; respelling it would name \
+             a different file"
+        );
+
+        // `relative` itself is spelling-blind: it only strips the root.
+        assert_eq!(relative(root, windows_row), windows_row.to_path_buf());
+    }
 }

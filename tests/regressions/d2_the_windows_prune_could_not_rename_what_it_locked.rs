@@ -11,13 +11,25 @@
 //! prunable entry would therefore have been reported `Unremovable` and
 //! `ginary cache prune` would never have removed anything.
 //!
-//! The fix is the share mode and not the ordering: dropping the lock before
-//! the rename would open the window between "nobody holds this" and "it is
-//! gone" that the lock exists to close. `FILE_SHARE_DELETE` permits deleting
-//! and renaming and says nothing about reading or writing, so what the two
-//! locks mean to each other is unchanged — a runtime's shared handle asks for
-//! read access and shares read access, and this open still asks for write
-//! access that the shared handle does not permit.
+//! The fix was the share mode: `FILE_SHARE_DELETE` permits deleting and
+//! renaming and says nothing about reading or writing, so what the two locks
+//! mean to each other is unchanged — a runtime's shared handle asks for read
+//! access and shares read access, and this open still asks for write access
+//! that the shared handle does not permit. The bit is what lets the removal
+//! that follows delete `<entry>/.lock` along with the tree it is in, and it is
+//! what these three assertions are about.
+//!
+//! **E8 correction.** This file also claimed the bit was enough to rename the
+//! entry *while the lock was still held*, and that dropping the lock first was
+//! therefore avoidable. A real Windows kernel refuted that on 2026-09-03:
+//! every complete entry the first Windows runner found was reported
+//! `unremovable`. `FILE_SHARE_DELETE` speaks for the file it is on, not for an
+//! ancestor directory of it, so `cache::prune_app` and `cache::uninstall` now
+//! release the lock before the rename where the platform requires it —
+//! [`ginary::platform::rename_refuses_open_children`], pinned by
+//! `tests/regressions/e8_a_removal_renamed_a_directory_it_still_held_open.rs`.
+//! Nothing below changed: the share mode is still the right one and is still
+//! asserted here.
 //!
 //! `windows_share_mode` is a `const fn` on every platform precisely so that
 //! this rule is a test on the machine ginary is developed on rather than a
@@ -25,23 +37,23 @@
 
 use ginary::cache_lock::{FILE_SHARE_READ, LockKind, windows_share_mode};
 
-/// `FILE_SHARE_DELETE`: another handle may delete or rename the file, and with
-/// it the directory the file is in.
+/// `FILE_SHARE_DELETE`: another handle may delete or rename *this file*.
+///
+/// Not the directory it is in: that is the reading E8 had to correct.
 ///
 /// Spelled here rather than taken from the crate, so that the test states the
 /// value it is about rather than agreeing with whatever the code says.
 const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 
 #[test]
-fn the_exclusive_share_mode_permits_the_rename_the_prune_performs() {
+fn the_exclusive_share_mode_permits_the_deletion_the_removal_performs() {
     let exclusive = windows_share_mode(LockKind::Exclusive);
 
     assert_eq!(
         exclusive & FILE_SHARE_DELETE,
         FILE_SHARE_DELETE,
-        "the prune renames the entry while it still holds `<entry>/.lock`, and \
-         Windows refuses to rename a directory whose open handles do not \
-         permit it"
+        "the removal deletes `<entry>/.lock` along with the tree it is in, and \
+         Windows refuses to delete a file whose open handles do not permit it"
     );
     assert_eq!(
         exclusive & FILE_SHARE_READ,

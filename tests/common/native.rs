@@ -160,6 +160,25 @@ pub fn musl_interp(machine: u16) -> String {
     format!("/lib/ld-musl-{arch}.so.1")
 }
 
+/// The target an object built with [`host_machine`] and [`host_interp`]
+/// describes.
+///
+/// Not [`ginary::target::Target::host`]: the fixtures here are ELF files with
+/// a glibc or musl `PT_INTERP`, which is a *Linux* object whatever machine
+/// wrote them. On a Linux host the two are the same value, which is why the
+/// difference went unnoticed until a Windows runner read
+/// `target: Some(Target { os: Linux, .. })` out of a fixture the test claimed
+/// was the host's — see `docs/dev/log/E8.md` section 14. The libc follows the
+/// host's, because [`host_interp`] names musl's loader on a musl machine.
+pub fn host_object_target() -> ginary::target::Target {
+    use ginary::target::{Libc, Os, Target};
+    let libc = match Target::host().libc {
+        Libc::Musl => Libc::Musl,
+        _ => Libc::Gnu,
+    };
+    Target::new(Os::Linux, Target::host().arch, libc)
+}
+
 /// The loader an object built on *this* machine would name.
 pub fn host_interp() -> String {
     match ginary::target::Target::host().libc {

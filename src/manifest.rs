@@ -583,8 +583,10 @@ fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
 /// The permission bits a Windows build records for a file.
 ///
 /// Windows has no mode word, so there is nothing to read; what is recorded is
-/// what the `tar` crate itself writes into the archive header on this platform,
-/// 0o755 for a directory and 0o644 for everything else. Recording the same
+/// [`crate::platform::modeless_mode`], which is what the `tar` crate itself
+/// writes into the archive header on such a platform — 0o755 for a directory
+/// and 0o644 for everything else — and what
+/// [`crate::assemble`]'s staging listing records there. Recording the same
 /// value on both sides is what keeps `ginary verify` — which compares the index
 /// against the header — from reporting a mismatch that means nothing, and the
 /// column is informational on a Windows artifact rather than a permission
@@ -604,5 +606,12 @@ fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
 #[cfg(windows)]
 fn mode_of(path: &Path) -> Result<u32, std::io::Error> {
     let metadata = std::fs::symlink_metadata(path)?;
-    Ok(if metadata.is_dir() { 0o755 } else { 0o644 })
+    // Windows has no `st_mode`, so `0` stands for "unread"; `recorded_mode`
+    // answers `modeless_mode` there. The same rule the assemble listing uses,
+    // so the two producers cannot drift.
+    Ok(crate::platform::recorded_mode(
+        crate::platform::has_unix_modes(crate::platform::HOST),
+        0,
+        metadata.is_dir(),
+    ))
 }

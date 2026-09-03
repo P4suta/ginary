@@ -30,8 +30,8 @@ use ginary::target::{Arch, Libc, Linkage, Os, Target};
 use crate::common::fake_otp::{FakeOtp, FakeOtpRoot, FakeShipment};
 use crate::common::native::{
     MACHO_CPU_ARM64, MACHO_TYPE_DYLIB, SHELL_WRAPPER, dos_stub, elf_magic_only, host_interp,
-    host_machine, macho_bytes, macho_magic_only, musl_interp, pe_bytes, plant, plant_executable,
-    program, shared_object,
+    host_machine, host_object_target, macho_bytes, macho_magic_only, musl_interp, pe_bytes, plant,
+    plant_executable, program, shared_object,
 };
 use crate::common::repack::{EM_AARCH64, EM_X86_64};
 use crate::common::stubfile::PE_MACHINE_AMD64;
@@ -257,7 +257,7 @@ fn the_scan_reads_the_format_the_machine_and_the_target_of_each_object() {
         Some(ObjectFacts {
             format: ObjectFormat::Elf,
             machine: Target::host().arch.as_str().to_owned(),
-            target: Some(Target::host()),
+            target: Some(host_object_target()),
             linkage: Linkage::Dynamic,
         }),
         "a dynamically linked ELF names its whole target through its interpreter"
@@ -693,6 +693,16 @@ fn recorded(out_dir: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+// A hook is run through `/bin/sh` on every host, deliberately and not as an
+// accident of the developer's machine: `native::HOOK_SHELL` is `/bin/sh`
+// everywhere, and `tests/regressions/c4_the_hook_shell_was_cmd_on_a_windows_host.rs`
+// is why the `cmd /C` alternative was removed. A host without a POSIX shell
+// therefore gets `NativeError::HookProcess` naming `/bin/sh`, which is the
+// documented answer and what the Windows runner reported — so a test that
+// asserts what a hook *does* needs a host that has one. The contract itself is
+// asserted on every platform by that C4 regression. See `docs/dev/log/E8.md`
+// section 14.
+#[cfg(unix)]
 #[test]
 fn a_hook_runs_in_the_project_with_the_environment_the_contract_names() {
     let dir = tempdir();
@@ -781,6 +791,8 @@ fn a_hook_runs_in_the_project_with_the_environment_the_contract_names() {
     );
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_runtime_with_no_erl_interface_leaves_that_variable_unset() {
     let dir = tempdir();
@@ -813,6 +825,8 @@ fn a_runtime_with_no_erl_interface_leaves_that_variable_unset() {
     );
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_hooks_output_replaces_the_artifact_it_belongs_to() {
     let dir = tempdir();
@@ -857,6 +871,8 @@ fn a_hooks_output_replaces_the_artifact_it_belongs_to() {
     );
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_hook_that_writes_nothing_where_the_artifact_belongs_is_refused() {
     let dir = tempdir();
@@ -894,6 +910,8 @@ fn a_hook_that_writes_nothing_where_the_artifact_belongs_is_refused() {
     }
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_hook_that_fails_is_refused_with_everything_it_wrote_to_stderr() {
     let dir = tempdir();
@@ -981,6 +999,8 @@ fn an_override_answers_before_a_hook_is_run() {
     );
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_hook_that_builds_for_another_machine_is_refused_and_names_what_it_wrote() {
     let dir = tempdir();
@@ -1033,6 +1053,8 @@ fn a_hook_that_builds_for_another_machine_is_refused_and_names_what_it_wrote() {
     }
 }
 
+// Needs a POSIX shell, for the reason above.
+#[cfg(unix)]
 #[test]
 fn a_hook_that_writes_once_does_not_answer_for_a_second_target() {
     let dir = tempdir();

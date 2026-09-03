@@ -965,7 +965,11 @@ pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
         files.push(StagedFile {
             path,
             size: data.len() as u64,
-            mode,
+            // What the file carries once it is written, not what was asked
+            // for: on a platform whose `set_mode` is a no-op the two are
+            // different, and a listing that records the request describes a
+            // tree that does not exist.
+            mode: crate::common::payload::recorded_mode(mode, false),
             category,
         });
     }

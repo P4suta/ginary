@@ -45,11 +45,20 @@ it running unlocked. A write handle is needed on an entry's first lock and never
 
 `try_exclusive` shares one thing, `FILE_SHARE_DELETE`. It is not a weakening of the lock —
 sharing deletion says nothing about read or write access, so the paragraph above is unchanged —
-it is what makes the prune's own next step possible. `cache::prune_app` renames the entry
-directory while still holding `<entry>\.lock` inside it, and Windows refuses to rename a
-directory whose open handles do not permit deletion. Dropping the lock before the rename was the
-alternative, and it reopens the window between "nobody holds this" and "it is gone" that the
-lock exists to close.
+and it is what lets the removal that follows delete `<entry>\.lock` along with the tree it is
+in.
+
+**It does not, however, let the entry be renamed while the lock is held, and this ADR said it
+did.** A real Windows kernel answered that on 2026-09-03: every complete entry the first Windows
+runner found was reported `unremovable`, the rename refused with the lock still open inside the
+directory. `FILE_SHARE_DELETE` permits *that file* to be deleted or renamed; it says nothing
+about an ancestor directory of it. So the lock and the rename happen in that order rather than
+at once — the lock proves nobody is using the entry, it is released, and then the rename makes
+the claim. The window between "nobody holds this" and "it is gone" is real and is the price of
+being able to prune at all; on unix, where `rename(2)` asks nothing about open descriptors, the
+lock is still held across the rename and no window opens.
+`ginary::platform::rename_refuses_open_children` is where that difference is written down, and
+`docs/dev/log/E8.md` records the run.
 
 That is the same correspondence ADR 0010 has, reached by a
 different mechanism, with two differences a reader has to know about:
