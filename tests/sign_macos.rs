@@ -21,12 +21,16 @@ mod common;
 use common::codesign;
 use common::codesign::{CS_ADHOC, CS_LINKER_SIGNED};
 use common::macho::{
-    CPU_TYPE_X86_64, MH_EXECUTE, entry_point, fat_header, real_fixture_bytes, thin_header,
-    with_payload_section,
+    CPU_TYPE_X86_64, MH_EXECUTE, StubSpec, command_counts, entry_point, fat_header,
+    first_section_offset, load_commands, real_fixture_bytes, segment_command_offset, stub_like,
+    thin_header, with_payload_section, without_code_signature,
 };
 use ginary::macho::{self, MachoError};
 use ginary::payload::{PayloadVia, locate};
-use ginary::sign_macos::{CodeSign, MacSignCfg, SignMacosError, inject_and_sign};
+use ginary::sign_macos::{
+    CODE_SIGNATURE_COMMAND_LEN, CodeSign, CodeSignatureSlot, LoadCommandSlack, MacSignCfg,
+    SignMacosError, inject_and_sign, load_command_slack,
+};
 use ginary::trailer::{TRAILER_LEN, Trailer};
 
 /// A digest whose bytes are all different, so a slice taken in the wrong
@@ -522,4 +526,451 @@ fn an_injected_artifact_does_not_claim_to_be_linker_signed() {
         CS_ADHOC,
         "the signature is still ad-hoc; flags were {flags:#x}"
     );
+}
+
+// ---------------------------------- E10: a stub with no signature to reuse --
+//
+// The arm64 job is green and the x86_64 job is not, on the same code, because
+// of one difference the platform linker makes: it ad-hoc signs every arm64
+// Mach-O it produces and does not always sign an x86_64 one. E9's writer reuses
+// the `LC_CODE_SIGNATURE` the linker left; with none to reuse it refused,
+// honestly, rather than corrupting the image:
+//
+// ```text
+// error: cannot write the macOS payload section
+//   caused by: cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse;
+//              its load-command area cannot grow without relocating code
+// ```
+//
+// (`macOS (macos-15-intel, macos-x86_64)`
+// <https://github.com/P4suta/ginary/actions/runs/33739517757/job/100597889308>.)
+//
+// The way out follows from E9's own measurements. An `LC_CODE_SIGNATURE` is a
+// `linkedit_data_command`: sixteen bytes. The segment-plus-section command E9
+// proved impossible is a hundred and fifty-two, and the slack before the first
+// section is forty. Sixteen fits in forty, and it fits *without moving
+// anything*: the bytes it is written into belong to no command and no section.
+
+/// A real, whole Mach-O carrying no `LC_CODE_SIGNATURE`: the committed arm64
+/// fixture with the one its linker left taken away again.
+///
+/// Derived from a real binary rather than fabricated, because the claim under
+/// test is about what a writer does to a *linker's* layout — the slack, the
+/// segment geometry, the fixups — and no x86_64 darwin binary can be produced
+/// on this machine. The `cputype` is left alone: it is not what selects the
+/// branch, the absence of the command is, and restamping the header would make
+/// the fixture claim to be a file it is not.
+fn unsigned_real_stub() -> Vec<u8> {
+    without_code_signature(&real_fixture_bytes())
+}
+
+/// The page size a segment's `vmsize` is a whole number of, matching Apple
+/// Silicon's, which is what `src/sign_macos.rs` rounds a grown `__LINKEDIT` up
+/// to.
+const SEGMENT_PAGE_ALIGN: u64 = 0x4000;
+
+/// The first offset at which `left` and `right` differ, or [`None`].
+///
+/// A byte-for-byte `assert_eq!` over sixty kilobytes prints sixty kilobytes;
+/// the offset is the whole of what a reader needs.
+fn first_difference(left: &[u8], right: &[u8]) -> Option<usize> {
+    if left.len() != right.len() {
+        return Some(left.len().min(right.len()));
+    }
+    left.iter().zip(right).position(|(a, b)| a != b)
+}
+
+/// Injects `payload` into `stub` and returns the finished bytes and the report.
+fn signed(stub: &[u8], payload: &[u8]) -> (Vec<u8>, ginary::sign_macos::InjectReport) {
+    let with_trailer = payload_with_trailer(payload, DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+    let report = inject_and_sign(
+        stub,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect("a thin Mach-O stub is injected into and signed");
+    (std::fs::read(&out).expect("the output was written"), report)
+}
+
+#[test]
+fn load_command_slack_measures_the_room_between_the_commands_and_the_first_section() {
+    let stub = real_fixture_bytes();
+
+    let slack = load_command_slack(&stub).expect("the committed fixture is a thin 64-bit Mach-O");
+
+    assert_eq!(
+        slack,
+        LoadCommandSlack {
+            commands_end: 1688,
+            first_content_offset: 1728,
+            free: 40,
+        },
+        "the measurement E9 took by hand, taken by the code that has to act on it"
+    );
+    let (_, sizeofcmds) = command_counts(&stub);
+    assert_eq!(
+        slack.commands_end,
+        32 + u64::from(sizeofcmds),
+        "the commands end where the header says they do"
+    );
+    assert_eq!(
+        Some(slack.first_content_offset),
+        first_section_offset(&stub),
+        "content begins at the lowest section file offset in the image"
+    );
+    assert!(
+        slack.free >= CODE_SIGNATURE_COMMAND_LEN,
+        "sixteen bytes of load command fit in the forty this linker left; {} were free",
+        slack.free
+    );
+}
+
+#[test]
+fn removing_the_code_signature_leaves_room_for_one_and_a_stub_that_still_reads() {
+    let stub = unsigned_real_stub();
+
+    let facts = macho::read(&stub).expect("the derived fixture is still a whole Mach-O");
+    let slack = load_command_slack(&stub).expect("and its slack is still measurable");
+
+    assert!(!facts.has_code_signature, "the command was taken away");
+    assert_eq!(
+        slack,
+        LoadCommandSlack {
+            commands_end: 1672,
+            first_content_offset: 1728,
+            free: 56,
+        },
+        "the sixteen bytes the removed command occupied are slack again"
+    );
+}
+
+#[test]
+fn a_stub_with_no_code_signature_gains_one_in_the_load_command_slack() {
+    let stub = unsigned_real_stub();
+    let (before_ncmds, before_sizeofcmds) = command_counts(&stub);
+
+    let (written, report) = signed(&stub, b"a payload for a stub the linker never signed");
+
+    assert_eq!(
+        report.code_signature,
+        Some(CodeSignatureSlot::Added),
+        "there was no command to reuse, so one was added"
+    );
+    assert!(report.signed);
+    let (after_ncmds, after_sizeofcmds) = command_counts(&written);
+    assert_eq!(
+        (after_ncmds, after_sizeofcmds),
+        (
+            before_ncmds + 1,
+            before_sizeofcmds + u32::try_from(CODE_SIGNATURE_COMMAND_LEN).expect("16 fits"),
+        ),
+        "one command more, sixteen bytes longer"
+    );
+    let commands = load_commands(&written);
+    assert_eq!(
+        commands.len(),
+        after_ncmds as usize,
+        "`ncmds` counts the commands that are actually there"
+    );
+    assert_eq!(
+        commands.iter().map(|(_, _, size)| *size).sum::<usize>(),
+        after_sizeofcmds as usize,
+        "`sizeofcmds` is the sum of the command sizes and nothing else"
+    );
+    assert_eq!(
+        commands.last().map(|(cmd, at, size)| (*cmd, *at, *size)),
+        Some((
+            0x1d,
+            32 + before_sizeofcmds as usize,
+            CODE_SIGNATURE_COMMAND_LEN as usize
+        )),
+        "the added LC_CODE_SIGNATURE is written into the slack, immediately after the commands \
+         that were already there"
+    );
+}
+
+#[test]
+fn nothing_before_linkedit_moves_when_a_code_signature_is_added() {
+    let stub = unsigned_real_stub();
+    let (ncmds, sizeofcmds) = command_counts(&stub);
+    let commands_end = 32 + sizeofcmds as usize;
+    let linkedit_at = segment_command_offset(&stub, "__LINKEDIT").expect("__LINKEDIT is there");
+    let linkedit_fileoff = usize::try_from(u64::from_le_bytes(
+        stub[linkedit_at + 40..linkedit_at + 48]
+            .try_into()
+            .expect("eight bytes"),
+    ))
+    .expect("an offset that fits");
+
+    let (written, _report) = signed(&stub, b"a payload that must not push a single byte along");
+
+    let signature = codesign::signature(&written).expect("the artifact is signed");
+    let mut expected = stub[..linkedit_fileoff].to_vec();
+    expected[16..20].copy_from_slice(&(ncmds + 1).to_le_bytes());
+    expected[20..24].copy_from_slice(
+        &(sizeofcmds + u32::try_from(CODE_SIGNATURE_COMMAND_LEN).expect("16 fits")).to_le_bytes(),
+    );
+    let mut command = 0x1du32.to_le_bytes().to_vec();
+    command.extend_from_slice(
+        &u32::try_from(CODE_SIGNATURE_COMMAND_LEN)
+            .unwrap()
+            .to_le_bytes(),
+    );
+    command.extend_from_slice(
+        &u32::try_from(signature.data_offset)
+            .expect("a signature offset that fits")
+            .to_le_bytes(),
+    );
+    command.extend_from_slice(
+        &u32::try_from(signature.data_size)
+            .expect("a signature size that fits")
+            .to_le_bytes(),
+    );
+    expected[commands_end..commands_end + command.len()].copy_from_slice(&command);
+    // `__LINKEDIT` grows over the payload and the signature — that is the whole
+    // design, and its `filesize`/`vmsize` are fields, not moved bytes. The two
+    // values are derived here from the finished file's own geometry rather than
+    // copied out of it, so the expectation still states what they must be.
+    let linkedit_filesize = signature.data_offset + signature.data_size - linkedit_fileoff as u64;
+    expected[linkedit_at + 32..linkedit_at + 40].copy_from_slice(
+        &linkedit_filesize
+            .next_multiple_of(SEGMENT_PAGE_ALIGN)
+            .to_le_bytes(),
+    );
+    expected[linkedit_at + 48..linkedit_at + 56].copy_from_slice(&linkedit_filesize.to_le_bytes());
+
+    assert_eq!(
+        first_difference(&written[..linkedit_fileoff], &expected),
+        None,
+        "every byte before __LINKEDIT is the stub's own, except `ncmds`, `sizeofcmds`, the \
+         sixteen slack bytes the new command was written into and __LINKEDIT's own two size \
+         fields; a byte that moved is a relocated entry point and a segfault at exec"
+    );
+    let entry = entry_point(&written, 32).expect("the artifact still has an entry point");
+    let stub_entry = entry_point(&stub, 32).expect("so does the stub");
+    assert_eq!(
+        (entry.file_offset, entry.bytes),
+        (stub_entry.file_offset, stub_entry.bytes),
+        "the entry point names the same offset and the same instructions"
+    );
+}
+
+#[test]
+fn the_added_code_signature_points_at_the_signature_after_the_grown_linkedit() {
+    let stub = unsigned_real_stub();
+
+    let (written, report) = signed(&stub, b"a payload the added command has to account for");
+
+    let signature = codesign::signature(&written).expect("the artifact is signed");
+    assert_eq!(
+        signature.data_offset % codesign::SIGNATURE_ALIGNMENT,
+        0,
+        "the signature begins on a 16-byte boundary"
+    );
+    assert_eq!(
+        signature.data_offset + signature.data_size,
+        written.len() as u64,
+        "the signature is the last thing in the file"
+    );
+    let linkedit = codesign::segment(&written, "__LINKEDIT").expect("__LINKEDIT is there");
+    assert_eq!(
+        linkedit.fileoff + linkedit.filesize,
+        written.len() as u64,
+        "__LINKEDIT grew over the payload and the signature, and still ends the file"
+    );
+    assert!(
+        linkedit.fileoff <= report.payload_offset,
+        "the payload is inside __LINKEDIT, which starts at {}",
+        linkedit.fileoff
+    );
+    assert_eq!(
+        report.payload_offset + report.payload_size,
+        signature.data_offset,
+        "the payload's trailer ends exactly where the signature begins, which is where `locate` \
+         reads it from"
+    );
+}
+
+#[test]
+fn the_code_directory_of_a_stub_that_had_no_signature_covers_the_finished_file() {
+    let stub = unsigned_real_stub();
+
+    let (written, _report) = signed(&stub, b"bytes the CodeDirectory has to be taken over");
+
+    let signature = codesign::signature(&written).expect("the artifact is signed");
+    let directory = &signature.code_directory;
+    assert_eq!(
+        codesign::first_bad_slot(&written, directory),
+        None,
+        "every code slot is the SHA-256 of the page it stands for"
+    );
+    assert_eq!(
+        directory.code_limit, signature.data_offset,
+        "the hashes cover everything below the signature and nothing else"
+    );
+    assert_eq!(
+        directory.flags & CS_ADHOC,
+        CS_ADHOC,
+        "the signature asserts no identity, and says so"
+    );
+    assert_eq!(
+        directory.flags & CS_LINKER_SIGNED,
+        0,
+        "no linker produced this file"
+    );
+}
+
+#[test]
+fn locate_round_trips_a_payload_written_into_a_stub_that_had_no_code_signature() {
+    let stub = unsigned_real_stub();
+    let payload = b"the payload a launcher has to find again through the command that was added";
+
+    let (written, report) = signed(&stub, payload);
+
+    let (file, _dir) = open(&written);
+    let found = locate(&file)
+        .expect("the finished artifact reads")
+        .expect("and it carries a payload");
+    assert_eq!(
+        found.via,
+        PayloadVia::MachOAppended,
+        "the trailer sits immediately before the signature the added command points at"
+    );
+    assert_eq!(
+        (found.offset, found.len, found.sha256),
+        (report.payload_offset, payload.len() as u64, DIGEST)
+    );
+    let start = usize::try_from(found.offset).expect("an offset that fits");
+    let end = start + usize::try_from(found.len).expect("a length that fits");
+    assert_eq!(&written[start..end], payload, "byte for byte");
+}
+
+#[test]
+fn a_fabricated_x86_64_stub_with_no_code_signature_is_signed_like_any_other() {
+    let text = b"\x55\x48\x89\xe5\x31\xc0\x5d\xc3 the entry point's own instructions";
+    let built = stub_like(&StubSpec {
+        cpu_type: CPU_TYPE_X86_64,
+        code_signature: false,
+        slack: 40,
+        text,
+        linkedit: b"__LINKEDIT: a symbol table, a string table, and nothing else",
+    });
+
+    let slack = load_command_slack(&built.bytes).expect("a thin 64-bit Mach-O");
+    assert_eq!(
+        slack,
+        LoadCommandSlack {
+            commands_end: built.commands_end,
+            first_content_offset: built.first_content_offset,
+            free: 40,
+        }
+    );
+
+    let (written, report) = signed(&built.bytes, b"a payload for an x86_64 stub");
+
+    assert_eq!(report.cputype, "x86_64");
+    assert_eq!(report.code_signature, Some(CodeSignatureSlot::Added));
+    assert_eq!(
+        codesign::first_bad_slot(
+            &written,
+            &codesign::signature(&written)
+                .expect("the artifact is signed")
+                .code_directory,
+        ),
+        None
+    );
+}
+
+#[test]
+fn the_committed_arm64_fixture_still_reuses_the_code_signature_its_linker_left() {
+    let stub = real_fixture_bytes();
+    let (ncmds, sizeofcmds) = command_counts(&stub);
+
+    let (written, report) = signed(&stub, b"a payload for a stub that arrived already signed");
+
+    assert_eq!(
+        report.code_signature,
+        Some(CodeSignatureSlot::Reused),
+        "an arm64 image always carries a command to reuse, and reusing it adds nothing"
+    );
+    assert_eq!(
+        command_counts(&written),
+        (ncmds, sizeofcmds),
+        "not one load command is added when there is one to reuse"
+    );
+}
+
+#[test]
+fn a_stub_with_too_little_slack_says_how_many_bytes_it_needed_and_how_many_were_free() {
+    let built = stub_like(&StubSpec {
+        cpu_type: CPU_TYPE_X86_64,
+        code_signature: false,
+        slack: 8,
+        text: b"eight spare bytes are not sixteen",
+        linkedit: b"__LINKEDIT",
+    });
+    let with_trailer = payload_with_trailer(b"a payload with nowhere to be described", DIGEST);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("artifact");
+
+    let error = inject_and_sign(
+        &built.bytes,
+        &with_trailer,
+        &out,
+        &MacSignCfg {
+            codesign: CodeSign::Adhoc,
+        },
+    )
+    .expect_err("eight bytes of slack cannot hold a sixteen-byte load command");
+
+    assert!(
+        matches!(
+            error,
+            SignMacosError::NoRoomForCodeSignature {
+                needed: 16,
+                free: 8
+            }
+        ),
+        "the refusal names both numbers, got {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse: adding one needs 16 \
+         bytes of load command and only 8 are free before the first section, and the \
+         load-command area cannot grow without relocating code"
+    );
+    assert!(
+        !out.exists(),
+        "nothing is written when nothing can be signed"
+    );
+}
+
+#[test]
+fn the_adr_and_the_format_document_state_both_signature_cases() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let adr = std::fs::read_to_string(
+        root.join("docs/adr/0016-macho-section-payload-and-adhoc-signing.md"),
+    )
+    .expect("ADR 0016 is committed");
+    let format = std::fs::read_to_string(root.join("docs/format.md")).expect("docs/format.md");
+
+    for (name, text) in [("ADR 0016", &adr), ("docs/format.md", &format)] {
+        assert!(
+            text.contains("no LC_CODE_SIGNATURE"),
+            "{name} must state the case where the stub carries no LC_CODE_SIGNATURE"
+        );
+        assert!(
+            text.contains("16 bytes") || text.contains("sixteen bytes"),
+            "{name} must say how large the load command that is added is"
+        );
+        assert!(
+            text.contains("reuse") || text.contains("reuses"),
+            "{name} must state the other case: the command the stub already carries is reused"
+        );
+    }
 }

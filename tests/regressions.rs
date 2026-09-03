@@ -321,3 +321,15 @@ mod e8_the_extraction_flushed_handles_it_had_opened_read_only;
 mod e8_the_injected_segment_broke_page_alignment;
 #[path = "regressions/e8_two_producers_disagreed_about_one_files_mode.rs"]
 mod e8_two_producers_disagreed_about_one_files_mode;
+
+#[path = "regressions/e10_a_fake_otp_wrote_an_erl_windows_cannot_start.rs"]
+mod e10_a_fake_otp_wrote_an_erl_windows_cannot_start;
+#[path = "regressions/e10_a_snapshot_pinned_the_hosts_own_path_spelling.rs"]
+mod e10_a_snapshot_pinned_the_hosts_own_path_spelling;
+#[path = "regressions/e10_a_test_asked_posix_whether_a_windows_path_was_absolute.rs"]
+mod e10_a_test_asked_posix_whether_a_windows_path_was_absolute;
+#[cfg(feature = "cli")]
+#[path = "regressions/e10_an_x86_64_stub_had_no_code_signature_to_reuse.rs"]
+mod e10_an_x86_64_stub_had_no_code_signature_to_reuse;
+#[path = "regressions/e10_the_needle_halves_were_stored_side_by_side.rs"]
+mod e10_the_needle_halves_were_stored_side_by_side;

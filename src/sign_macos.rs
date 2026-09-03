@@ -85,9 +85,61 @@ pub struct InjectReport {
     pub payload_size: u64,
     /// Whether an ad-hoc signature was applied.
     pub signed: bool,
+    /// Where the `LC_CODE_SIGNATURE` the finished file carries came from, or
+    /// [`None`] when nothing was signed.
+    ///
+    /// An arm64 Mach-O always arrives with one, because the linker ad-hoc
+    /// signs every arm64 image it produces; an x86_64 one often does not, and
+    /// then the command is added into the load-command slack. Both are correct
+    /// outcomes and they are not interchangeable, so the report says which one
+    /// happened rather than leaving a caller to infer it from the bytes.
+    pub code_signature: Option<CodeSignatureSlot>,
     /// The stub's `cputype`, spelled the way [`crate::macho::MachoFacts`]
     /// spells it.
     pub cputype: String,
+}
+
+/// Where the `LC_CODE_SIGNATURE` a signed artifact carries came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeSignatureSlot {
+    /// The stub already carried one, and it was pointed at the new signature.
+    /// No load command was added, so not one byte of the stub moved.
+    Reused,
+    /// The stub carried none, and a 16-byte `linkedit_data_command` was
+    /// written into the slack a linker leaves between the last load command
+    /// and the first section. `ncmds` and `sizeofcmds` grow by one command;
+    /// every file offset in the image stays where the linker put it, because
+    /// the bytes the command occupies were spare.
+    Added,
+}
+
+/// The length of the `linkedit_data_command` an `LC_CODE_SIGNATURE` is: a
+/// command header (`cmd`, `cmdsize`) and the two `u32` fields `dataoff` and
+/// `datasize`.
+///
+/// This is the whole reason the missing-signature case is fixable at all. A
+/// new `LC_SEGMENT_64` with one `section_64` in it — what carving a payload
+/// section would have needed — is 152 bytes, and the sample stub has 40 spare;
+/// 16 fits where 152 does not.
+pub const CODE_SIGNATURE_COMMAND_LEN: u64 = 16;
+
+/// What a stub's load-command area has room for.
+///
+/// A Mach-O's load commands run from the end of its 32-byte header to
+/// `sizeofcmds` bytes later, and the first section's file offset is where the
+/// image's own content begins. A linker rounds the gap between the two up, so
+/// there is normally a little slack: bytes that belong to no command and no
+/// section, and that a new load command can therefore be written into without
+/// moving anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadCommandSlack {
+    /// Where the load commands end: 32 plus the header's `sizeofcmds`.
+    pub commands_end: u64,
+    /// The lowest file offset any section in any segment begins at — the
+    /// first byte of content that a growing command area would overwrite.
+    pub first_content_offset: u64,
+    /// How many bytes lie between the two, and are therefore free.
+    pub free: u64,
 }
 
 /// Why a Mach-O could not be written or signed.
@@ -117,6 +169,27 @@ pub enum SignMacosError {
         "the stub already carries a __GINARY,__payload section; a payload may not be added twice"
     )]
     AlreadySectioned,
+    /// The stub carries no `LC_CODE_SIGNATURE` to reuse, and the slack before
+    /// its first section is too small to add one.
+    ///
+    /// The load-command area cannot grow past the first section without
+    /// relocating every byte of code and data behind it, which invalidates the
+    /// entry point and every offset `LC_DYLD_CHAINED_FIXUPS` encodes. So this
+    /// is refused rather than attempted, and the numbers that decided it are
+    /// reported: how many bytes a command needs, and how many were free.
+    #[error(
+        "cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse: adding one needs \
+         {needed} bytes of load command and only {free} are free before the first section, and \
+         the load-command area cannot grow without relocating code"
+    )]
+    NoRoomForCodeSignature {
+        /// The bytes a `linkedit_data_command` needs:
+        /// [`CODE_SIGNATURE_COMMAND_LEN`].
+        needed: u64,
+        /// The bytes actually free, from
+        /// [`LoadCommandSlack::free`].
+        free: u64,
+    },
     /// The finished file could not be written to `out`.
     #[error("cannot write `{path}`: {source}")]
     Io {
@@ -198,7 +271,102 @@ pub fn inject_and_sign(
         payload_offset: built.payload_offset,
         payload_size: built.payload_size,
         signed: cfg.codesign == CodeSign::Adhoc,
+        code_signature: writer.codesig_slot,
         cputype: facts.cputype,
+    })
+}
+
+/// Measures the load-command slack of the thin 64-bit Mach-O `stub`.
+///
+/// This is the measurement the missing-`LC_CODE_SIGNATURE` case turns on: a
+/// command can be added exactly when [`LoadCommandSlack::free`] is at least
+/// [`CODE_SIGNATURE_COMMAND_LEN`]. It is a function of its own rather than a
+/// step inside [`inject_and_sign`] so that a test — and a person holding a
+/// stub they are unsure of — can ask the question without writing a file.
+///
+/// # Errors
+///
+/// [`SignMacosError::NotAMachO`] when `stub` is not a thin 64-bit
+/// little-endian Mach-O, or when its header, its load commands or one of its
+/// sections runs past the end of the buffer.
+pub fn load_command_slack(stub: &[u8]) -> Result<LoadCommandSlack, SignMacosError> {
+    if stub.get(0..4) != Some(&crate::macho::MH_MAGIC_64.to_le_bytes()[..]) {
+        return Err(parse_error(
+            "only a little-endian 64-bit thin Mach-O has a load-command area this can measure",
+        ));
+    }
+    let geometry = command_geometry(stub)?;
+    // A file with no section at all has nothing the command area could
+    // overwrite before the end of the file, so the file's own length is the
+    // honest bound; every stub a real linker produces has one.
+    let first_content_offset = geometry.first_content_offset.unwrap_or(geometry.file_len);
+    Ok(LoadCommandSlack {
+        commands_end: geometry.commands_end,
+        first_content_offset,
+        free: first_content_offset.saturating_sub(geometry.commands_end),
+    })
+}
+
+/// Where a thin 64-bit Mach-O's load commands end, and where its content
+/// begins.
+#[derive(Clone, Copy, Debug)]
+struct CommandGeometry {
+    /// `32 + sizeofcmds`, checked against the buffer's length.
+    commands_end: u64,
+    /// The lowest non-zero section file offset in the image, or [`None`] when
+    /// the image declares no section at all.
+    first_content_offset: Option<u64>,
+    /// The buffer's length.
+    file_len: u64,
+}
+
+/// Walks `stub`'s load commands and reports [`CommandGeometry`].
+///
+/// The walk is the same one [`Writer::plan`] does, kept separate so that a
+/// caller measuring a stub does not have to plan a write of it.
+fn command_geometry(stub: &[u8]) -> Result<CommandGeometry, SignMacosError> {
+    let ncmds = get_u32(stub, 16)?;
+    let sizeofcmds = get_u32(stub, 20)? as usize;
+    let commands_end = HEADER_LEN
+        .checked_add(sizeofcmds)
+        .ok_or_else(|| parse_error("the load command area overflows"))?;
+    if stub.len() < commands_end {
+        return Err(parse_error(
+            "the load commands run past the end of the file",
+        ));
+    }
+
+    let mut offset = HEADER_LEN;
+    let mut first_content_offset: Option<u64> = None;
+    for _ in 0..ncmds {
+        let cmd = get_u32(stub, offset)?;
+        let size_field = offset
+            .checked_add(4)
+            .ok_or_else(|| parse_error("a load command offset overflows"))?;
+        let cmdsize = get_u32(stub, size_field)? as usize;
+        if cmdsize < 8 {
+            return Err(parse_error("a load command is shorter than its own header"));
+        }
+        let end = offset
+            .checked_add(cmdsize)
+            .ok_or_else(|| parse_error("a load command's size overflows"))?;
+        if end > stub.len() {
+            return Err(parse_error("a load command runs past the end of the file"));
+        }
+        if cmd == LC_SEGMENT_64 {
+            let raw = &stub[offset..end];
+            if raw.len() < SEGMENT_CMD_LEN {
+                return Err(parse_error("a segment command is shorter than 72 bytes"));
+            }
+            first_content_offset = min_section_offset(raw, first_content_offset)?;
+        }
+        offset = end;
+    }
+
+    Ok(CommandGeometry {
+        commands_end: commands_end as u64,
+        first_content_offset,
+        file_len: stub.len() as u64,
     })
 }
 
@@ -321,6 +489,8 @@ struct Writer {
     /// The index into [`Writer::commands`] of the `LC_CODE_SIGNATURE` to
     /// patch, when signing.
     codesig_index: Option<usize>,
+    /// Where that command came from, for [`InjectReport::code_signature`].
+    codesig_slot: Option<CodeSignatureSlot>,
     /// The index into [`Writer::commands`] of the `__LINKEDIT` segment to
     /// grow, when signing.
     linkedit_index: Option<usize>,
@@ -410,22 +580,40 @@ impl Writer {
             offset = end;
         }
 
-        // A signed build needs a command to point at the signature. Adding one
-        // would grow the load-command area and slide the code that follows it,
-        // which is the very thing this writer exists to avoid; a linker always
-        // ad-hoc signs its output, so a stub without the command is not one a
-        // real build ever hands us.
+        // A signed build needs a command to point at the signature. The linker
+        // ad-hoc signs every arm64 image it produces, so an arm64 stub always
+        // arrives with one to reuse; an x86_64 stub often does not, and then a
+        // sixteen-byte `linkedit_data_command` is written into the slack that
+        // sits between the last load command and the first section. Those bytes
+        // belong to no command and no section, so the command area grows into
+        // spare room and every file offset in the image stays where the linker
+        // put it. Only a stub whose slack is genuinely smaller than a command
+        // is refused, and the refusal names both numbers.
+        let mut codesig_slot = None;
         let codesig_index = if sign {
-            let index = commands
+            match commands
                 .iter()
-                .position(|raw| get_u32(raw, 0).unwrap_or(0) == LC_CODE_SIGNATURE);
-            if index.is_none() {
-                return Err(parse_error(
-                    "cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse; its \
-                     load-command area cannot grow without relocating code",
-                ));
+                .position(|raw| get_u32(raw, 0).unwrap_or(0) == LC_CODE_SIGNATURE)
+            {
+                Some(index) => {
+                    codesig_slot = Some(CodeSignatureSlot::Reused);
+                    Some(index)
+                }
+                None => {
+                    let free = first_content_off
+                        .unwrap_or(stub.len() as u64)
+                        .saturating_sub(old_lc_end as u64);
+                    if free < CODE_SIGNATURE_COMMAND_LEN {
+                        return Err(SignMacosError::NoRoomForCodeSignature {
+                            needed: CODE_SIGNATURE_COMMAND_LEN,
+                            free,
+                        });
+                    }
+                    commands.push(new_code_signature_command());
+                    codesig_slot = Some(CodeSignatureSlot::Added);
+                    Some(commands.len() - 1)
+                }
             }
-            index
         } else {
             None
         };
@@ -446,12 +634,13 @@ impl Writer {
         let new_lc_end = HEADER_LEN
             .checked_add(new_sizeofcmds)
             .ok_or_else(|| parse_error("the rewritten load command area overflows"))?;
-        // The command area only ever shrinks (a dropped signature) or stays the
-        // same, so it fits before the stub's first content byte with room to
-        // spare; the padding makes up the difference so nothing moves.
-        let lc_padding = old_lc_end
-            .checked_sub(new_lc_end)
-            .ok_or_else(|| parse_error("the rewritten load commands do not fit"))?;
+        // The command area shrinks (a dropped signature), stays the same, or
+        // grows by exactly one command into the slack. When it shrinks the
+        // padding makes the difference up so nothing moves; when it grows it
+        // eats slack, and the stub's own bytes are taken from past it — either
+        // way the first content byte lands on the offset the linker gave it.
+        let lc_padding = old_lc_end.saturating_sub(new_lc_end);
+        let content_from = old_lc_end.max(new_lc_end);
         if let Some(first) = first_content_off
             && (new_lc_end as u64) > first
         {
@@ -472,7 +661,10 @@ impl Writer {
             .map(|raw| (get_u64(raw, 40).unwrap_or(0), get_u64(raw, 48).unwrap_or(0)))
             .unwrap_or((0, 0));
 
-        let content = stub[old_lc_end..content_end].to_vec();
+        let content = stub
+            .get(content_from..content_end)
+            .ok_or_else(|| parse_error("the payload boundary is outside the file"))?
+            .to_vec();
 
         Ok(Self {
             header,
@@ -483,6 +675,7 @@ impl Writer {
             payload_sha256,
             sign,
             codesig_index,
+            codesig_slot,
             linkedit_index,
             text_fileoff,
             text_filesize,
@@ -612,6 +805,26 @@ impl Writer {
             })
         }
     }
+}
+
+/// A fresh, empty `LC_CODE_SIGNATURE`: the sixteen bytes of a
+/// `linkedit_data_command` with `dataoff` and `datasize` left at zero for
+/// [`Writer::build`] to patch once the signature's place is known.
+///
+/// This is the whole of what the missing-signature case adds to a stub. It is
+/// written into the slack between the last load command and the first section,
+/// so `ncmds` and `sizeofcmds` grow and not one byte of content moves.
+fn new_code_signature_command() -> Vec<u8> {
+    let mut raw = Vec::with_capacity(CODE_SIGNATURE_COMMAND_LEN as usize);
+    raw.extend_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+    raw.extend_from_slice(
+        &u32::try_from(CODE_SIGNATURE_COMMAND_LEN)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    raw.extend_from_slice(&0u32.to_le_bytes()); // dataoff, patched by `build`
+    raw.extend_from_slice(&0u32.to_le_bytes()); // datasize, patched by `build`
+    raw
 }
 
 /// A plain, unsigned ad-hoc `CodeDirectory` (`CSMAGIC_EMBEDDED_SIGNATURE`

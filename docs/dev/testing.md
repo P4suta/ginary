@@ -294,10 +294,22 @@ as a defect.
 
 `tests/common/fake_otp.rs` builds the two directory layouts every build-side module reads, in a
 temporary directory, in milliseconds, with no Erlang installed. `tests/common/script.rs` is the
-third builder: it writes an executable `/bin/sh` stub, which is how a test puts a chosen `erl`
-on a `PATH` of its own. `tests/common/snapshot.rs` is the fourth helper, and exists because those
+third builder: `program` plants a throwaway `erl` on a `PATH` of its own, described as a list of
+`ShimStep` rather than a line of shell, because the same behaviour has to exist in two forms.
+`shim_form` and `shim_file_name` are the two rules that decide which: on unix an executable
+`/bin/sh` file called `erl`, and on Windows the compiled `examples/ginary_test_shim.rs` copied
+to `erl.exe`, because nothing there reads a shebang — `CreateProcess` looks for `MZ`, finds
+`#!`, and refuses the file, which is how thirty-six targets failed on the first Windows runner
+inside the fixture builder itself. The shim reads its steps from `<program>.steps` and writes
+`<program>.argv`, and `shim_sidecar` is the one naming rule both forms use for those files.
+`tests/common/snapshot.rs` is the fourth helper, and exists because those
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
-with a placeholder, longest path first, so a snapshot pins the sentence rather than the machine.
+with a placeholder, longest path first, and respells every separator as `/` through
+`tests/common/hostpath.rs`, so a snapshot pins the sentence and the shape of the path rather
+than the machine or the slash it writes between two components. `hostpath` holds the other two
+rules of the same kind: `is_absolute_for` decides absoluteness per platform, over drive-absolute,
+UNC and verbatim spellings, and `strip_dir` removes a fixture directory whichever separator
+joined it to the name behind it.
 `tests/common/fixture.rs` and `tests/common/erl.rs` are the two A1c added, and they work on real
 trees rather than fake ones: the first copies a fixture Gleam project and exports it, the second
 boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that
@@ -432,10 +444,15 @@ level lower and takes bytes, for a body that is not UTF-8. `with_markers` plants
 those in `noise`, which is a seeded xorshift rather than anything random — a scanner bug that
 turns on one byte in ten thousand has to be a failure that reproduces, not a flake — and asserts
 its own bytes hold no needle, which is what makes it a negative fixture rather than an accident.
-The needle itself is assembled from `HEAD` and `TAIL` at run time for the same reason
-`stubid::scan` assembles its own: a helper holding `GINARY-STUB-ID\0` contiguously would put a
-second marker into every test binary that links it, and `tests/stubid.rs` would be scanning
-itself.
+The needle itself is stored *masked* and unmasked at run time, for the same reason `stubid`
+masks its own: a helper holding `GINARY-STUB-ID\0` contiguously would put a second marker into
+every test binary that links it, and `tests/stubid.rs` would be scanning itself. Splitting it in
+two halves — which is what both did until E10 — is not enough, because a linker may lay two
+constants out side by side and then the file holds the needle after all; that is exactly what a
+Windows `ginary.exe` was found doing. `fragments` exposes the stored images so the invariant is
+checkable rather than argued: no two of them, in any order, may spell the needle. `stubid::scan`
+counts whole *records* for the same reason, so fifteen bytes of unrelated data are not a second
+identity.
 
 `stub_copy` is the other shape: `stub::verify` reads a *file* and looks at its object header, so
 its fixtures have to be real executables. It copies this test run's own `ginary` and rewrites the

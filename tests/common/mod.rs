@@ -25,6 +25,7 @@ pub mod erl;
 pub mod fake_otp;
 pub mod fixture;
 pub mod homepath;
+pub mod hostpath;
 pub mod http;
 pub mod macho;
 #[cfg(feature = "cli")]

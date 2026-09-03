@@ -67,9 +67,31 @@ it cannot verify at all, not merely one whose signature disagrees. Carving a new
 new load command, making room for it slides the code, and sliding the code invalidates the entry
 point and every `LC_DYLD_CHAINED_FIXUPS` target — the image verifies and segfaults. So a macOS
 artifact carries its payload a third way: it is appended *inside* `__LINKEDIT`, which is grown to
-cover it, with an ad-hoc `CodeDirectory` over the whole file afterwards. No load command is added
-and no existing byte moves. `sign_macos.rs` writes it, `macho.rs` and `payload::locate` read it
-back. See `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for the run that forced this.
+cover it, with an ad-hoc `CodeDirectory` over the whole file afterwards. No existing byte moves.
+`sign_macos.rs` writes it, `macho.rs` and `payload::locate` read it back. See
+`docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for the run that forced this.
+
+The signature has to be described by an `LC_CODE_SIGNATURE` load command, and there are two
+cases, because the platform linker ad-hoc signs every arm64 Mach-O it produces and does not
+always sign an x86_64 one:
+
+- **The stub carries one.** It is *reused*: its `dataoff` and `datasize` are repointed at the
+  fresh signature and no load command is added, so the command area does not grow by a byte.
+  This is every arm64 stub.
+- **The stub carries none.** A file with no LC_CODE_SIGNATURE to reuse is given one: a
+  `linkedit_data_command`, **16 bytes**, is added, `ncmds` grows by one and `sizeofcmds` by
+  sixteen. The command is written into the slack a linker leaves
+  between the last load command and the first section (forty bytes in the committed arm64
+  fixture), which belongs to no command and no section, so again nothing moves: every segment,
+  every section and `LC_MAIN`'s `entryoff` keep the file offsets the linker gave them. This is
+  the ordinary x86_64 stub. Sixteen bytes fit where the hundred and fifty-two of a
+  segment-plus-section command did not, which is why a payload *section* was impossible here and
+  a signature command is not.
+
+`sign_macos::load_command_slack` is that measurement as a function. A stub with less free space
+than a command needs is refused — `SignMacosError::NoRoomForCodeSignature` — naming how many
+bytes were needed and how many were free, rather than growing the command area over the first
+section and relocating the code behind it.
 
 ```
 +-------------------------------------------------+

@@ -16,20 +16,41 @@
 //! the file's headers describes the bytes past the last section, which is the
 //! same property `payload.rs` relies on.
 //!
-//! The needle is assembled here from its two halves for the same reason
-//! `stubid::scan` assembles its own: a helper that held `GINARY-STUB-ID\0`
-//! contiguously would put a second marker into every test binary that links
-//! it, and `tests/stubid.rs` would then be scanning itself.
+//! The needle is masked here for the same reason `stubid` masks its own: a
+//! helper that held `GINARY-STUB-ID\0` contiguously would put a second marker
+//! into every test binary that links it, and `tests/stubid.rs` would then be
+//! scanning itself. Splitting it in two halves is not enough — a linker may
+//! lay two constants out side by side, which is exactly what a Windows
+//! `ginary.exe` was found doing — so one masked image is stored and unmasked
+//! at run time. See `ginary::stubid::needle_fragments`.
 
 use std::path::{Path, PathBuf};
 
 use ginary::target::Target;
 
-/// The first half of the needle.
-pub const HEAD: &[u8] = b"GINARY-STUB";
+/// The byte [`IMAGE`] is masked with, the same one `ginary::stubid` uses.
+const MASK: u8 = 0x5a;
 
-/// The second half, ending in the NUL that closes the name.
-pub const TAIL: &[u8] = b"-ID\0";
+/// The one image of the needle this test suite stores: the fifteen bytes of
+/// the record's name, each exclusive-ored with [`MASK`], so the helper spells
+/// the needle in no arrangement a linker can produce.
+pub const IMAGE: [u8; 15] = [
+    b'G' ^ MASK,
+    b'I' ^ MASK,
+    b'N' ^ MASK,
+    b'A' ^ MASK,
+    b'R' ^ MASK,
+    b'Y' ^ MASK,
+    b'-' ^ MASK,
+    b'S' ^ MASK,
+    b'T' ^ MASK,
+    b'U' ^ MASK,
+    b'B' ^ MASK,
+    b'-' ^ MASK,
+    b'I' ^ MASK,
+    b'D' ^ MASK,
+    MASK,
+];
 
 /// The length of a whole marker, name and padding included.
 pub const MARKER_LEN: usize = 128;
@@ -40,10 +61,36 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The payload format version this ginary writes.
 pub const FORMAT_VERSION: u32 = ginary::manifest::FORMAT_VERSION;
 
-/// The needle, assembled rather than stored.
+/// The needle, unmasked rather than stored.
+///
+/// The mask is read through [`std::hint::black_box`] so the optimiser may not
+/// fold the loop into a plain constant, which would put the needle back into
+/// every test binary that links this helper.
 pub fn needle() -> Vec<u8> {
-    let mut bytes = HEAD.to_vec();
-    bytes.extend_from_slice(TAIL);
+    let mask = std::hint::black_box(MASK);
+    IMAGE.iter().map(|byte| byte ^ mask).collect()
+}
+
+/// The images this test suite stores the needle's halves in, in the order
+/// [`needle`] joins them.
+///
+/// Exposed for the same reason [`ginary::stubid::needle_fragments`] is: a
+/// linker is free to lay two constants out side by side, and if these two ever
+/// are, every binary that links this helper carries the needle contiguously
+/// and `tests/stubid.rs` finds a second identity in a file that has one.
+pub fn fragments() -> Vec<&'static [u8]> {
+    vec![&IMAGE]
+}
+
+/// The bytes a linker leaves behind when it does lay the two halves side by
+/// side: the fifteen bytes of the name, and then whatever constant came next
+/// in the section — which is never a marker body.
+///
+/// This is the shape a Windows `ginary.exe` was found carrying beside its real
+/// marker. A scan has to see it for what it is: not an identity.
+pub fn stray_needle() -> Vec<u8> {
+    let mut bytes = needle();
+    bytes.extend_from_slice(b"\0the next constant in the read-only section\0");
     bytes
 }
 

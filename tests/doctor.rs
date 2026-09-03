@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use crate::common::fake_otp::FakeOtp;
 use crate::common::project::TempProject;
-use crate::common::repack::{foreign_machine, patch_elf_machine, test_binary};
+use crate::common::repack::{foreign_machine, native_target, patch_elf_machine, test_binary};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run in `dir`.
@@ -472,14 +472,24 @@ fn each_configured_target_gets_a_verdict_for_every_object_under_priv() {
         "one column per target the project resolves, in the order it named them"
     );
     assert_eq!(report.native.len(), 1, "{:?}", report.native);
+    // The planted object is the committed ELF fixture, which is for
+    // `repack::native_target()` whatever host reads it — so the host column is
+    // `Ok` on a machine that target names and `MISMATCH` on any other. Asking
+    // the fixture rather than assuming the host built it is the same wiring
+    // `repack::test_binary` states; see `docs/dev/log/E10.md`.
+    let host_verdict = if Target::host() == native_target() {
+        Verdict::Ok
+    } else {
+        Verdict::Mismatch
+    };
     assert_eq!(
         report.native[0].verdicts,
         BTreeMap::from([
-            (host, Verdict::Ok),
+            (host, host_verdict),
             ("linux-aarch64-musl".to_owned(), Verdict::Override),
         ]),
-        "the object this machine built is fine here, and the cross target has \
-         a `native` entry answering for it"
+        "the object the fixture holds is answered for by the target it is for, and the cross \
+         target has a `native` entry answering for it"
     );
 }
 

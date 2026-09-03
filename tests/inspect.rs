@@ -27,6 +27,7 @@ use ginary::manifest::{Index, IndexFile, LaunchSpec, OtpProvenance};
 use ginary::trailer::Trailer;
 
 use crate::common::artifact::SyntheticArtifact;
+use crate::common::hostpath::slashed;
 use crate::common::payload::{sample_launch, sample_manifest};
 
 /// The stub length of the hand-built artifact.
@@ -134,7 +135,14 @@ fn the_launch_plan_is_the_launchers_own_against_a_placeholder_root() {
     )
     .expect("the sample manifest launches");
 
-    insta::assert_snapshot!("inspect_launch_plan", inspect::render_launch_plan(&plan));
+    // Respelled with forward slashes: the plan's paths are built with
+    // `Path::join`, and the snapshot's subject is the plan, not the separator
+    // the host happens to write. See
+    // `tests/regressions/e10_a_snapshot_pinned_the_hosts_own_path_spelling.rs`.
+    insta::assert_snapshot!(
+        "inspect_launch_plan",
+        slashed(&inspect::render_launch_plan(&plan))
+    );
 }
 
 #[test]

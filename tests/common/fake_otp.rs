@@ -52,7 +52,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::common::script::script;
+use crate::common::script::{ShimStep, program, shim_file_name, shim_sidecar};
 
 /// The default ERTS version a [`FakeOtp`] uses, matching the host OTP 29.0.5.
 pub const DEFAULT_ERTS_VSN: &str = "17.0.5";
@@ -650,37 +650,40 @@ impl FakeOtp {
         create_dir_all(&root.join("bin"));
         write(&root.join("bin/no_dot_erlang.boot"), &self.boot_bytes());
         if let Some(kind) = &self.erl_script {
-            let tail = match kind {
-                ErlScript::Succeeding => "exit 0".to_owned(),
+            // Every stub records its argument vector first; the tail is what
+            // distinguishes the three. Through `script::program` rather than
+            // `write_executable`, because this is the one stub a test actually
+            // execs: that helper waits out the ETXTBSY window a sibling
+            // thread's fork opens, and it plants the *form* the host can start
+            // — a shell script on unix, a compiled program on Windows, where a
+            // shebang is a data file.
+            let mut steps = vec![ShimStep::RecordArgv];
+            match kind {
+                ErlScript::Succeeding => steps.push(ShimStep::Exit(0)),
                 ErlScript::Shrinking => {
-                    write(&root.join("bin/erl.module"), &shrunken_beam());
-                    "for arg in \"$@\"; do\n\
-                     \x20 case \"$arg\" in *.beam) cp \"$0.module\" \"$arg\" ;; esac\n\
-                     done\nexit 0"
-                        .to_owned()
+                    steps.push(ShimStep::ReplaceBeamArguments);
+                    steps.push(ShimStep::Exit(0));
                 }
-                // The term travels in a file rather than in the script's own
+                // The term travels in a file rather than in the stub's own
                 // source: an Erlang term printed with `~p` may hold an
                 // apostrophe, and interpolating one into a single-quoted shell
                 // string writes a stub that fails to parse instead of a stub
                 // that fails on purpose.
-                ErlScript::Failing(stderr) => {
-                    write(&root.join("bin/erl.stderr"), stderr.as_bytes());
-                    "cat \"$0.stderr\" >&2\nprintf '\\n' >&2\nexit 1".to_owned()
+                ErlScript::Failing(_) => {
+                    steps.push(ShimStep::PrintStderrFile);
+                    steps.push(ShimStep::Exit(1));
                 }
-            };
-            // Through `script::script` rather than `write_executable`, because
-            // this is the one stub a test actually execs and that helper is
-            // what waits out the ETXTBSY window a sibling thread's fork opens.
-            script(
-                &root.join("bin"),
-                "erl",
-                &format!(
-                    ": > \"$0.argv\"\n\
-                     for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$0.argv\"; done\n\
-                     {tail}"
-                ),
-            );
+            }
+            let erl = program(&root.join("bin"), "erl", &steps);
+            match kind {
+                ErlScript::Succeeding => {}
+                ErlScript::Shrinking => {
+                    write(&shim_sidecar(&erl, "module"), &shrunken_beam());
+                }
+                ErlScript::Failing(stderr) => {
+                    write(&shim_sidecar(&erl, "stderr"), stderr.as_bytes());
+                }
+            }
         }
 
         let releases = root.join("releases");
@@ -778,9 +781,13 @@ impl FakeOtpRoot {
         std::fs::read(self.boot_file()).expect("the fake boot file should be readable")
     }
 
-    /// `<root>/bin/erl`, whether or not one was installed.
+    /// `<root>/bin/erl`, whether or not one was installed — `bin/erl.exe` on
+    /// Windows, which is the name `src/strip.rs` goes looking for and the only
+    /// one a `Command` there will start.
     pub fn erl(&self) -> PathBuf {
-        self.root.join("bin").join("erl")
+        self.root
+            .join("bin")
+            .join(shim_file_name("erl", ginary::platform::HOST))
     }
 
     /// The argument vector the stub `bin/erl` was last called with.
@@ -793,7 +800,7 @@ impl FakeOtpRoot {
     /// If no stub `erl` was installed, or if it was and the log cannot be read
     /// after it ran.
     pub fn erl_argv(&self) -> Vec<String> {
-        let log = self.root.join("bin").join("erl.argv");
+        let log = shim_sidecar(&self.erl(), "argv");
         assert!(
             self.erl().is_file(),
             "no stub erl was installed; call FakeOtp::with_erl_script"

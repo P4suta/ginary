@@ -26,6 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::common::repack::test_binary;
 use ginary::elf::{self, ElfInfo};
 use ginary::strip::{STRIP_ALL_ARGS, STRIP_UNNEEDED_ARGS, strip_arguments};
 
@@ -68,8 +69,16 @@ fn a_shared_object_that_has_an_interpreter_keeps_its_dynamic_symbols() {
 
 #[test]
 fn a_program_is_stripped_all_the_way() {
-    let exe = std::env::current_exe().expect("the running test binary");
-    let info = elf::inspect(&exe).expect("the test binary is an ELF file");
+    // The committed ELF fixture rather than `current_exe()`: the running test
+    // binary is a real ELF only on Linux, and on the Windows runner
+    // `elf::inspect` refused it and the test failed on a host the claim is not
+    // about. The fixture is a program — a PIE executable with a program
+    // interpreter, not named `*.so` — on every machine that reads it. See
+    // `docs/dev/log/E10.md`.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let program = dir.path().join("inet_gethost");
+    std::fs::write(&program, test_binary()).expect("the fixture is written");
+    let info = elf::inspect(&program).expect("the committed fixture is an ELF file");
 
-    assert_eq!(strip_arguments(&exe, &info), STRIP_ALL_ARGS);
+    assert_eq!(strip_arguments(&program, &info), STRIP_ALL_ARGS);
 }

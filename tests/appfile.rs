@@ -13,6 +13,8 @@
 
 mod common;
 
+use crate::common::hostpath::strip_dir;
+
 use std::path::{Path, PathBuf};
 
 use ginary::appfile::{AppFileError, AppResource, ParseError, Term, parse_app_file, parse_terms};
@@ -792,10 +794,11 @@ fn the_failure_messages_read_as_sentences() {
     .iter()
     .map(|error| {
         // The fixture directory is absolute and machine-specific; the file name
-        // is the part the message has to get right.
-        error
-            .to_string()
-            .replace(&format!("{}/", fixtures().display()), "")
+        // is the part the message has to get right. Stripped through
+        // `hostpath::strip_dir` because `Path::join` uses the host's separator
+        // and gluing a `/` onto the directory matches nothing on a machine
+        // that joined with `\`.
+        strip_dir(&error.to_string(), &fixtures())
     })
     .collect::<Vec<_>>()
     .join("\n");

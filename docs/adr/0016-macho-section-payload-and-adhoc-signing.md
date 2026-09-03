@@ -224,3 +224,64 @@ inside what the hashes cover, and `__LINKEDIT` ends the file. That the artifact 
 and passes `codesign --verify --strict` is what the macOS runners confirm, with the load-command
 diff the job prints beside the run as the standing evidence. `docs/dev/log/E9.md` records the run
 and the fix.
+
+## 2026-09-03 — an x86_64 stub has no `LC_CODE_SIGNATURE` to reuse, so one is added
+
+The amendment above is right about the layout and incomplete about one input. It says the writer
+"reuses the `LC_CODE_SIGNATURE` command the linker already left", and on arm64 there always is
+one: the platform linker ad-hoc signs every arm64 Mach-O it produces. On x86_64 it does not, and
+`macos-15-intel` of <https://github.com/P4suta/ginary/actions/runs/33739517757> failed at the
+packaging step with the honest refusal the writer emits in that case:
+
+```text
+error: cannot write the macOS payload section
+  caused by: cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse;
+             its load-command area cannot grow without relocating code
+```
+
+The arm64 job passed on the same code and the same day. The difference is entirely what the
+platform linker left behind.
+
+**Amended decision, second amendment.** The signed path now has two branches, and the report
+`InjectReport::code_signature` says which one a given artifact took, because they are not
+interchangeable:
+
+- **`Reused`** — the stub carries an `LC_CODE_SIGNATURE`. Its `dataoff`/`datasize` are repointed
+  at the fresh signature; no load command is added or removed. Unchanged from the first
+  amendment, and the branch every arm64 stub takes.
+- **`Added`** — the stub carries **no `LC_CODE_SIGNATURE`**. A `linkedit_data_command` is
+  appended to the load commands: `cmd`, `cmdsize`, `dataoff`, `datasize`, **16 bytes** in total.
+  `ncmds` grows by one and `sizeofcmds` by sixteen.
+
+The second branch is safe for exactly the reason the section approach was not, and the numbers
+are the ones this ADR already recorded. A segment-plus-section command is 152 bytes and the
+committed arm64 fixture has 40 spare before its first section, so a section could not be added
+without sliding the image. A signature command is 16, and 16 fits in 40. The bytes it is written
+into lie between the end of the load commands and the first section's file offset: they belong to
+no load command and no section, so the command area grows into spare room and **not one file
+offset in the image changes**. `LC_MAIN`'s `entryoff`, every segment's `fileoff` and `vmaddr`, and
+every `LC_DYLD_CHAINED_FIXUPS` target are byte-for-byte what the stub carried — which is the
+property the segfault of the section approach taught us to check, and which
+`nothing_before_linkedit_moves_when_a_code_signature_is_added` checks over the whole prefix.
+
+The slack is measured rather than assumed. `sign_macos::load_command_slack` reports
+`commands_end` (`32 + sizeofcmds`), `first_content_offset` (the lowest non-zero section file
+offset in the image) and `free` (the difference), so a stub whose layout is unknown is asked
+instead of trusted. A stub with less free space than a command needs is still refused, now with
+both numbers in the message:
+
+```text
+cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse: adding one needs 16 bytes of
+load command and only 8 are free before the first section, and the load-command area cannot
+grow without relocating code
+```
+
+Both branches are tested on Linux, and neither rests on a fabricated file alone. The reuse branch
+is exercised against the committed arm64 fixture, which arrives with the command its linker left.
+The add branch is exercised against that same real image with the command taken away again —
+`ncmds`/`sizeofcmds` reduced, the sixteen bytes it occupied returned to slack, `__LINKEDIT` shrunk
+and the file truncated at `dataoff`, which is what a linker that never signed its output would
+have left — and against a hand-built `CPU_TYPE_X86_64` stub, so the claim does not rest on one
+file. No arm64 binary is restamped as an x86_64 one: the branch is selected by the *absence of the
+command*, not by the architecture, and a fixture that claimed a `cputype` it does not have would
+be evidence of nothing. `docs/dev/log/E10.md` records the run and the fix.

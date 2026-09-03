@@ -21,6 +21,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 
 use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
+use crate::common::hostpath::is_absolute_for;
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
@@ -215,8 +216,14 @@ fn doctor_text_names_the_otp_root_and_version() {
         !stdout.contains("otp: not found"),
         "`erl` is on PATH, so doctor must report the installation:\n{stdout}"
     );
+    // Absolute as *this* platform spells it: the Windows runtime prints
+    // `otp root: d:/a/_temp/.setup-beam/otp`, which is absolute and does not
+    // begin with a slash. See
+    // `tests/regressions/e10_a_test_asked_posix_whether_a_windows_path_was_absolute.rs`.
     assert!(
-        stdout.lines().any(|line| line.starts_with("otp root: /")),
+        stdout.lines().any(|line| line
+            .strip_prefix("otp root: ")
+            .is_some_and(|root| is_absolute_for(ginary::platform::HOST, root))),
         "no absolute `otp root:` line in:\n{stdout}"
     );
     assert!(
