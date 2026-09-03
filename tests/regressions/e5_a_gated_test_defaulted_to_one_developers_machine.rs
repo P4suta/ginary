@@ -33,60 +33,25 @@
 //! machine is a default. The rule lives in `tests/common/shipment.rs` so both
 //! halves of it can be asserted here without a filesystem.
 //!
-//! **The scan.** The last test in this file is the general form of the bug: no
-//! file `git` tracks under `tests/`, `src/`, `scripts/` or `.github/` may
-//! contain this machine's `$HOME`. Three details of it are load-bearing. It
-//! reads *bytes*, because the first version decoded each file as UTF-8 and
-//! silently dropped everything that was not — which is the class of file most
-//! likely to embed an absolute path, and three tracked `.beam` fixtures did.
-//! It walks `git ls-files` rather than the directory tree, because its failure
-//! says *tracked* and a local `gleam build` fills
-//! `tests/fixtures/hello_ffi/build/` with absolute paths that belong to
-//! nobody's repository. And a file it cannot read at all is a reported
-//! failure, not a pass: skipping is a decision somebody makes on the record.
-//! The one exception is [`ALLOWED`], argued there and in
-//! `tests/fixtures/beam/README.md`.
+//! **The scan.** The general form of the bug — no tracked file under `src/`,
+//! `tests/`, `scripts/` or `.github/` may carry a person's absolute home
+//! path — was asserted by a last test in this file, and it asked *this
+//! machine* what its home directory was. That made it a rule with a different
+//! meaning on every machine and the wrong meaning on a hosted runner, where
+//! `$HOME` is `/home/runner` and every pasted CI transcript contains it: it
+//! policed prose there, and everywhere else a developer's path hard-coded by
+//! somebody else passed, which is exactly the defect above. The rule is now
+//! machine-independent and lives in `crate::common::homepath`, asserted by
+//! `tests/regressions/e7_the_home_directory_scan_only_worked_on_one_machine.rs`;
+//! what survives unchanged is everything that was right about it — bytes
+//! rather than decoded text, `git ls-files` rather than a directory walk, an
+//! unreadable file reported rather than skipped, and the three `.beam`
+//! fixtures as the one argued exception.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use crate::common::repo::root;
 use crate::common::shipment::{SHIPMENT_VAR, ShipmentChoice, choose_shipment};
-
-/// This file quotes the very paths the scan below looks for, so the scan skips
-/// it by name. Nothing else under the scanned directories may.
-const SELF: &str = "e5_a_gated_test_defaulted_to_one_developers_machine.rs";
-
-/// The directories that must never name the machine they were written on.
-///
-/// `docs/` is deliberately absent: a milestone log quoting a CI failure is
-/// supposed to reproduce the failing path verbatim, and this very bug is
-/// recorded in `docs/dev/log/E5.md` with the author's path in it.
-const SCANNED: [&str; 4] = ["tests", "src", "scripts", ".github"];
-
-/// The tracked files that are allowed to contain an absolute home path, and
-/// the reason each one is.
-///
-/// One reason, and only one: a `.beam` file is a compiled artifact, and the
-/// Erlang compiler records the absolute path of the `.erl` it compiled in the
-/// file's `Dbgi` chunk. These three were copied *verbatim* out of a real
-/// `gleam export erlang-shipment`, which is the whole point of them — they are
-/// the fixture that shows what a real compiler emits, against the hand-built
-/// byte strings in `tests/beam.rs` that pin the grammar. Rewriting the chunk
-/// would make them no longer what a compiler wrote; recompiling `gleam_stdlib`
-/// with a relative `-o` would change every offset and size the README records
-/// and would no longer be `gleam_stdlib` 1.0.5 as shipped.
-///
-/// So the path stays, as an argued exception rather than as a file this scan
-/// happened not to be able to read. `tests/fixtures/beam/README.md` says the
-/// same thing where somebody looking at the fixtures will find it. The rule
-/// the exception is carved out of is unchanged: no path on one machine is a
-/// default, a fallback, or a value any code reads.
-const ALLOWED: [&str; 3] = [
-    "tests/fixtures/beam/gleam@bool.beam",
-    "tests/fixtures/beam/gleam@list.beam",
-    "tests/fixtures/beam/gleam@string.beam",
-];
 
 #[test]
 fn an_unnamed_shipment_is_a_skip_even_when_the_toolchain_is_required() {
@@ -151,107 +116,4 @@ fn an_empty_shipment_variable_is_the_same_as_an_unnamed_one() {
             );
         }
     }
-}
-
-#[test]
-fn no_source_or_test_file_names_the_home_directory_of_the_machine_it_was_written_on() {
-    let Some(home) = home_directory() else {
-        eprintln!("skipping: no usable home directory to look for");
-        return;
-    };
-    let Some(tracked) = tracked_files() else {
-        eprintln!("skipping: `git ls-files` did not answer, so `tracked` would be a guess");
-        return;
-    };
-    let mut offenders: Vec<String> = Vec::new();
-    let mut unreadable: Vec<String> = Vec::new();
-    for relative in tracked {
-        if relative.ends_with(SELF) || ALLOWED.contains(&relative.as_str()) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(root().join(&relative)) else {
-            unreadable.push(relative);
-            continue;
-        };
-        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
-            if line
-                .windows(home.len())
-                .any(|window| window == home.as_bytes())
-            {
-                offenders.push(format!("{relative}:{}", index + 1));
-            }
-        }
-    }
-    let stale: Vec<&str> = ALLOWED
-        .into_iter()
-        .filter(|allowed| !root().join(allowed).is_file())
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "an entry of ALLOWED names a file that is not in the tree any more. An exception nobody \
-         needs is an exception nobody argued for:\n{}",
-        stale.join("\n")
-    );
-    assert!(
-        unreadable.is_empty(),
-        "a tracked file under {SCANNED:?} could not be read, so nobody knows what is in it. A \
-         file this scan cannot open is a reported failure, never a silent pass:\n{}",
-        unreadable.join("\n")
-    );
-    assert!(
-        offenders.is_empty(),
-        "a tracked file names `{home}`, the home directory of the machine it was written on. A \
-         path that exists on one machine is not a default, a fixture or a fallback:\n{}",
-        offenders.join("\n")
-    );
-}
-
-/// Every file `git` tracks under [`SCANNED`], repository-relative.
-///
-/// The walk is `git ls-files` rather than a directory read because the failure
-/// this test prints says *tracked*, and a directory read also enumerates build
-/// output: `tests/fixtures/hello_ffi/build/` appears the moment a contributor
-/// runs `gleam build`, and it contains absolute paths by construction. A
-/// gitignored artifact naming this machine is not a bug in the repository.
-///
-/// `None` when `git` cannot answer at all — no `git` on `PATH`, or a source
-/// tree unpacked from a tarball. That is a reported skip rather than a quiet
-/// fallback to the directory read, because the two answer different questions.
-fn tracked_files() -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root())
-        .args(["ls-files", "-z", "--"])
-        .args(SCANNED)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter_map(|name| std::str::from_utf8(name).ok())
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect(),
-    )
-}
-
-/// The home directory of the account running the suite, when it is one a file
-/// could plausibly and wrongly hard-code.
-///
-/// `/` and `/root` are the two that a container hands out and that a hundred
-/// unrelated lines contain, so they answer `None` rather than flooding the
-/// failure with noise.
-fn home_directory() -> Option<String> {
-    let home = std::env::var("HOME")
-        .ok()
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
-    let trimmed = home.trim_end_matches('/').to_owned();
-    if trimmed.is_empty() || trimmed == "/root" {
-        return None;
-    }
-    Some(trimmed)
 }

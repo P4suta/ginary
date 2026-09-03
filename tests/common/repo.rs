@@ -284,6 +284,15 @@ pub struct WorkflowStep {
     pub name: String,
     /// The step's `run:` script, empty for a step that only `uses:` an action.
     pub run: String,
+    /// The step's `uses:`, empty for a step that only `run:`s a script.
+    pub uses: String,
+    /// The step's `with:` mapping, string pairs only.
+    ///
+    /// Which *tool* an install step installs is a `with:` key and not part of
+    /// the action reference, so a rule about the programs a job has on `PATH`
+    /// cannot be written without it. See
+    /// `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+    pub with: BTreeMap<String, String>,
     /// The job's `env:` overlaid with the step's own, values as written.
     pub env: BTreeMap<String, String>,
 }
@@ -359,6 +368,12 @@ pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
                 position: index + 1,
                 name: label,
                 run,
+                uses: step
+                    .as_mapping_get("uses")
+                    .and_then(YamlOwned::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                with: env_map(step.as_mapping_get("with")),
                 env,
             });
         }

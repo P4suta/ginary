@@ -59,10 +59,15 @@ use crate::common::tools::REQUIRE_VAR;
 const NAME: &str = "ginary-stub-0.1.0-linux-x86_64-musl";
 
 /// The one directory the failing jobs searched.
+///
+/// Any absolute directory does: it is a synthetic input to a pure function,
+/// and both sides of every assertion below render the same value. What used
+/// to be written here was the runner's own workspace path, which put a
+/// directory that exists on exactly one machine into *code*; the transcript
+/// in this file's documentation above is where that path belongs. See
+/// `tests/regressions/e7_the_home_directory_scan_only_worked_on_one_machine.rs`.
 fn searched() -> Vec<PathBuf> {
-    vec![PathBuf::from(
-        "/home/runner/work/ginary/ginary/target/stubs",
-    )]
+    vec![PathBuf::from("/w/ginary/target/stubs")]
 }
 
 #[test]

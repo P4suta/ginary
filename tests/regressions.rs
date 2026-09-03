@@ -272,3 +272,27 @@ mod e6_the_test_helpers_did_not_compile_on_windows;
 #[cfg(feature = "cli")]
 #[path = "regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs"]
 mod e6_the_toolchain_flag_required_a_cross_stub_nobody_built;
+
+#[path = "regressions/e7_actionlint_was_required_of_every_toolchain_job.rs"]
+mod e7_actionlint_was_required_of_every_toolchain_job;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e7_a_macos_runtime_was_read_as_an_elf.rs"]
+mod e7_a_macos_runtime_was_read_as_an_elf;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e7_a_real_artifact_had_to_verify_on_the_hosts_own_erlang.rs"]
+mod e7_a_real_artifact_had_to_verify_on_the_hosts_own_erlang;
+
+#[path = "regressions/e7_the_home_directory_scan_only_worked_on_one_machine.rs"]
+mod e7_the_home_directory_scan_only_worked_on_one_machine;
+
+#[path = "regressions/e7_the_unit_tests_asked_the_host_what_platform_it_was.rs"]
+mod e7_the_unit_tests_asked_the_host_what_platform_it_was;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path.rs"]
+mod e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path;
+
+#[path = "regressions/e7_a_cargo_test_step_could_stop_at_the_first_failing_target.rs"]
+mod e7_a_cargo_test_step_could_stop_at_the_first_failing_target;

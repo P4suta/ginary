@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: Install actionlint
+description: >-
+  Installs a pinned actionlint release and puts it on PATH, refusing any
+  download whose SHA-256 is not the one this step names.
+
+# `tool` is spelled `<name>@<version>`, the way `taiki-e/install-action` spells
+# it, so that the rule "every tool CI installs is pinned to an exact version"
+# reads one key whichever action did the installing —
+# `every_tool_ci_installs_is_pinned_to_an_exact_version` in tests/ci_matrix.rs
+# reads `with.tool` on every step, not only on steps that use that action, and
+# says why. actionlint is a Go program and is in none of that action's
+# manifests, which is the whole reason this one exists; see also
+# tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs.
+inputs:
+  tool:
+    description: The tool to install, as `actionlint@<version>`.
+    required: true
+  sha256:
+    description: >-
+      The SHA-256 of the linux amd64 release tarball. Named here rather than
+      taken from the release's own checksums file, which is published by
+      whoever published the tarball and so is not evidence about it.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.tool }}
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        name=${TOOL%@*}
+        version=${TOOL#*@}
+        if [ "$name" != "actionlint" ] || [ "$version" = "$TOOL" ]; then
+          echo "this action installs actionlint and takes \`actionlint@<version>\`, not \`$TOOL\`" >&2
+          exit 1
+        fi
+        if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
+          echo "this action installs the linux amd64 build, and this runner is $(uname -s)/$(uname -m)" >&2
+          exit 1
+        fi
+        archive="actionlint_${version}_linux_amd64.tar.gz"
+        dir="${RUNNER_TEMP}/actionlint-${version}"
+        mkdir -p "$dir"
+        curl --silent --show-error --fail --location --retry 3 \
+          --output "${dir}/${archive}" \
+          "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+        echo "${SHA256}  ${dir}/${archive}" | sha256sum --check --strict -
+        tar -xzf "${dir}/${archive}" -C "$dir" actionlint
+        chmod +x "${dir}/actionlint"
+        echo "$dir" >> "$GITHUB_PATH"
+        "${dir}/actionlint" --version

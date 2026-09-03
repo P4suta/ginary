@@ -317,6 +317,7 @@ pub struct FakeOtp {
     apps: Vec<FakeApp>,
     flavor: ErtsFlavor,
     pe_machine: u16,
+    macho_cpu_type: u32,
 }
 
 /// Which shape of `erts-<vsn>/bin` a [`FakeOtp`] writes.
@@ -336,6 +337,15 @@ pub enum ErtsFlavor {
     /// refused as "not a PE image" and no test could reach the resolution it
     /// is about.
     Windows,
+    /// The unix names, with `beam.smp` written as a real thin Mach-O.
+    ///
+    /// A macOS OTP tree has the unix layout — `erlexec` execs `beam.smp`,
+    /// there is no `erl.ini` and no `.dll` — and differs from a Linux one in
+    /// exactly one place a build reads: the emulator is a Mach-O and not an
+    /// ELF. That one byte-level difference is what
+    /// `ginary::erts_source::resolve` has to dispatch on, so it is the one
+    /// thing this flavour changes.
+    Macos,
 }
 
 /// Which stub `bin/erl` a [`FakeOtp`] writes, if any.
@@ -383,6 +393,7 @@ impl FakeOtp {
             erl_script: None,
             flavor: ErtsFlavor::Unix,
             pe_machine: PE_MACHINE_AMD64,
+            macho_cpu_type: crate::common::macho::CPU_TYPE_ARM64,
             apps: vec![
                 FakeApp::new("kernel", DEFAULT_KERNEL_VSN).mod_callback("kernel"),
                 FakeApp::new("stdlib", DEFAULT_STDLIB_VSN).applications(&["kernel"]),
@@ -405,6 +416,31 @@ impl FakeOtp {
     #[must_use]
     pub fn windows(mut self) -> Self {
         self.flavor = ErtsFlavor::Windows;
+        self
+    }
+
+    /// Writes a macOS `erts-<vsn>/bin` instead of a unix one.
+    ///
+    /// [`ErtsFlavor::Macos`]: the same names a unix tree holds, with
+    /// `beam.smp` written as a thin 64-bit Mach-O for
+    /// [`FakeOtp::macho_cpu_type`] rather than as a shell stub. Nothing else
+    /// about the root changes, because nothing else about a macOS runtime
+    /// does.
+    #[must_use]
+    pub fn macos(mut self) -> Self {
+        self.flavor = ErtsFlavor::Macos;
+        self
+    }
+
+    /// The `cputype` the macOS tree's `beam.smp` is built for.
+    ///
+    /// [`crate::common::macho::CPU_TYPE_ARM64`] unless a test asks otherwise.
+    /// The one thing `ginary::erts_source` reads off a macOS runtime is this
+    /// number, so a test about a runtime for the wrong architecture sets it
+    /// and changes nothing else.
+    #[must_use]
+    pub fn macho_cpu_type(mut self, cpu_type: u32) -> Self {
+        self.macho_cpu_type = cpu_type;
         self
     }
 
@@ -559,6 +595,31 @@ impl FakeOtp {
                         )
                         .as_bytes(),
                     );
+                }
+            }
+            ErtsFlavor::Macos => {
+                let bins = ginary::otp::REQUIRED_ERTS_BINARIES
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .chain(self.extra_erts_bins.iter().cloned());
+                for name in bins {
+                    if name == ginary::erts_source::EMULATOR {
+                        write_executable(
+                            &erts_bin.join(&name),
+                            &crate::common::macho::thin_header(
+                                self.macho_cpu_type,
+                                crate::common::macho::MH_EXECUTE,
+                            ),
+                        );
+                    } else {
+                        write_executable(
+                            &erts_bin.join(&name),
+                            format!(
+                                "#!/bin/sh\n# fake {name} written by tests/common/fake_otp.rs\nexit 0\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
                 }
             }
             ErtsFlavor::Windows => {

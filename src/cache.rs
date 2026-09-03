@@ -337,6 +337,31 @@ impl std::fmt::Display for AppNameRefusal<'_> {
     }
 }
 
+/// Whether `value` is an absolute path *by the XDG base directory
+/// specification*, which is not the same question as
+/// [`std::path::Path::is_absolute`].
+///
+/// The specification says a relative `XDG_CACHE_HOME` must be ignored, and it
+/// defines absolute the way POSIX does: a leading `/`. `Path::is_absolute`
+/// answers for the platform the code was *compiled* for, so on Windows it
+/// wants a drive letter or a UNC prefix and reports `/xdg` as relative. That
+/// made [`resolve`] — the unix half of the resolver, whose whole subject is
+/// three POSIX environment variables — silently skip its own `XDG_CACHE_HOME`
+/// branch on a Windows host and fall through to `HOME`, which is a rule about
+/// the machine the resolver was built on rather than a rule about the
+/// variable it is reading. The first Windows runner reported it as
+/// `cache::tests::xdg_cache_home_gets_a_ginary_component` resolving
+/// `/home/u\.cache\ginary` where `/xdg/ginary` was asked for.
+///
+/// The answer here is the same on every host, which is the point.
+pub fn xdg_base_is_absolute(value: &std::ffi::OsStr) -> bool {
+    // Bytes rather than a decoded string: an environment variable is not
+    // required to be UTF-8 on unix, and a value that is not would otherwise
+    // answer `false` for the wrong reason. Every encoding an `OsStr` can hold
+    // spells `/` as this one byte, and no multi-byte sequence begins with it.
+    value.as_encoded_bytes().first() == Some(&b'/')
+}
+
 /// Resolves the cache root from an environment snapshot.
 ///
 /// Pure: nothing is created and nothing is probed. An empty value counts as
@@ -353,10 +378,11 @@ pub fn resolve(env: &Env, uid: u32) -> CacheDirs {
     }
 
     if let Some(value) = non_empty(env.get(XDG_CACHE_HOME_VAR)) {
-        let base = Path::new(value);
-        if base.is_absolute() {
+        // The specification's own rule, not the host's: see
+        // `xdg_base_is_absolute`.
+        if xdg_base_is_absolute(value) {
             return CacheDirs {
-                root: base.join(DIR_NAME),
+                root: Path::new(value).join(DIR_NAME),
                 origin: Origin::XdgCacheHome,
                 is_fallback: false,
             };
@@ -1833,6 +1859,27 @@ mod tests {
         );
         assert_eq!(dirs.root, PathBuf::from("/xdg/ginary"));
         assert_eq!(dirs.origin, Origin::XdgCacheHome);
+    }
+
+    #[test]
+    fn a_windows_shaped_xdg_cache_home_is_ignored_by_the_unix_resolver() {
+        // The other half of the rule, and the half a Windows host got wrong:
+        // `Path::is_absolute` answers for the platform this was compiled for,
+        // so `/xdg` was relative there and `C:\\xdg` would be absolute. Both
+        // questions belong to the specification instead, and both are
+        // therefore the same on every host — which is what makes this
+        // assertion mean anything on a Linux machine. See
+        // `tests/regressions/e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path.rs`.
+        let dirs = resolve(
+            &env(&[("XDG_CACHE_HOME", "C:\\xdg"), ("HOME", "/home/u")]),
+            1000,
+        );
+        assert_eq!(dirs.root, PathBuf::from("/home/u/.cache/ginary"));
+        assert_eq!(
+            dirs.origin,
+            Origin::Home,
+            "a Windows path is not a POSIX absolute path, and this is the POSIX resolver"
+        );
     }
 
     #[test]

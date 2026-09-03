@@ -23,6 +23,14 @@ jobs:
     env:
       # rustdoc warnings are denied for the `cargo doc` step below.
       RUSTDOCFLAGS: -D warnings
+      # This is the one job that installs actionlint, so it is the one job
+      # entitled to say a missing one is a failure rather than a skip. It is
+      # deliberately not GINARY_REQUIRE_TOOLCHAIN, which is a claim about the
+      # toolchain a runtime is packaged with — gleam, erl, strip, docker —
+      # and which three jobs set on runners that install no actionlint at
+      # all. See
+      # tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs.
+      GINARY_REQUIRE_ACTIONLINT: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,6 +56,23 @@ jobs:
         with:
           tool: cargo-deny@0.19.7
       - run: cargo deny check
+      # actionlint is a lint over these files and belongs to the job that
+      # lints. It is installed from its own release rather than through
+      # taiki-e/install-action, whose manifests do not carry it; the digest is
+      # the one `docs/dev/log/E7.md` records checking.
+      - uses: ./.github/actions/install-actionlint
+        with:
+          tool: actionlint@1.7.12
+          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      # And the job that installs it runs the test that needs it. A check
+      # moved out of three jobs and into none is a check that was deleted, so
+      # the selection is by name, and the name is asserted against the tree as
+      # well as against this line: `cargo test <a filter matching nothing>`
+      # exits 0, so a rename would leave this step green over no workflow at
+      # all. `--no-fail-fast` here for the reason every other `cargo test` in
+      # this file carries it — one run, one full report — and because a rule
+      # with an exception is one the next author has to relitigate.
+      - run: cargo test --locked --no-fail-fast --test regressions actionlint_accepts_every_workflow
 
   msrv:
     name: MSRV check (the declared floor)
@@ -374,7 +399,11 @@ jobs:
       # wine, so these run nowhere until a real Windows runner does it).
       - run: cargo build --no-default-features --release --locked
       - run: cargo build --release --locked
-      - run: cargo test --locked
+      # `--no-fail-fast` for the reason the `test` job gives: cargo abandons
+      # every target after the first that fails, so the seven library failures
+      # this job reported on the first Windows-native run were the first slice
+      # of a report rather than the whole of one.
+      - run: cargo test --locked --no-fail-fast
       # Prove an exit code crosses the launcher: erl halt(3) reaches ERRORLEVEL.
       - name: Assert exit-code propagation
         shell: pwsh

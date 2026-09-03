@@ -646,3 +646,87 @@ fn the_host_emulator_is_a_file_the_elf_reader_can_read() {
         "the emulator this machine runs says it is for this machine"
     );
 }
+
+// -------------------------------------------- a macOS runtime root --
+
+/// `CPU_TYPE_POWERPC64`, a `cputype` this crate has no target for and never
+/// will: the last macOS release that ran one predates every OTP this
+/// packages.
+const CPU_TYPE_POWERPC64: u32 = 0x0100_0012;
+
+/// A macOS runtime root whose `beam.smp` is a thin Mach-O for `cpu_type`.
+fn macos_root(dir: &Path, cpu_type: u32) -> crate::common::fake_otp::FakeOtpRoot {
+    FakeOtp::new()
+        .macos()
+        .macho_cpu_type(cpu_type)
+        .build_in(dir.join("otp"))
+}
+
+#[test]
+fn a_universal_emulator_is_more_than_one_runtime_and_none_of_them_is_bundled() {
+    let dir = tempdir();
+    let root = macos_root(dir.path(), crate::common::macho::CPU_TYPE_ARM64);
+    let emulator = root.erts_bin().join("beam.smp");
+    std::fs::write(
+        &emulator,
+        crate::common::macho::fat_header(&[
+            (crate::common::macho::CPU_TYPE_ARM64, 0),
+            (crate::common::macho::CPU_TYPE_X86_64, 0),
+        ]),
+    )
+    .expect("replace the emulator with a universal binary");
+
+    let error = erts_source::resolve(
+        &ErtsSourceSpec::Dir(root.root.clone()),
+        &target("macos-aarch64"),
+    )
+    .expect_err("a fat emulator has no one architecture to read the target off");
+
+    assert!(
+        matches!(&error, ErtsError::UniversalRuntime { path } if *path == emulator),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("lipo -thin"),
+        "the refusal names the command that turns this tree into one that can be bundled: \
+         {error}"
+    );
+}
+
+#[test]
+fn a_macho_emulator_for_a_cputype_ginary_has_no_target_for_is_refused() {
+    let dir = tempdir();
+    let root = macos_root(dir.path(), CPU_TYPE_POWERPC64);
+
+    let error = erts_source::resolve(
+        &ErtsSourceSpec::Dir(root.root.clone()),
+        &target("macos-aarch64"),
+    )
+    .expect_err("a runtime for a machine with no target is not the requested one");
+
+    assert!(
+        matches!(&error, ErtsError::UnknownMacosRuntimeTarget { path, .. }
+            if path.ends_with("beam.smp")),
+        "a cputype with no target is not silently read as the one that was asked for: {error:?}"
+    );
+}
+
+#[test]
+fn a_macos_tree_whose_emulator_is_not_a_whole_macho_is_refused_by_name() {
+    let dir = tempdir();
+    let root = macos_root(dir.path(), crate::common::macho::CPU_TYPE_ARM64);
+    let emulator = root.erts_bin().join("beam.smp");
+    std::fs::write(&emulator, crate::common::macho::magic_only())
+        .expect("replace the emulator with a truncated one");
+
+    let error = erts_source::resolve(
+        &ErtsSourceSpec::Dir(root.root.clone()),
+        &target("macos-aarch64"),
+    )
+    .expect_err("a file that begins like a Mach-O and is not one is not a runtime");
+
+    assert!(
+        matches!(&error, ErtsError::NotAMachoRuntime { path, .. } if *path == emulator),
+        "the magic chose the reader and the reader's own words travel: {error:?}"
+    );
+}

@@ -50,7 +50,7 @@
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
 | `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing; C4 adds the per-target columns of the native table — the rendered table over one verdict of each kind, and the verdicts a project's own configuration reaches over an object under `priv` |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
-| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs` |
+| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs`. E7 adds the macOS arm on the same terms, over a `FakeOtp::new().macos()` tree whose `beam.smp` is a real thin Mach-O: a `cputype` resolved to `macos-aarch64`, a universal binary refused as more than one runtime, a `cputype` no target of ours names, and a header too short to be one |
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub. D3 adds three darwin cases over a hand-fabricated Mach-O carrying an appended marker, against the real Mach-O arm of `check_object`: a matching `cputype` accepted, a mismatched one refused by the header, and one already carrying a `__GINARY,__payload` section refused as an artifact. The RED-phase placeholder `a_darwin_stub_cannot_be_checked_here_yet`, which pinned the old `StubError::NotYetSupported` answer, is gone — it asserted the very behaviour these three replace |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
@@ -268,6 +268,25 @@ hand in a comment is what left five of the nine running in no job at all; see
 `tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs`, which derives the list from the
 tree so a fifth caller cannot be added without the workflow learning about it.
 
+A fourth question, and the third gate: a program that is **not** part of that toolchain at all.
+`actionlint` lints the workflow files. It has nothing to do with whether a runtime can be
+packaged, no hosted runner ships it, and `mise` installs it on a developer machine — so
+`require_tools(&["actionlint"])` was a claim `GINARY_REQUIRE_TOOLCHAIN` could not make true, and
+the three jobs that set that variable and run the `regressions` target all panicked on runners
+whose toolchain was complete. `tests/common/tools.rs::require_actionlint` reads
+`GINARY_REQUIRE_ACTIONLINT` instead, and exactly one job sets it: `lint` in
+`.github/workflows/ci.yml`, which installs the tool from its own release with a pinned digest and
+then *runs the test by name*. Both halves are asserted, because a check moved out of three jobs
+and into none is a check that was deleted rather than fixed; see
+`tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+
+The rule the three gates share is worth stating once. A gate is a claim somebody has to be able
+to make true, so it belongs to whichever job installs the thing it is about:
+`GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang and Gleam, `GINARY_REQUIRE_STUBS` to
+the jobs that build or download the cross stubs, `GINARY_REQUIRE_ACTIONLINT` to the job that
+installs actionlint. A fourth variable is warranted exactly when a fourth kind of thing is
+promised by a different job.
+
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
 
@@ -459,6 +478,13 @@ about unix, an outer attribute on the item, or an attribute on an enclosing bloc
 `tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs` asserts the scanner against
 source it is handed and then turns it loose on every `.rs` file `git` tracks under `tests/`.
 
+E7 added `unmet_needs` to the same file, which is not a scanner: it is the `DT_NEEDED` names
+of an emulator that `ginary::verify::NEEDED_ALLOWLIST` does not admit, sorted and deduplicated.
+It exists because the portability promise is about the *host's* Erlang and not about ginary,
+so a test that asserted a real artifact verifies with no findings at all was asserting a
+property of one machine's OTP build. The expectation is computed from the installation, which
+makes the two sides of that assertion two different files.
+
 A scan is a proxy, and a better check exists on any machine with docker. `mingw-w64` is all a
 Linux host needs to type-check the whole tree for Windows, which is what the C sources of
 `zstd-sys` had made look impossible:
@@ -606,6 +632,13 @@ this machine could not run a PE anyway — but the machine field is real, becaus
 field a Windows runtime is read for. `FakeOtp::pe_machine` sets it, so a test about a runtime
 for the wrong architecture changes that number and nothing else. `erl.ini` stays text, which is
 what it is.
+
+D3's Mach-O work needed the third flavour, and E7 added it on exactly the same terms.
+`FakeOtp::macos()` writes the unix tree's names — nothing else about a macOS runtime differs —
+with `beam.smp` written as a real thin 64-bit Mach-O rather than as a shell stub. As with the PE
+images, nothing in it is executable and nothing needs to be; the `cputype` is real, because that
+is the one field `erts_source::resolve` reads off a macOS runtime, and `FakeOtp::macho_cpu_type`
+sets it and changes nothing else — the exact counterpart of `FakeOtp::pe_machine`.
 
 So `otp::inspect_root` **accepts** a `FakeOtp::new().windows()` root, and the "no API for an
 invalid tree" rule holds for both flavours. It reads the flavour off the tree —
@@ -1114,8 +1147,15 @@ assertion.
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
 `cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
-`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs` and `portability.rs`, described
-above. Still to come:
+`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs`, `portability.rs`, `homepath.rs`
+and `srcscan.rs`, described above. The last two are E7's, and both are pure scanners meant to be
+reused: `homepath.rs` finds a person's absolute home path — `/home/<name>` or `/Users/<name>` —
+in a file that has to run anywhere, reading each file in its own comment syntax (`//` opens one
+in Rust and `#` opens an attribute; `#` opens one in YAML, TOML and shell; anything else is read
+as code throughout) and exempting the fictional accounts this suite's own unit tests spell.
+`srcscan.rs` holds the two scanners for defects only another platform can see: `calls_with`,
+which finds a call to a named function that names the host in its arguments, and
+`literal_sites`, which finds a literal in code rather than in prose. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

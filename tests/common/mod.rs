@@ -23,6 +23,7 @@ pub mod erl;
 #[cfg(feature = "cli")]
 pub mod fake_otp;
 pub mod fixture;
+pub mod homepath;
 pub mod http;
 pub mod macho;
 #[cfg(feature = "cli")]
@@ -35,5 +36,6 @@ pub mod repo;
 pub mod script;
 pub mod shipment;
 pub mod snapshot;
+pub mod srcscan;
 pub mod stubfile;
 pub mod tools;

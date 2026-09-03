@@ -1330,59 +1330,112 @@ fn every_uses_reference_is_pinned_to_a_full_sha_or_marked_todo() {
 
 // ------------------------------------------ what the first live run found --
 
-/// The action every helper binary in this repository is installed with.
+/// The action most helper binaries in this repository are installed with.
+///
+/// Not the only one: `actionlint` is in none of its manifests and is installed
+/// by `.github/actions/install-actionlint`, which spells its input `tool:` the
+/// same way on purpose. The rule below therefore reads the *key*, not the
+/// action that consumes it — see
+/// `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
 const INSTALL_ACTION: &str = "taiki-e/install-action";
 
-#[test]
-fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
+/// Every `with.tool` entry in `text` that is not pinned to an exact version.
+///
+/// Pure: YAML in, complaints out, so the rule can be calibrated on a workflow
+/// written by hand before it is turned loose on the tree. Returns the number
+/// of pinned entries alongside, because a scan that found nothing at all
+/// passes for the wrong reason.
+///
+/// Every step carrying a `with.tool` is read, whichever action consumes it. A
+/// filter on `uses:` would leave the next locally written installer outside
+/// the rule, which is exactly where `install-actionlint` sat when it was
+/// introduced.
+fn unpinned_tools(path: &str, text: &str) -> (usize, Vec<String>) {
     let mut offenders: Vec<String> = Vec::new();
     let mut pinned = 0usize;
-    for (path, text) in action_yaml() {
-        let parsed = parse_yaml(&text).unwrap_or_else(|e| panic!("{path} is not valid YAML: {e}"));
-        let Some(jobs) = parsed
-            .as_mapping_get("jobs")
-            .and_then(YamlOwned::as_mapping)
-        else {
+    let parsed = parse_yaml(text).unwrap_or_else(|e| panic!("{path} is not valid YAML: {e}"));
+    let Some(jobs) = parsed
+        .as_mapping_get("jobs")
+        .and_then(YamlOwned::as_mapping)
+    else {
+        return (pinned, offenders);
+    };
+    for (id, job) in jobs {
+        let job_id = id.as_str().unwrap_or("<a job id that is not a string>");
+        let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
             continue;
         };
-        for (id, job) in jobs {
-            let job_id = id.as_str().unwrap_or("<a job id that is not a string>");
-            let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
+        for step in steps {
+            let uses = step
+                .as_mapping_get("uses")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or("<a step with no `uses`>");
+            let Some(tool) = step
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("tool"))
+                .and_then(YamlOwned::as_str)
+            else {
                 continue;
             };
-            for step in steps {
-                let uses = step
-                    .as_mapping_get("uses")
-                    .and_then(YamlOwned::as_str)
-                    .unwrap_or_default();
-                if !uses.starts_with(INSTALL_ACTION) {
-                    continue;
-                }
-                let tool = step
-                    .as_mapping_get("with")
-                    .and_then(|with| with.as_mapping_get("tool"))
-                    .and_then(YamlOwned::as_str)
-                    .unwrap_or_default();
-                for entry in tool.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-                    match entry.split_once('@') {
-                        Some((name, version))
-                            if version.starts_with(|c: char| c.is_ascii_digit()) =>
-                        {
-                            let _ = name;
-                            pinned += 1;
-                        }
-                        _ => offenders.push(format!(
-                            "{path}: job `{job_id}` installs `{entry}`, which resolves to \
-                             whatever the action calls latest"
-                        )),
+            for entry in tool.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                match entry.split_once('@') {
+                    Some((name, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+                        let _ = name;
+                        pinned += 1;
                     }
+                    _ => offenders.push(format!(
+                        "{path}: job `{job_id}` installs `{entry}` through `{uses}`, which \
+                         resolves to whatever the action calls latest"
+                    )),
                 }
             }
         }
     }
+    (pinned, offenders)
+}
+
+#[test]
+fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
+    // The instrument first, on the two shapes the tree holds: the action most
+    // tools come through, and a locally written one. Both name the tool in the
+    // same key, and the rule reads that key rather than the action beside it.
+    let planted = format!(
+        "jobs:\n  \
+           lint:\n    \
+             steps:\n      \
+               - uses: {INSTALL_ACTION}@0000000000000000000000000000000000000000\n        \
+                 with:\n          \
+                   tool: cargo-deny\n      \
+               - uses: ./.github/actions/install-actionlint\n        \
+                 with:\n          \
+                   tool: actionlint\n      \
+               - uses: ./.github/actions/install-actionlint\n        \
+                 with:\n          \
+                   tool: actionlint@1.7.12\n"
+    );
+    let (pinned, planted_offenders) = unpinned_tools("<planted>", &planted);
+    assert_eq!(
+        planted_offenders.len(),
+        2,
+        "an unpinned tool is unpinned whichever action installs it: a rule that reads `uses:` \
+         first stops at the third-party action and lets every locally written installer past. \
+         It reported {planted_offenders:?}"
+    );
+    assert_eq!(
+        pinned, 1,
+        "and the one entry that is pinned is counted whichever action installs it"
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    for (path, text) in action_yaml() {
+        let (found, complaints) = unpinned_tools(&path, &text);
+        pinned += found;
+        offenders.extend(complaints);
+    }
     assert!(
         pinned + offenders.len() > 0,
-        "no workflow installs a tool through {INSTALL_ACTION} any more"
+        "no workflow installs a tool by name any more, through {INSTALL_ACTION} or otherwise"
     );
     assert!(
         offenders.is_empty(),

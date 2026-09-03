@@ -1819,6 +1819,20 @@ mod tests {
     use crate::config::{BuildFlags, ProjectConfig};
     use crate::target::{Arch, Libc, Os};
 
+    /// The target the program-list tests name.
+    ///
+    /// Named rather than [`Target::host`]. `runtime_bins` appends the
+    /// *target's* executable suffix, so a test that hands it the host asserts
+    /// `epmd` on one machine and `epmd.exe` on another — and the machine where
+    /// it is wrong is the one nobody runs it on, which is how the first
+    /// Windows runner met three failures nobody had written. See
+    /// `tests/regressions/e7_the_unit_tests_asked_the_host_what_platform_it_was.rs`;
+    /// `a_windows_build_asks_for_the_programs_by_the_names_the_tree_spells`
+    /// below is the other half, and it names its target too.
+    fn unix() -> Target {
+        Target::new(Os::Linux, Arch::X86_64, Libc::Gnu)
+    }
+
     /// The options a project whose `[tools.ginary]` is `table` builds with.
     fn options(root: &Path, table: &str) -> BuildOptions {
         let text = format!("name = \"hello\"\n\n[tools.ginary]\n{table}");
@@ -1837,7 +1851,7 @@ mod tests {
     fn a_plain_build_stages_nothing_beyond_the_required_four() {
         let opts = options(Path::new("/w/hello"), "");
 
-        assert_eq!(runtime_bins(&opts, Target::host()), Vec::<String>::new());
+        assert_eq!(runtime_bins(&opts, unix()), Vec::<String>::new());
     }
 
     #[test]
@@ -1845,19 +1859,19 @@ mod tests {
         let root = Path::new("/w/hello");
 
         assert_eq!(
-            runtime_bins(&options(root, "distribution = true\n"), Target::host()),
+            runtime_bins(&options(root, "distribution = true\n"), unix()),
             vec![EPMD_BIN.to_owned()],
             "a distributed artifact has to carry the daemon it is allowed to start"
         );
         assert_eq!(
-            runtime_bins(&options(root, "heart = true\n"), Target::host()),
+            runtime_bins(&options(root, "heart = true\n"), unix()),
             vec![HEART_BIN.to_owned()],
             "and one under heart has to carry the program that restarts it"
         );
         assert_eq!(
             runtime_bins(
                 &options(root, "distribution = true\nheart = true\n"),
-                Target::host()
+                unix()
             ),
             vec![EPMD_BIN.to_owned(), HEART_BIN.to_owned()],
             "both settings, both programs"
@@ -1872,7 +1886,7 @@ mod tests {
         );
 
         assert_eq!(
-            runtime_bins(&opts, Target::host()),
+            runtime_bins(&opts, unix()),
             vec!["epmd".to_owned(), "dyn_erl".to_owned()],
             "the project's own order is kept and nothing is asked for twice"
         );

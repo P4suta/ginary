@@ -14,15 +14,24 @@
 //! rather than by a user whose loader refuses the artifact. Nothing downstream
 //! trusts a provenance string.
 //!
-//! Which emulator, and which reader, is a property of the tree. A unix root's
-//! `erts-<vsn>/bin/beam.smp` is an ELF program read with [`crate::elf`]; a
-//! Windows root — the contents of `otp_win64_<version>.zip` — has no such file,
-//! and its `beam.smp.dll` is a PE image `erl.exe` loads, read straight from
-//! `object` for the reason `crate::stub` gives: a PE names no interpreter and
-//! the machine field is the whole question. The flavour test is
+//! Which emulator is read is a property of the tree, and which *reader* reads
+//! it is a property of the emulator. A Windows root — the contents of
+//! `otp_win64_<version>.zip` — has no `beam.smp` at all: its `beam.smp.dll` is
+//! a PE image `erl.exe` loads, read straight from `object` for the reason
+//! `crate::stub` gives, because a PE names no interpreter and the machine
+//! field is the whole question. That half is a layout test,
 //! [`crate::assemble::is_windows_erts_bin`], so assembly and this module cannot
 //! disagree about what a tree is, and a Windows tree handed to a Linux build is
 //! a target mismatch rather than a missing `beam.smp`.
+//!
+//! A *unix* tree cannot be told apart by its layout, because macOS lays
+//! `erts-<vsn>/bin` out exactly as Linux does; the only difference a build can
+//! observe is that one `beam.smp` is a Mach-O and the other an ELF. So the
+//! reader is chosen by the emulator's own first bytes — [`emulator_format`] —
+//! and a macOS runtime is read with [`crate::macho`] where a Linux one is read
+//! with [`crate::elf`]. Reading the first with the second is what stopped both
+//! macOS jobs of the first CI run that ever reached `ginary build`; see
+//! `tests/regressions/e7_a_macos_runtime_was_read_as_an_elf.rs`.
 //!
 //! Four of the five sources are available. `host` and `dir:PATH` need nothing
 //! but a path and resolve through [`resolve`]; `catalog` and `tarball:PATH`
@@ -345,6 +354,45 @@ pub enum ErtsError {
         /// The machine its header named, as `object` spells it.
         machine: String,
     },
+    /// The macOS emulator is not a Mach-O binary at all.
+    #[error(
+        "the emulator at {path} is not a Mach-O binary ({reason}); a runtime for another \
+         target has to be a real cross-built tree, not a stand-in"
+    )]
+    NotAMachoRuntime {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// What the reader said.
+        reason: String,
+    },
+    /// The macOS emulator is a universal binary, so it is more than one
+    /// runtime and none of them is the one to bundle.
+    ///
+    /// An artifact carries one architecture, so a fat emulator has no
+    /// `cputype` to read the target off and no single set of bytes to ship.
+    /// It is a runtime that has to be thinned before it can be bundled, which
+    /// is a thing the user does to their own tree and not a thing ginary does
+    /// to somebody's installation behind their back.
+    #[error(
+        "the emulator at {path} is a universal binary carrying more than one architecture; \
+         bundle a runtime built for one target, or thin this one with `lipo -thin`"
+    )]
+    UniversalRuntime {
+        /// The emulator that was read.
+        path: PathBuf,
+    },
+    /// The macOS emulator is a Mach-O for a `cputype` ginary has no target
+    /// for.
+    #[error(
+        "the emulator at {path} is a Mach-O for {cputype}, which is not a target ginary \
+         packages for"
+    )]
+    UnknownMacosRuntimeTarget {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// The `cputype` its header named, as [`crate::macho`] spells it.
+        cputype: String,
+    },
     /// The emulator is not an ELF binary at all.
     #[error(
         "the emulator at {path} is not an ELF binary ({reason}); a runtime for another target \
@@ -407,6 +455,95 @@ pub enum ErtsError {
         /// The emulator that was read.
         path: PathBuf,
     },
+}
+
+/// Which object-file reader an emulator's own first bytes call for.
+///
+/// The flavour of an OTP tree is a property of the *tree* — a Windows runtime
+/// spells its emulator `beam.smp.dll` and keeps an `erl.ini` beside it — but
+/// the flavour of a *unix* tree is not: macOS and Linux lay out
+/// `erts-<vsn>/bin` identically, and the only difference a build can see is
+/// that one `beam.smp` is a Mach-O and the other is an ELF. Reading a macOS
+/// runtime with the ELF reader is what killed both macOS jobs of run
+/// <https://github.com/P4suta/ginary/actions/runs/33702776627>:
+///
+/// ```text
+/// error: cannot resolve the runtime to bundle
+///   caused by: the emulator at .../erts-17.0.5/bin/beam.smp is not an ELF
+///   binary (not an ELF file); a runtime for another target has to be a real
+///   cross-built tree, not a stand-in
+/// ```
+///
+/// So the reader is chosen by the emulator's own magic, which is the same
+/// trust anchor the rest of this module already uses: nothing the
+/// configuration spelled is believed about a runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmulatorFormat {
+    /// `\x7fELF`: a Linux runtime, read by [`crate::elf`].
+    Elf,
+    /// A thin or fat Mach-O magic: a macOS runtime, read by [`crate::macho`].
+    MachO,
+    /// `MZ`: a Windows runtime, read straight from `object`.
+    Pe,
+}
+
+/// The format of an emulator, from the bytes at the head of the file.
+///
+/// [`None`] when `head` is shorter than the shortest magic or begins with
+/// none of them — a shell script where the emulator belongs, or a text file
+/// somebody renamed — which every caller reports as the runtime it could not
+/// read rather than guessing at.
+pub fn emulator_format(head: &[u8]) -> Option<EmulatorFormat> {
+    if crate::elf::is_elf(head) {
+        Some(EmulatorFormat::Elf)
+    } else if crate::macho::is_macho(head) {
+        Some(EmulatorFormat::MachO)
+    } else if head.starts_with(PE_MAGIC) {
+        Some(EmulatorFormat::Pe)
+    } else {
+        None
+    }
+}
+
+/// How many bytes of an emulator [`emulator_format`] needs.
+///
+/// Four, the longest magic it knows. A shorter file is read as far as it
+/// goes, and one too short to carry any magic at all classifies as no format
+/// rather than as a guess.
+const EMULATOR_MAGIC_LEN: usize = 4;
+
+/// `MZ`, the two bytes every PE image begins with.
+///
+/// The DOS stub's own magic, which is what a file *starts* with; the `PE\0\0`
+/// signature sits at an offset the stub names, and reading it would be
+/// parsing rather than classifying.
+const PE_MAGIC: &[u8] = b"MZ";
+
+/// The first [`EMULATOR_MAGIC_LEN`] bytes of `path`, or as many as it holds,
+/// or an empty vector when it cannot be opened or read at all.
+///
+/// A file nobody can read classifies as no format at all, which sends
+/// [`resolve_with`] down the arm it has always taken for an unreadable
+/// emulator: the reader itself reports what it could not read, in its own
+/// words, instead of this function inventing a second sentence for the same
+/// failure.
+fn emulator_magic(path: &Path) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let mut head = [0u8; EMULATOR_MAGIC_LEN];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Vec::new(),
+        }
+    }
+    head[..filled].to_vec()
 }
 
 /// Resolves one runtime and checks that it is the one the build asked for.
@@ -486,6 +623,19 @@ pub fn resolve_with(
     // The trust anchor: from here on nothing the configuration said is used,
     // and every fact comes out of the emulator's own header.
     let emulator = emulator_path(&otp);
+
+    // Which reader reads it is the emulator's own to say. The tree cannot:
+    // macOS lays `erts-<vsn>/bin` out exactly as Linux does, so the only
+    // difference a build can observe is that one `beam.smp` is a Mach-O and
+    // the other an ELF, and handing the first to the ELF reader is what
+    // stopped both macOS jobs of the first run that ever reached
+    // `ginary build`. Only a Mach-O is diverted: everything else keeps the
+    // reader it has always had, an unreadable file included, so that
+    // `inspect` stays the one place that says what it could not read.
+    if emulator_format(&emulator_magic(&emulator)) == Some(EmulatorFormat::MachO) {
+        return resolve_macos(spec, requested, otp, emulator);
+    }
+
     let facts = inspect(&emulator).map_err(|error| ErtsError::NotAnElfRuntime {
         path: emulator.clone(),
         reason: error.to_string(),
@@ -536,6 +686,61 @@ pub fn resolve_with(
         target,
         linkage,
         // `host` and `dir:` make no claim a guard could disagree with.
+        warnings: Vec::new(),
+    })
+}
+
+/// The macOS arm of [`resolve_with`].
+///
+/// The same shape as the Windows one and the same trust anchor: the machine
+/// comes off the emulator's own Mach-O header rather than off the spelling
+/// that named the tree, so an x86-64 runtime in an aarch64 build is
+/// [`ErtsError::TargetMismatch`] here rather than a loader error on somebody
+/// else's machine.
+///
+/// Three facts are not read, because a macOS runtime cannot vary in them. The
+/// emulator resolves `libSystem` at load time, so the linkage is
+/// [`Linkage::Dynamic`] and NIFs load; and macOS has one system C library, so
+/// the target's libc is [`Libc::None`] and there is no symbol-version floor to
+/// record. That is what [`crate::macho::MachoFacts::target`] already
+/// documents: the `cputype` is the whole of the target.
+fn resolve_macos(
+    spec: &ErtsSourceSpec,
+    requested: &Target,
+    otp: OtpInfo,
+    emulator: PathBuf,
+) -> Result<ResolvedErts, ErtsError> {
+    let facts = crate::macho::inspect(&emulator).map_err(|source| ErtsError::NotAMachoRuntime {
+        path: emulator.clone(),
+        reason: source.to_string(),
+    })?;
+    if facts.is_fat {
+        return Err(ErtsError::UniversalRuntime { path: emulator });
+    }
+    let Some(target) = facts.target else {
+        return Err(ErtsError::UnknownMacosRuntimeTarget {
+            path: emulator,
+            cputype: facts.cputype,
+        });
+    };
+    if target != *requested {
+        return Err(ErtsError::TargetMismatch {
+            path: otp.root.clone(),
+            requested: *requested,
+            actual: target,
+        });
+    }
+
+    Ok(ResolvedErts {
+        libc_min: None,
+        nif_loading: Linkage::Dynamic.loads_nifs(),
+        provenance: match spec {
+            ErtsSourceSpec::Host => format!("host:{}", otp.root.display()),
+            other => other.label(),
+        },
+        otp,
+        target,
+        linkage: Linkage::Dynamic,
         warnings: Vec::new(),
     })
 }

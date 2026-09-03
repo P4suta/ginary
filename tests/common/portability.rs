@@ -413,3 +413,27 @@ fn skip_char_literal(chars: &[char], index: usize) -> usize {
     }
     index + 1
 }
+
+/// The `DT_NEEDED` names in `needed` that `allowlist` does not admit, sorted
+/// and without repeats.
+///
+/// The portability promise a packaged application makes is about the *host's*
+/// runtime and not about ginary: an artifact is only as portable as the
+/// emulator whoever built it had installed, and a `beam.smp` linked against a
+/// library outside [`ginary::verify::NEEDED_ALLOWLIST`] is reported by
+/// `ginary verify` exactly as it should be. A test that asserted a real
+/// artifact verifies with no findings at all was therefore asserting a
+/// property of one machine's Erlang build; this is what it has to compare
+/// against instead, computed from the installation rather than from the
+/// artifact, so that the two sides of the assertion are two different files.
+#[cfg(feature = "cli")]
+pub fn unmet_needs(needed: &[String], allowlist: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = needed
+        .iter()
+        .filter(|name| !ginary::verify::needed_is_allowed(name, allowlist))
+        .cloned()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
