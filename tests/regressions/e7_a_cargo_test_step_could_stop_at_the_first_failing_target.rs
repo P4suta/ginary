@@ -21,7 +21,7 @@
 //! name — a rule with an exception is a rule the next author has to relitigate
 //! rather than read. One run, one full report.
 
-use crate::common::repo::{read, shell_scripts_under, workflow_jobs, yaml_files_under};
+use crate::common::repo::{read, shell_code, shell_scripts_under, workflow_jobs, yaml_files_under};
 
 /// The flag that makes one run produce the whole failure set.
 const FLAG: &str = "--no-fail-fast";
@@ -30,10 +30,48 @@ const FLAG: &str = "--no-fail-fast";
 ///
 /// Pure, and deliberately syntactic: the question is about the text of a
 /// command line, and the scanner that answers it is calibrated below on the
-/// two shapes the workflows actually hold — a single line, and a continuation
-/// the YAML reader has already joined.
+/// shapes the workflows actually hold — a single line, a continuation the YAML
+/// reader has already joined, and a line with a comment after it.
+///
+/// The comment is removed first, by [`shell_code`]. Everything after an
+/// unquoted `#` is prose the shell never executes, and reading it would accept
+/// a step that *documents* the flag and does not pass it — which is exactly
+/// the shape of the two lost reports this file records, since both times the
+/// flag went in as a comment beside the `run:` line.
 fn stops_at_the_first_failure(command: &str) -> bool {
-    command.contains("cargo test") && !command.contains(FLAG)
+    let code = shell_code(command);
+    code.contains("cargo test") && !code.contains(FLAG)
+}
+
+#[test]
+fn a_flag_that_only_a_shell_comment_carries_is_not_on_the_command_line() {
+    // `#` starts a comment in every shell CI runs a `run:` block under, so
+    // everything after it is prose the shell never sees. A scanner that reads
+    // the whole line accepts a step that documents the flag and does not pass
+    // it — which is precisely the shape this file exists to refuse, since the
+    // two milestones it records lost their reports to a flag that lived only
+    // in a comment beside the command.
+    assert!(
+        stops_at_the_first_failure("cargo test --locked # --no-fail-fast"),
+        "a commented flag is not an argument: the shell runs `cargo test --locked`, which stops \
+         at the first target that fails"
+    );
+    assert!(
+        stops_at_the_first_failure("cargo test --locked   #--no-fail-fast one day"),
+        "and the comment need not be spaced away from the `#` for the shell to drop it"
+    );
+    // The narrow half of the same rule: a `#` inside a quoted argument is a
+    // character, not a comment, so the flag before it still counts.
+    assert!(
+        !stops_at_the_first_failure("cargo test --locked --no-fail-fast -- --skip 'a#b'"),
+        "a `#` inside a quoted argument opens no comment, and the flag ahead of it is real"
+    );
+    // And a line that is nothing but a comment mentioning `cargo test` is not
+    // a command at all, so it is not an offender either.
+    assert!(
+        !stops_at_the_first_failure("# cargo test is run by the step below"),
+        "a line the shell never runs cannot stop at anything"
+    );
 }
 
 #[test]

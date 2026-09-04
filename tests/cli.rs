@@ -930,7 +930,15 @@ fn beam_chunks_without_a_path_is_a_usage_error() {
 // and_exits_one`, is ungated and runs everywhere. This is the same scoping
 // `tests/elf.rs` applies to `current_exe` and E8's Fix round 1 applied to
 // `tests/erts_source.rs`; see `docs/dev/log/E8.md` section 14.
-#[cfg(target_os = "linux")]
+//
+// The C library is named in the gate as well as the operating system, because
+// `target_os = "linux"` is true on musl Linux too and the claims below are
+// glibc's own: `libc.so.6` is glibc's `SONAME`, and a static musl test binary
+// needs no shared library at all and names no interpreter. Two of the seven
+// targets this project distributes are musl. See
+// `tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`,
+// which holds the rule over the whole test tree.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn elf_deps_prints_what_the_binary_needs() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
@@ -992,8 +1000,9 @@ fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
     );
 }
 
-// A host whose linker writes ELF, for the reason above.
-#[cfg(target_os = "linux")]
+// A host whose linker writes ELF and whose C library is glibc, for the two
+// reasons above.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn elf_deps_json_carries_the_documented_keys() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");

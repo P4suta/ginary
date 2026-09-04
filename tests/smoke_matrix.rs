@@ -19,6 +19,7 @@ mod common;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::common::repo::shell_code;
 use crate::common::tools::require_tools;
 
 /// The repository root.
@@ -67,12 +68,28 @@ fn the_smoke_matrix_script_is_committed_and_executable() {
 
 #[test]
 fn the_script_probes_for_binfmt_before_it_installs_anything() {
+    // Over the commands, not over the file. `#` opens a shell comment, and the
+    // argument for this very ordering is written in one directly above the
+    // probe — so a scan of the raw text compares the position of a *sentence*
+    // about the image against the position of the probe, and would fail a
+    // correct script for explaining itself. Worse in the other direction: with
+    // the install moved to the top of the file, a comment mentioning the probe
+    // would satisfy the same rule. E16 added `shell_code` for exactly this
+    // class of defect; see
+    // `tests/regressions/e7_a_cargo_test_step_could_stop_at_the_first_failing_target.rs`,
+    // where a `--no-fail-fast` that lived only in a comment was read as an
+    // argument.
     let script = read("scripts/smoke-matrix.sh");
+    let code = script
+        .lines()
+        .map(shell_code)
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let probe = script
+    let probe = code
         .find("--platform linux/arm64")
         .expect("the script asks whether arm64 already runs");
-    let install = script
+    let install = code
         .find("tonistiigi/binfmt")
         .expect("and installs a handler when it does not");
     assert!(
@@ -81,7 +98,7 @@ fn the_script_probes_for_binfmt_before_it_installs_anything() {
          need one"
     );
     assert!(
-        script.contains("--privileged"),
+        code.contains("--privileged"),
         "and when it does install one, it says so with the flag it needs"
     );
 }

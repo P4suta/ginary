@@ -110,6 +110,73 @@ pub fn shell_scripts_under(relative: &str) -> Vec<String> {
     out
 }
 
+/// One shell line with its comment removed: the part a shell would run.
+///
+/// `#` starts a comment in every shell a `run:` block is executed under, but
+/// only where a word starts — at the beginning of the line or after
+/// whitespace. Inside a word it is an ordinary character, and inside a quoted
+/// argument it is not even that: `--skip 'a#b'` passes `a#b`.
+///
+/// A scan that read the whole line answers about text the shell never sees,
+/// and it answers *wrongly in the direction that passes*: `cargo test --locked
+/// # --no-fail-fast` contains the flag and does not pass it, and
+/// `docker run --privileged image` inside a comment runs nothing. Both
+/// spellings are the shape of the two findings this helper was written for, so
+/// the rule is one function rather than two `split_once('#')` calls that drift.
+///
+/// Quoting is read far enough to answer that question and no further: a `\`
+/// escape outside quotes, a `'..'` that escapes nothing, and a `".."` that
+/// escapes with `\`. Command substitution and here-documents are not read,
+/// because no committed script in this repository puts a `#` inside one and a
+/// half-written shell parser would be worse than a stated limit.
+pub fn shell_code(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    // Whether the previous character ended a word, so a `#` here opens a
+    // comment. True at the start of the line.
+    let mut at_word_start = true;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'#' if at_word_start => return &line[..index],
+            b'\\' => {
+                index += 2;
+                at_word_start = false;
+                continue;
+            }
+            quote @ (b'\'' | b'"') => {
+                index = end_of_quote(bytes, index + 1, quote);
+                at_word_start = false;
+                continue;
+            }
+            byte => at_word_start = byte.is_ascii_whitespace(),
+        }
+        index += 1;
+    }
+    line
+}
+
+/// The index just past the quote that closes the one opened before `start`.
+///
+/// A quote the line never closes runs to the end of it, which is what a shell
+/// does too — it reads the next line — and leaves no `#` behind to misread.
+fn end_of_quote(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        // A backslash escapes inside `".."` and inside no quotes; inside
+        // `'..'` it is an ordinary character, and even a `\'` does not
+        // continue the string.
+        if quote == b'"' && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
 /// The recursive half of [`yaml_files_under`] and [`shell_scripts_under`].
 fn collect_files(
     directory: &std::path::Path,
@@ -310,7 +377,7 @@ pub struct WorkflowStep {
 
 impl WorkflowStep {
     /// The step's script as one command per line, with backslash
-    /// continuations joined and each line trimmed.
+    /// continuations joined, shell comments removed and each line trimmed.
     ///
     /// Every rule a test writes over a `run:` block reads one command at a
     /// time, and a shell command wrapped over three lines for width is still
@@ -319,11 +386,23 @@ impl WorkflowStep {
     /// `--target-dir` moved onto a continuation makes the first line look like
     /// a build that writes to the default path, and a flag moved off one hides
     /// the build the rule was watching.
+    ///
+    /// A `run:` block is shell, and everything after an unquoted `#` is a
+    /// comment the runner never executes. A rule asserted over that text is a
+    /// rule about a command that does not exist, and it is wrong in both
+    /// directions too: a commented-out `cargo build --no-default-features`
+    /// reports a correct workflow as one that left the stub on the default
+    /// path, and a commented-out `target/release/ginary build` invents a
+    /// consumer for a job that has none. [`shell_code`] is the one stripper
+    /// this repository has, and this is where its callers get it, so a second
+    /// copy of the lexer cannot drift from it. A line that is nothing but a
+    /// comment becomes the empty string rather than disappearing, so a rule
+    /// that counts commands is unaffected by where a comment sits.
     pub fn commands(&self) -> Vec<String> {
         self.run
             .replace("\\\n", " ")
             .lines()
-            .map(|line| line.trim().to_owned())
+            .map(|line| shell_code(line).trim().to_owned())
             .collect()
     }
 }

@@ -436,3 +436,13 @@ mod e13_the_fixture_server_stopped_on_an_error_a_peer_can_cause;
 mod e15_a_pwsh_step_ended_with_the_code_it_asserted;
 #[path = "regressions/e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran.rs"]
 mod e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran;
+#[cfg(feature = "cli")]
+#[path = "regressions/e16_a_cached_macos_runtime_was_read_by_the_elf_reader.rs"]
+mod e16_a_cached_macos_runtime_was_read_by_the_elf_reader;
+#[cfg(feature = "cli")]
+#[path = "regressions/e16_a_cached_windows_runtime_was_read_by_the_elf_reader.rs"]
+mod e16_a_cached_windows_runtime_was_read_by_the_elf_reader;
+#[path = "regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs"]
+mod e16_a_glibc_only_assertion_ran_under_a_linux_gate;
+#[path = "regressions/e16_a_glibc_only_expectation_was_asserted_on_any_elf_host.rs"]
+mod e16_a_glibc_only_expectation_was_asserted_on_any_elf_host;

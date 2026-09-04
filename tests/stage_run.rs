@@ -27,11 +27,13 @@ use ginary::closure::app_dependency_closure;
 use ginary::platform::{self, ObjectFormat};
 use ginary::report::SizeReport;
 use ginary::strip::{ElfOutcome, StripOptions, StripReport};
+use ginary::target::Target;
 use tempfile::TempDir;
 
 use crate::common::erl::{crash_dump_path, run_cwd, run_staged};
 use crate::common::fixture::FixtureProject;
 use crate::common::hostpath::{names_the_same_directory, printed_cwd};
+use crate::common::portability::host_needs_expectation;
 use crate::common::tools::{Toolchain, require_tools};
 
 /// The application the fixture ships, and the `-root` the closure starts from.
@@ -495,47 +497,36 @@ fn the_needs_line_lists_the_libraries_the_runtime_loads() {
 
     let needs = stripped.report.needs_line();
     // What the emulator loads is a fact about the platform that built it, so
-    // the list asked for is that platform's. Writing glibc's four sonames down
-    // asserted that this host links glibc, and on a host whose emulator is a
-    // PE the line read `needs: (none)` — which is the trap this test exists to
-    // catch, reported as the absence of the check rather than of the
-    // libraries.
-    let (libraries, lowercase): (&[&str], bool) = match platform::object_format(platform::HOST) {
-        ObjectFormat::Elf => (
-            &[
-                "libc.so.6",
-                "libtinfo.so.6",
-                "libstdc++.so.6",
-                "libgcc_s.so.1",
-            ],
-            false,
-        ),
-        // `KERNEL32.dll` is the kernel interface every Windows process
-        // has; an import table that names none of it is one that was not
-        // read. The comparison is case-insensitive because a PE import
-        // table spells one file both ways.
-        ObjectFormat::Pe => (&["kernel32.dll"], true),
-        // macOS re-exports `libm`, `libpthread` and the rest from one
-        // umbrella dylib, so there is one name to look for.
-        ObjectFormat::MachO => (&["/usr/lib/libSystem.B.dylib"], false),
-    };
-    let haystack = if lowercase {
+    // the list asked for is that platform's — the object format *and* the C
+    // library, because `object_format` maps every Linux to `Elf` and the two
+    // Linux C libraries differ in exactly these names. Writing glibc's four
+    // sonames down under the format alone asserted that this host links glibc,
+    // and on a musl host it failed a machine with nothing wrong with it; on a
+    // host whose emulator is a PE the line read `needs: (none)`, which is the
+    // trap this test exists to catch, reported as the absence of the check
+    // rather than of the libraries. The rule itself lives in
+    // `common::portability::host_needs_expectation`, so it can be asserted
+    // from a host that is not the one it describes —
+    // `tests/regressions/e16_a_glibc_only_expectation_was_asserted_on_any_elf_host.rs`.
+    let expectation = host_needs_expectation(Target::host());
+    let haystack = if expectation.fold_case {
         needs.to_ascii_lowercase()
     } else {
         needs.clone()
     };
-    for library in libraries {
+    for library in &expectation.libraries {
         assert!(
             haystack.contains(library),
             "`{library}` is what the emulator loads, and an artifact that does not say so is a \
              trap:\n{needs}"
         );
     }
-    // The glibc floor is a fact about an ELF, and a PE or a Mach-O has no
-    // such number. Narrowed rather than dropped: the opposite claim is
-    // asserted on the other hosts, so a `(GLIBC_` appearing in a Windows
-    // `needs:` line is a failure and not a silence.
-    if platform::object_format(platform::HOST) == ObjectFormat::Elf {
+    // The glibc floor is a fact about a runtime linked against glibc, and a
+    // musl one, a PE or a Mach-O has no such number. Narrowed rather than
+    // dropped: the opposite claim is asserted on every other host, so a
+    // `(GLIBC_` appearing in a Windows or a musl `needs:` line is a failure and
+    // not a silence.
+    if expectation.glibc_floor {
         assert!(
             needs.contains("(GLIBC_"),
             "the glibc floor is the number a user needs most:\n{needs}"
@@ -543,7 +534,7 @@ fn the_needs_line_lists_the_libraries_the_runtime_loads() {
     } else {
         assert!(
             !needs.contains("(GLIBC_"),
-            "there is no glibc floor in a container that has no glibc in it:\n{needs}"
+            "there is no glibc floor in a runtime that has no glibc in it:\n{needs}"
         );
     }
 }

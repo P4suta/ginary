@@ -62,10 +62,17 @@ docker info >/dev/null 2>&1 || skip "the docker daemon is unreachable"
 # something to start on a machine that does not need it, and what matters is
 # whether *this* daemon can run an arm64 image, not what this kernel has
 # registered in /proc/sys/fs/binfmt_misc.
+#
+# The installer is pinned to a manifest digest, not to a tag. This script is
+# run by ci.yml's `smoke-matrix` job, so a tag here would leave the same
+# mutable image running with the same host kernel capabilities that the
+# workflow's own pin exists to prevent. The digest names the multi-platform
+# index and is `tonistiigi/binfmt:qemu-v10.2.3` as of 2026-09-04; re-resolve it
+# with `docker buildx imagetools inspect tonistiigi/binfmt:<tag>` when it moves.
 arm64=yes
 if ! docker run --rm --platform linux/arm64 alpine:3.20 true >/dev/null 2>&1; then
   echo "smoke-matrix: linux/arm64 does not run here; installing a binfmt handler"
-  if docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null 2>&1 \
+  if docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64 >/dev/null 2>&1 \
      && docker run --rm --platform linux/arm64 alpine:3.20 true >/dev/null 2>&1; then
     echo "smoke-matrix: linux/arm64 is registered now"
   else

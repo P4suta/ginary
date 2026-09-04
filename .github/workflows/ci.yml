@@ -245,8 +245,19 @@ jobs:
           tool: cross@0.2.5
       # Register the qemu binfmt handlers so the aarch64 container row can run
       # on this x86_64 runner, then run the committed matrix script.
+      #
+      # Pinned to a manifest digest for the reason every `uses:` above it is
+      # pinned to a commit SHA, and more so: `--privileged` hands the container
+      # this runner's own kernel capabilities, so the image is code this
+      # repository executes with more authority than its own workflows have.
+      # Named by tag, that code could be replaced upstream between two runs
+      # with no commit here. The digest is the multi-platform index, so it
+      # resolves on an arm64 runner too; it is `tonistiigi/binfmt:qemu-v10.2.3`
+      # as of 2026-09-04. `scripts/smoke-matrix.sh` runs the same image inside
+      # this job and carries the same pin. Held by
+      # tests/ci_matrix.rs::every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest.
       - name: Bootstrap binfmt for arm64
-        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
       # One target directory per triple, because one target directory belongs to
       # one container image. `cross` runs each triple's compiler in its own
       # image and the gnu image is deliberately ancient, so a host

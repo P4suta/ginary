@@ -131,6 +131,131 @@ fn not_on_unix() {
 }
 "##;
 
+/// `#[cfg(unix)]` written where no compiler ever reads it: inside a block
+/// comment, and inside a raw string a test hands to a scanner.
+///
+/// Both spellings are in this tree already — the module comment of
+/// `tests/common/portability.rs` quotes the rule, and every fixture in this
+/// file is Rust source inside a raw string — so a scan that mistook either for
+/// an attribute would silently gate the next real reach under it.
+const CFG_IN_PROSE: &str = r##"
+/*
+#[cfg(unix)]
+*/
+use std::os::unix::fs::PermissionsExt;
+
+fn sample() -> &'static str {
+    r#"
+#[cfg(unix)]
+"#
+}
+
+use std::os::unix::ffi::OsStrExt;
+"##;
+
+/// Four `cfg` expressions that all name `unix`, of which only two keep the
+/// item off a Windows compiler.
+const WIDE_GATES: &str = r##"
+#[cfg(any(unix, windows))]
+fn either() {
+    use std::os::unix::fs::PermissionsExt as _;
+}
+
+#[cfg(not(any(unix, feature = "cli")))]
+fn neither() {
+    use std::os::unix::ffi::OsStrExt;
+}
+
+#[cfg(all(unix, feature = "cli"))]
+fn only_unix() {
+    use std::os::unix::fs::symlink;
+}
+
+#[cfg(target_family = "unix")]
+fn family() {
+    use std::os::unix::fs::symlink;
+}
+"##;
+
+/// The same two gates, spelled the way `rustfmt` spells one that does not fit
+/// on a line.
+const WRAPPED_GATES: &str = r##"
+#[cfg(all(
+    unix,
+    feature = "cli"
+))]
+fn only_unix() {
+    use std::os::unix::fs::symlink;
+}
+
+#[cfg(any(
+    unix,
+    windows
+))]
+fn either() {
+    use std::os::unix::fs::symlink;
+}
+"##;
+
+#[test]
+fn a_gate_rustfmt_wrapped_over_four_lines_is_still_one_gate() {
+    // `rustfmt` breaks a `cfg` that does not fit, and this file's own fixture
+    // for the gnu-gate scanner carries one. A scan that read a line at a time
+    // saw `#[cfg(all(` — an `all` of nothing, which guarantees no unix — and
+    // then took the next line as ordinary code and dropped the pending gate,
+    // so the reach under a perfectly good `#[cfg(all(unix, ..))]` was reported
+    // as naked. A guard that fails a correct tree is a guard the next author
+    // deletes. The attribute run is therefore accumulated to its closing
+    // bracket and parsed whole, which is what `gnu_gate_sites` thirty lines
+    // below already did.
+    let sites = unix_sites("wrapped.rs", WRAPPED_GATES);
+    let seen: Vec<(usize, bool)> = sites.iter().map(|site| (site.line, site.gated)).collect();
+    assert_eq!(
+        seen,
+        vec![(7, true), (15, false)],
+        "wrapping an attribute changes its width and not its meaning: the `all(unix, ..)` still          gates and the `any(unix, windows)` still does not:\n{}",
+        render(&sites)
+    );
+}
+
+#[test]
+fn a_cfg_attribute_in_a_comment_or_a_raw_string_gates_nothing() {
+    // The scan decides what is an attribute from the *raw* line, so a
+    // `#[cfg(unix)]` the compiler reads as prose still arms the gate — and the
+    // next real reach, which is naked, is reported as covered. That is the
+    // failure mode this whole file exists to prevent, arriving through the
+    // instrument rather than through the tree.
+    let sites = unix_sites("prose.rs", CFG_IN_PROSE);
+    let seen: Vec<(usize, bool)> = sites.iter().map(|site| (site.line, site.gated)).collect();
+    assert_eq!(
+        seen,
+        vec![(5, false), (13, false)],
+        "neither reach is gated: the attribute above the first is inside a block comment and the \
+         one above the second is inside a raw string, and a compiler reads neither:\n{}",
+        render(&sites)
+    );
+}
+
+#[test]
+fn a_cfg_that_also_admits_a_windows_target_is_not_a_unix_gate() {
+    // `any(unix, windows)` is true on Windows and `not(any(unix, feature =
+    // "cli"))` is true on Windows whenever the feature is off, so both include
+    // the item on the one platform that has no `std::os::unix` — which is the
+    // opposite of what a gate is for. Only an expression that *guarantees*
+    // unix counts. `all(unix, ..)` and `target_family = "unix"` both do, and
+    // the second puts the word inside a string literal, so the parse cannot
+    // simply read stripped code and be done.
+    let sites = unix_sites("wide.rs", WIDE_GATES);
+    let seen: Vec<(usize, bool)> = sites.iter().map(|site| (site.line, site.gated)).collect();
+    assert_eq!(
+        seen,
+        vec![(4, false), (9, false), (14, true), (19, true)],
+        "an expression that lets the item through on Windows gates nothing; only `all(unix, ..)` \
+         and `target_family = \"unix\"` do:\n{}",
+        render(&sites)
+    );
+}
+
 #[test]
 fn a_reach_at_file_scope_is_ungated_and_one_inside_a_cfg_unix_item_is_not() {
     let sites = unix_sites("mixed.rs", MIXED);

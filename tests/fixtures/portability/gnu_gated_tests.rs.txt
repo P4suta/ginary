@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Not compiled: handed to `common::portability::gnu_gate_sites` as text.
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_gate_over_a_glibc_claim() {
+    assert!(info.needed.iter().any(|name| name == "libc.so.6"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn a_gnu_gate_over_the_same_claim() {
+    let floor = info.glibc_max.expect("a gnu binary has a floor");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu"
+))]
+#[test]
+fn a_gnu_gate_wrapped_over_four_lines() {
+    assert!(info.interp.unwrap().contains("ld-linux"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_gate_over_a_claim_no_libc_decides() {
+    assert!(info.pie, "a cargo test binary is a PIE");
+}
+
+#[test]
+fn an_ungated_test_that_makes_a_glibc_claim() {
+    assert_eq!(info.glibc_max, Some("2.9".to_owned()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_claim_that_lives_only_in_a_comment() {
+    // libc.so.6 and its glibc_max are what a gnu host would show here
+    assert!(info.class == 64);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_linux_gate_over_a_loader_claim() {
+    assert!(interp.contains("ld-linux"), "the dynamic loader");
+}

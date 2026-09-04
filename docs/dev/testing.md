@@ -50,7 +50,7 @@
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
 | `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing; C4 adds the per-target columns of the native table — the rendered table over one verdict of each kind, and the verdicts a project's own configuration reaches over an object under `priv` |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
-| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs`. E7 adds the macOS arm on the same terms, over a `FakeOtp::new().macos()` tree whose `beam.smp` is a real thin Mach-O: a `cputype` resolved to `macos-aarch64`, a universal binary refused as more than one runtime, a `cputype` no target of ours names, and a header too short to be one |
+| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs`. E7 adds the macOS arm on the same terms, over a `FakeOtp::new().macos()` tree whose `beam.smp` is a real thin Mach-O: a `cputype` resolved to `macos-aarch64`, a universal binary refused as more than one runtime, a `cputype` no target of ours names, and a header too short to be one. E16 extends the same reader choice to the two sources that fill a cache first, on both platforms whose runtime the ELF reader cannot read: `tests/regressions/e16_a_cached_macos_runtime_was_read_by_the_elf_reader.rs` and `tests/regressions/e16_a_cached_windows_runtime_was_read_by_the_elf_reader.rs` drive `resolve_in_with` for `catalog` and for `tarball:` with an ELF seam that *refuses everything it is shown*, so a test that consulted it at all would fail rather than merely disagree. Each file also holds the negative claim check — a catalogue entry claiming `libc.kind = "gnu"` for a Mach-O or for a PE is `ErtsError::CatalogClaim` naming `none` as the actual — because the emulator is the evidence and an entry that lies about it must not resolve |
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub. D3 adds three darwin cases over a hand-fabricated Mach-O carrying an appended marker, against the real Mach-O arm of `check_object`: a matching `cputype` accepted, a mismatched one refused by the header, and one already carrying a `__GINARY,__payload` section refused as an artifact. The RED-phase placeholder `a_darwin_stub_cannot_be_checked_here_yet`, which pinned the old `StubError::NotYetSupported` answer, is gone — it asserted the very behaviour these three replace |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
@@ -67,7 +67,7 @@
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
 | `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry; E15 adds the ADR's citation of the run that measured `halt(3)` propagation on a real Windows host — run 33864729638, job 100996872499 — so the claim can be re-read rather than believed |
-| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope; extended in E15 with the Windows job's exit-code probe held to three things at once — it probes the runtime the job installed through `INSTALL_DIR_FOR_OTP` rather than a bare `erl` off `PATH`, it says the code it saw, and it ends on a verdict of its own |
+| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope; extended in E15 with the Windows job's exit-code probe held to three things at once — it probes the runtime the job installed through `INSTALL_DIR_FOR_OTP` rather than a bare `erl` off `PATH`, it says the code it saw, and it ends on a verdict of its own; extended in E16 with the privileged-image rule — `every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest` reads every workflow and composite action under `.github/`, every `.sh` under `scripts/` and `.github/`, and `mise.toml` (the reach `privileged_scan_set` names, because the task file is neither YAML nor a `.sh` and already runs a container), joins backslash continuations, drops shell comments through `shell_code`, and requires every image run with `--privileged` to be named `name@sha256:<64 hex>` rather than by any tag — an image with the host runner's own kernel capabilities is code this repository executes with more authority than its own workflows have, and a tag can be moved upstream between two runs with no line in any diff |
 | `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
 | `tests/deps.rs` | the committed dependency record, held to what the development machine's pre-push freshness gate reads (E4): `sha2` requested on the 0.11 line and `Cargo.lock` resolved onto it, one version each of `sha2`, `digest` and `block-buffer` — two `digest` majors are two incompatible `Digest` traits and that is what a half-finished migration looks like — and `sha2` and `hex`, the pair that computes and spells every digest, locked on the minor line their requirement names. Reads `Cargo.toml` and `Cargo.lock` through `tests/common/deps.rs`, a hand-rolled scanner rather than `toml`, because `toml` is behind the `cli` feature and these assertions hold for the stub flavor too |
@@ -635,6 +635,52 @@ about unix, an outer attribute on the item, or an attribute on an enclosing bloc
 `tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs` asserts the scanner against
 source it is handed and then turns it loose on every `.rs` file `git` tracks under `tests/`.
 
+E16 sharpened `unix_sites` on both halves of a review finding, and the two calibration fixtures in
+that regression file are what hold the sharpening. **Lexically**, whether a line *is* an attribute
+is now decided on the *stripped* code rather than on the raw line, so a `#[cfg(unix)]` inside a
+block comment or inside a raw string — both of which this very module and that regression file are
+full of — arms no gate over the next real reach. **Semantically**, `names_unix` no longer asks
+whether the attribute mentions `unix`: it parses the `cfg` predicate into a small `CfgExpr` and
+asks whether every configuration the expression admits is a unix one. `all(unix, ..)` and
+`target_family = "unix"` guarantee it; `any(unix, windows)` does not, because it is true on
+Windows, and neither does `not(any(unix, feature = "cli"))`, which is true on Windows whenever the
+feature is off. `not(..)` guarantees nothing by decision — `not(windows)` is true on targets that
+are neither — and the cost of that answer is a false report on a spelling nothing in this tree
+uses, against a hidden naked reach if it went the other way. **Structurally**, the attribute run
+is accumulated to its closing bracket and parsed whole, the bracket count `gnu_gate_sites` keeps,
+because `rustfmt` breaks a `cfg` that does not fit on a line: read one line at a time,
+`#[cfg(all(` is an `all` of no options, which guarantees no unix, and the next line was then read
+as ordinary code and dropped the gate — so a covered reach under a perfectly good
+`#[cfg(all(unix, ..))]` was reported as naked, which is a guard failing a correct tree. See
+`a_gate_rustfmt_wrapped_over_four_lines_is_still_one_gate`.
+
+E16 also added `gnu_gate_sites` to the same file, the same shape as `unix_sites` and for the same
+class of defect one level down. `#[cfg(target_os = "linux")]` is true on **musl** Linux as well as
+gnu, and the two Linux C libraries differ in exactly the facts a test is likely to assert about
+one: `libc.so.6` is glibc's own `SONAME`, a `glibc_max` floor is read out of `.gnu.version_r`,
+and `ld-linux` names glibc's loader. A static musl binary has none of the three. Two of the seven
+targets this project distributes are musl, so the host those assertions fail on is one the project
+already supports and has simply never run `cargo test` on. `gnu_gate_sites` reports every `#[test]`
+under a `target_os = "linux"` gate that does not also name `target_env = "gnu"` and that asserts
+one of `GLIBC_CLAIMS`; a needle inside a `//` comment is prose, not a claim. It is calibrated on
+the committed fixture `tests/fixtures/portability/gnu_gated_tests.rs.txt` — a `.rs.txt` name,
+because the tree scan reads every tracked `.rs` file under `tests/` and would otherwise read its
+own fixture — and turned loose on the tree by
+`tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`.
+
+What that scan cannot see is stated where it is written, because the same defect had a seventh
+instance in a shape no attribute carries. `tests/stage_run.rs`'s `needs:` assertion chose its
+expectation at *run* time, from `platform::object_format(platform::HOST)`, whose ELF arm is every
+Linux — so it asserted glibc's four sonames and a `(GLIBC_` floor on a musl host too.
+Widening `gnu_gate_sites` to report every ungated test holding a `GLIBC_CLAIMS` needle would
+report a pure unit test over literal input, which asserts nothing about a host and is not a
+defect, so the runtime shape is answered where it belongs instead: `host_needs_expectation` keys
+the expectation on the C library as well as the object format — glibc's four names and a floor
+for gnu, `libc.musl-<arch>.so.1` and no floor for musl, `kernel32.dll` folded for a PE,
+`libSystem` for a Mach-O — and being a pure function it can be asserted from a host that is not
+the one it describes. `tests/regressions/e16_a_glibc_only_expectation_was_asserted_on_any_elf_host.rs`
+does exactly that.
+
 E7 added `unmet_needs` to the same file, which is not a scanner: it is the `DT_NEEDED` names
 of an emulator that `ginary::verify::NEEDED_ALLOWLIST` does not admit, sorted and deduplicated.
 It exists because the portability promise is about the *host's* Erlang and not about ginary,
@@ -656,6 +702,14 @@ and `tests/regressions/c4_the_hook_shell_was_cmd_on_a_windows_host.rs`. The seco
 `src/platform.rs` is for: a fact about an operating system, written once and asserted for every
 `Os` on the machine ginary is developed on. `docs/dev/log/E8.md` §16 keeps the ledger of which
 Windows failures are which.
+
+E16 added the corollary the Linux rows had been getting wrong: **a gate names the thing the claim
+is about, and for a Linux claim that is often the C library rather than the operating system.**
+`target_os = "linux"` is one gate for two platforms, and the `tests/elf.rs`, `tests/cli.rs` and
+`tests/report.rs` rows above assert glibc's `libc.so.6`, glibc's `ld-linux` and a floor read out of
+a glibc-only section — none of which a musl host has. All six are gated
+`#[cfg(all(target_os = "linux", target_env = "gnu"))]` now, and `gnu_gate_sites` fails the suite
+on the next one written without it.
 
 A scan is a proxy, and a better check exists on any machine with docker. `mingw-w64` is all a
 Linux host needs to type-check the whole tree for Windows, which is what the C sources of
@@ -1125,6 +1179,13 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   snapshot test rather than `read`: a panic reports only the path, while the marker makes the
   failure a diff between the record the milestone promised and the empty tree, so one run shows
   both the path and the whole expected content.
+- `shell_code(line)` — one shell line with its comment removed: the part a shell would actually
+  run. `#` opens a comment only where a word starts, and inside `'..'` or `".."` it is an ordinary
+  character, so `--skip 'a#b'` passes `a#b`. E16 bought it twice over, and both times the naive
+  read failed *in the direction that passes*: `cargo test --locked # --no-fail-fast` contains the
+  flag and does not pass it, and a commented-out `docker run --privileged` runs nothing. Use it in
+  any rule that reads a `run:` block or a committed script as commands; a `split_once('#')` per
+  scanner is the copy that drifts.
 - `parse_yaml(text)` / `yaml(path)` — the document as YAML, through `saphyr`. GitHub loads the
   issue forms, `dependabot.yml` and every workflow with a YAML reader, and a substring assertion
   is just as happy with a file no reader will accept; parsing first makes that a test failure.
@@ -1134,8 +1195,9 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   `WorkflowStep { workflow, job, position, name, run, uses, shell, with, env }`: the job id it
   belongs to, its 1-based position within that job, its `name:` (or its `uses:`), its `run:`
   script, and the job's `env:` overlaid with the step's own. `step.commands()` is that script as
-  one command per line with backslash continuations joined, because a command wrapped for width
-  is still one command and a cosmetic reflow must not change what a rule asserts. E5 bought it:
+  one command per line with backslash continuations joined and shell comments removed through
+  `shell_code`, because a command wrapped for width is still one command, a cosmetic reflow must
+  not change what a rule asserts, and a line a shell never runs is not a command at all. E5 bought it:
   three of that milestone's findings are about *order* and *environment* within a job — which
   build last wrote `target/release/ginary`, which target directory a second `cross` invocation
   reuses, which job a step lives in and therefore which `if:` decides whether it runs — and a

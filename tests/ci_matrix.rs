@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::common::deps::{Version, rust_version};
 use crate::common::repo::{
     ToolchainSite, WorkflowStep, exists, parse_yaml, read, read_opt, read_or_missing, root,
-    rust_toolchain_sites, workflow_steps,
+    rust_toolchain_sites, shell_code, shell_scripts_under, workflow_steps,
 };
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
@@ -1470,6 +1470,235 @@ fn every_uses_reference_is_pinned_to_a_full_sha_or_marked_todo() {
         offenders.is_empty(),
         "every third-party `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment; \
          these are not:\n{}",
+        offenders.join("\n")
+    );
+}
+
+// -------------------------------------- the privileged-image digest pin --
+
+/// The flag that hands a container the host's own kernel capabilities.
+const PRIVILEGED: &str = "--privileged";
+
+/// The command words that start a container, with the space that ends them.
+const RUNNERS: [&str; 2] = ["docker run ", "podman run "];
+
+/// The container options whose value is the *next* word rather than part of
+/// the same one.
+///
+/// A word that follows one of these is that option's value and is never the
+/// image, so a scan that took the first word not beginning with `-` would read
+/// `linux/arm64` as an unpinned image reference. The `--option=value` spelling
+/// is a single word and needs no entry here: it is skipped along with every
+/// other `-`-prefixed one.
+const VALUE_OPTIONS: [&str; 23] = [
+    "--add-host",
+    "--cap-add",
+    "--cap-drop",
+    "--device",
+    "--entrypoint",
+    "--env",
+    "--label",
+    "--mount",
+    "--name",
+    "--network",
+    "--platform",
+    "--publish",
+    "--security-opt",
+    "--tmpfs",
+    "--user",
+    "--volume",
+    "--workdir",
+    "-e",
+    "-l",
+    "-p",
+    "-u",
+    "-v",
+    "-w",
+];
+
+/// Whether `reference` names an image by immutable manifest digest.
+///
+/// `name@sha256:<64 hex>` and nothing else. A tag — `:latest`, `:v8`, or the
+/// bare name that means `:latest` — names whatever the registry points it at
+/// today, which is the whole of the finding: a tag can be moved upstream
+/// without a commit here.
+fn pinned_by_digest(reference: &str) -> bool {
+    reference.split_once("@sha256:").is_some_and(|(_, digest)| {
+        digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// Every image `text` starts with [`PRIVILEGED`] that is not pinned by digest,
+/// and how many are.
+///
+/// Pure: one file's text in, complaints out, so the rule is calibrated on a
+/// file written by hand before it is turned loose on the tree. It reads
+/// command lines rather than YAML, because the same `docker run` appears in a
+/// workflow's `run:` block, in a committed shell script and in a `mise.toml`
+/// task, and is exactly as privileged in all three. Which files it is asked
+/// about is [`privileged_scan_set`]'s to say, and that function states the
+/// reach.
+///
+/// A backslash continuation carries the rest of a command onto the next line
+/// and either half may hold the image, so the halves are joined — but the
+/// physical line each command *starts* on is kept and is the number reported,
+/// rather than an index into the joined text that every earlier continuation in
+/// the file has already shifted. Everything after an unquoted `#` is a shell
+/// comment the runner never executes and is dropped by
+/// [`crate::common::repo::shell_code`].
+fn unpinned_privileged_images(path: &str, text: &str) -> (usize, Vec<String>) {
+    let mut pinned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    let physical: Vec<&str> = text.lines().collect();
+    let mut index = 0usize;
+    while index < physical.len() {
+        let first = index;
+        let mut joined = String::new();
+        while index < physical.len() {
+            let line = physical[index];
+            index += 1;
+            match line.strip_suffix('\\') {
+                Some(head) => {
+                    joined.push_str(head);
+                    joined.push(' ');
+                }
+                None => {
+                    joined.push_str(line);
+                    break;
+                }
+            }
+        }
+        let code = shell_code(&joined);
+        // Where each container command's arguments begin, and where the next
+        // one starts, so two commands chained on one line are read apart
+        // rather than as one long argument list.
+        let mut starts: Vec<(usize, usize)> = Vec::new();
+        for runner in RUNNERS {
+            for (at, _) in code.match_indices(runner) {
+                starts.push((at, at + runner.len()));
+            }
+        }
+        starts.sort_unstable();
+        for (position, (_, args_from)) in starts.iter().enumerate() {
+            let args_to = starts
+                .get(position + 1)
+                .map_or(code.len(), |(next, _)| *next);
+            let arguments = &code[*args_from..args_to];
+            let mut words = arguments
+                .split_whitespace()
+                .map(|word| word.trim_matches(['"', '\'']));
+            if !arguments
+                .split_whitespace()
+                .any(|word| word.trim_matches(['"', '\'']) == PRIVILEGED)
+            {
+                continue;
+            }
+            let mut image = None;
+            while let Some(word) = words.next() {
+                if word.starts_with('-') {
+                    if VALUE_OPTIONS.contains(&word) {
+                        let _ = words.next();
+                    }
+                    continue;
+                }
+                image = Some(word);
+                break;
+            }
+            let Some(image) = image else {
+                continue;
+            };
+            if pinned_by_digest(image) {
+                pinned += 1;
+            } else {
+                offenders.push(format!(
+                    "{path}:{}: `{image}` is run with {PRIVILEGED} and is named by tag rather \
+                     than by manifest digest",
+                    first + 1
+                ));
+            }
+        }
+    }
+    (pinned, offenders)
+}
+
+/// Every committed file that can start a container, with its text.
+///
+/// **The rule's reach, written down rather than assumed.** Three sets, and the
+/// third is the one a reader would not guess: every workflow and composite
+/// action under `.github/`, every `.sh` under `scripts/` and `.github/`, and
+/// `mise.toml`. The task file is neither YAML nor a `.sh` and it already runs a
+/// container — `check:windows` builds `wincheck.Dockerfile` and runs
+/// `cargo check` inside it — so a rule keyed on the file extension would have
+/// left the one committed file that spawns containers outside it, and a
+/// `--privileged` added to a mise task would have been pinned by nothing. A
+/// file added here later that runs containers belongs in this list; that is
+/// what the list is for.
+fn privileged_scan_set() -> Vec<(String, String)> {
+    let mut set = action_yaml();
+    for script in shell_scripts_under("scripts")
+        .into_iter()
+        .chain(shell_scripts_under(".github"))
+    {
+        let text = read(&script);
+        set.push((script, text));
+    }
+    set.push(("mise.toml".to_owned(), read("mise.toml")));
+    set
+}
+
+/// A workflow holding one unpinned privileged run, one pinned one, one
+/// unprivileged run and one that is commented out.
+const PLANTED_PRIVILEGED: &str = "\
+jobs:
+  bootstrap:
+    steps:
+      - run: docker run --privileged --rm example/binfmt --install arm64
+      - run: docker run --privileged --rm --platform linux/amd64 example/binfmt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --install arm64
+      - run: docker run --rm alpine:3.20 true
+      # - run: docker run --privileged --rm example/binfmt --install arm64
+";
+
+#[test]
+fn every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest() {
+    // The instrument first, on the four shapes a command line comes in.
+    let (pinned, planted) = unpinned_privileged_images("<planted>", PLANTED_PRIVILEGED);
+    assert_eq!(
+        planted,
+        vec![
+            "<planted>:4: `example/binfmt` is run with --privileged and is named by tag rather \
+             than by manifest digest"
+                .to_owned()
+        ],
+        "the tag-named privileged run is the only offender: the digest-named one is pinned, the \
+         unprivileged one is out of scope, and the commented-out one is never run"
+    );
+    assert_eq!(
+        pinned, 1,
+        "and `--platform` takes its value as the next word, so the image is the word after that \
+         and not `linux/amd64`"
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    for (path, text) in privileged_scan_set() {
+        let (found, complaints) = unpinned_privileged_images(&path, &text);
+        pinned += found;
+        offenders.extend(complaints);
+    }
+
+    assert!(
+        pinned + offenders.len() > 0,
+        "nothing in this repository runs a privileged container any more, so this rule is \
+         measuring nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a `{PRIVILEGED}` container has the host runner's own kernel capabilities, so its image \
+         is code this repository executes with more authority than its own workflows have. Named \
+         by tag, that code can be replaced upstream between two runs with no commit here and no \
+         line in any diff — the exact reason every `uses:` in this tree is pinned to a full \
+         commit SHA. Pin each one to a reviewed manifest digest \
+         (`docker buildx imagetools inspect <image>`):\n{}",
         offenders.join("\n")
     );
 }
