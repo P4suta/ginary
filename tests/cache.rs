@@ -34,8 +34,16 @@ use ginary::cache::{APP_DIR_MODE, BIN_MODE};
 use ginary::diag::Diag;
 use ginary::trailer::Trailer;
 
-/// A process id no machine has: `/proc/<pid>` cannot exist for it, so a tree
-/// carrying it is a leftover by definition.
+/// A number outside the positive `i32` a `pid_t` occupies, so no process has
+/// ever carried it and a tree naming it is a leftover by definition.
+///
+/// The sweep answers `dead` for this one before it asks the operating system
+/// anything, which is why it is not the whole story:
+/// [`a_reaped_process_s_temporary_tree_is_removed`] plants an id the process
+/// table really held and really gave up, which is the only input that reaches
+/// the "no such process" answer of the syscall underneath.
+///
+/// [`a_reaped_process_s_temporary_tree_is_removed`]: fn@a_reaped_process_s_temporary_tree_is_removed
 const DEAD_PID: u32 = 4_000_000_000;
 
 fn env(pairs: &[(&str, &str)]) -> Env {
@@ -402,6 +410,65 @@ fn a_dead_process_s_temporary_tree_is_removed() {
     assert_eq!(report.removed, vec![corrupt.clone(), tmp.clone()]);
     assert!(report.kept.is_empty());
     assert_eq!(names(&app_dir), Vec::<String>::new());
+}
+
+/// How many reaped process ids the test below will ask about before it
+/// insists on an answer.
+///
+/// One attempt is enough on any machine that is not handing the id straight
+/// back; see the test's own comment for the window this closes.
+const REAPED_PID_ATTEMPTS: usize = 5;
+
+#[test]
+fn a_reaped_process_s_temporary_tree_is_removed() {
+    // The other half of "dead", and the half `DEAD_PID` cannot state: a
+    // number that is a plausible process id, that the process table held, and
+    // that it no longer holds. That is the input the sweep's liveness rule
+    // answers with a *syscall* rather than with a range check — `ESRCH` from
+    // `kill(pid, 0)` on unix, `ERROR_INVALID_PARAMETER` from `OpenProcess` on
+    // Windows — and without it a rule that read every error as "alive" would
+    // never sweep a real leftover and nothing here would notice.
+    //
+    // The window this cannot close, only shrink: an id becomes eligible for
+    // reuse at the moment the last handle to the process goes, which is the
+    // `drop` below, and Windows hands ids back out of a recycled pool rather
+    // than climbing to a `pid_max` the way Linux does. This suite spawns many
+    // processes and CI runs its targets in parallel, so the id can be another
+    // process's before the sweep asks about it — and then keeping the tree is
+    // the *correct* answer, not a defect. A retry with a fresh reaped id is
+    // therefore a re-run rather than a failure; only the last attempt asserts.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for attempt in 1..=REAPED_PID_ATTEMPTS {
+        let app_dir = dir.path().join(format!("{APP}-{attempt}"));
+        std::fs::create_dir_all(&app_dir).expect("create the application directory");
+
+        let mut child = crate::common::script::live_process(dir.path(), 0);
+        let pid = child.id();
+        child.wait().expect("the planted program runs and exits");
+        // Reaped by the wait on unix; on Windows the id is the process
+        // object's and is not free until the last handle to it is closed,
+        // which is what dropping the child does.
+        drop(child);
+        let tmp = plant(&app_dir, "abc", "tmp", pid);
+
+        let report = cache::sweep(&app_dir, std::process::id(), &Diag::disabled())
+            .expect("the sweep must run");
+
+        if report.removed.is_empty() && attempt < REAPED_PID_ATTEMPTS {
+            // The id was handed out again between the drop and the sweep.
+            continue;
+        }
+
+        assert_eq!(
+            report.removed,
+            vec![tmp],
+            "the launcher that owned this tree has gone, so the tree it was extracting into is \
+             a leftover and the next launcher may have the space back"
+        );
+        assert!(report.kept.is_empty());
+        assert_eq!(names(&app_dir), Vec::<String>::new());
+        return;
+    }
 }
 
 /// How long the planted live process stays alive for.

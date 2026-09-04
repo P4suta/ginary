@@ -1069,3 +1069,63 @@ pub fn read_dir_names(dir: &Path) -> Vec<String> {
     names.sort();
     names
 }
+
+/// Where the `crypto` NIF sits under its application's `priv`, as `os`
+/// spells it.
+///
+/// [`ginary::platform::crypto_nif`] with the `priv/` that
+/// [`FakeApp::priv_file`] supplies itself removed, so that one rule names the
+/// file and the fixture cannot drift from the probe that looks for it.
+///
+/// # Panics
+///
+/// If the platform rule ever stops naming a file under `priv/`, which would
+/// make this a silent mis-plant rather than a failure.
+pub fn crypto_nif_under_priv(os: ginary::target::Os) -> &'static str {
+    ginary::platform::crypto_nif(os)
+        .strip_prefix("priv/")
+        .expect("the crypto NIF is a file under the application's priv")
+}
+
+impl FakeOtp {
+    /// Adds a `crypto` application carrying the NIF an `os` installation
+    /// spells.
+    ///
+    /// The fixture two `tests/doctor.rs` tests wrote by hand, as
+    /// `priv_file("lib/crypto.so", ..)`. That is the unix name on every host,
+    /// and `doctor::crypto_report` asks about [`ginary::platform::HOST`], so
+    /// on a Windows runner the test planted a file the probe never looks for
+    /// and then asserted the probe had found one:
+    ///
+    /// ```text
+    /// ---- crypto_is_reported_exactly_when_the_installation_carries_it ----
+    /// panicked at tests\doctor.rs:511:5: the installation carries a crypto NIF
+    ///
+    /// ---- the_crypto_nif_is_found_and_read ----
+    /// panicked at tests\doctor.rs:532:51: the installation has a crypto NIF
+    /// ```
+    ///
+    /// (`Windows build and exit-code propagation`
+    /// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>.)
+    ///
+    /// `os` is a parameter and not the host for the reason
+    /// `ginary::doctor::crypto_report_for` takes one: both answers are then
+    /// asserted on one machine.
+    #[must_use]
+    pub fn with_crypto_for(self, os: ginary::target::Os, bytes: &[u8]) -> Self {
+        let relative = crypto_nif_under_priv(os).to_owned();
+        let bytes = bytes.to_vec();
+        self.app_with(CRYPTO_APP, CRYPTO_VSN, move |app| {
+            app.priv_file(&relative, &bytes)
+        })
+    }
+}
+
+/// The application the `crypto` NIF belongs to.
+pub const CRYPTO_APP: &str = "crypto";
+
+/// The version [`FakeOtp::with_crypto_for`] gives it.
+///
+/// One number, so that a test naming the directory the NIF landed in composes
+/// it rather than repeating a literal.
+pub const CRYPTO_VSN: &str = "5.9.2";

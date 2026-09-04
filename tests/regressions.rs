@@ -387,3 +387,31 @@ mod e11_the_running_executable_was_taken_for_an_elf;
 #[cfg(feature = "cli")]
 #[path = "regressions/e11_the_temporary_fallback_was_named_after_one_platforms_variable.rs"]
 mod e11_the_temporary_fallback_was_named_after_one_platforms_variable;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_a_crypto_fixture_planted_the_unix_nif_for_a_host_probe.rs"]
+mod e12_a_crypto_fixture_planted_the_unix_nif_for_a_host_probe;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_a_nested_json_trace_path_was_escaped_once_and_written_twice.rs"]
+mod e12_a_nested_json_trace_path_was_escaped_once_and_written_twice;
+#[path = "regressions/e12_a_printed_working_directory_was_compared_as_text.rs"]
+mod e12_a_printed_working_directory_was_compared_as_text;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_a_required_erts_name_was_reported_missing_from_the_tree_holding_it.rs"]
+mod e12_a_required_erts_name_was_reported_missing_from_the_tree_holding_it;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_a_windows_artifact_carried_the_debug_emulator.rs"]
+mod e12_a_windows_artifact_carried_the_debug_emulator;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs"]
+mod e12_the_cross_target_a_stub_test_used_had_no_name;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_the_real_artifact_check_named_the_unix_emulator.rs"]
+mod e12_the_real_artifact_check_named_the_unix_emulator;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_the_sweep_asked_proc_whether_a_process_was_alive.rs"]
+mod e12_the_sweep_asked_proc_whether_a_process_was_alive;
+#[cfg(feature = "cli")]
+#[path = "regressions/e12_the_windows_allowlist_carried_one_vc_runtime_of_three.rs"]
+mod e12_the_windows_allowlist_carried_one_vc_runtime_of_three;
+#[path = "regressions/e12_three_statements_of_the_unsafe_exception_said_three_calls.rs"]
+mod e12_three_statements_of_the_unsafe_exception_said_three_calls;

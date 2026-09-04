@@ -329,7 +329,7 @@ inside the fixture builder itself. The shim reads its steps from `<program>.step
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
 with a placeholder, longest path first, and respells every separator as `/` through
 `tests/common/hostpath.rs`, so a snapshot pins the sentence and the shape of the path rather
-than the machine or the slash it writes between two components. `hostpath` holds seven more
+than the machine or the slash it writes between two components. `hostpath` holds twelve more
 rules of the same kind. `is_absolute_for` decides absoluteness per platform, over drive-absolute,
 UNC and verbatim spellings, and `strip_dir` removes a fixture directory whichever separator
 joined it to the name behind it. E11 added five: `separator_for` names a platform's separator;
@@ -338,7 +338,19 @@ respelling every separator of the relative half and leaving the root and every b
 unix file name alone, with `joined` the same rule asked about this machine; `json_escaped`
 spells a path the way a JSON document carries it, so a test that looks for a path inside a trace
 looks for what is actually written there; and `same_path` compares two paths as the host's file
-system does, which is not string equality on a platform whose names are case-insensitive. The
+system does, which is not string equality on a platform whose names are case-insensitive. E12
+added five more. `nested_json_escaped` is `json_escaped` applied as often as a value nests —
+the `prune` record writes a list of paths as a JSON string *inside* a JSON document, so a needle
+escaped once is not the one on the page. `same_directory_text` settles the part of "one
+directory, two spellings" that is syntax on a named platform — the verbatim `\\?\` prefix, the
+separator and the case of a drive letter, and nothing else, because folding the whole of a path
+would call two unix files one file — and `names_the_same_directory` settles the rest by
+canonicalising both sides where the filesystem can answer, which resolves an 8.3 short name, a
+symbolic link and the case in one step and falls back to the pure rule where it cannot.
+`printed_cwd` reads the `cwd=` line the `hello_ffi` fixture prints, so a test compares the
+spelling the runtime produced instead of asking `String::contains` for a needle built with
+`format!`, and `emulator_suffix` is `Target::emulator_program` under `erts-<vsn>/bin`, which is
+`beam.smp` on unix and `beam.smp.dll` on Windows. The
 join rules exist because `Path::join` spells one join with the host separator and leaves the rest
 alone, which on Windows produces the mixed spelling nothing writes — see
 `tests/regressions/e11_a_listing_path_was_joined_the_way_the_host_spells_one.rs`.
@@ -507,10 +519,22 @@ its fixtures have to be real executables. It copies this test run's own `ginary`
 marker in place — rather than fabricating an ELF — because the claim under test is what the gates
 do with a header a linker actually wrote; `stub_copy_without_marker` zeroes it instead, and
 `text_with_marker` writes a shell script carrying a perfectly good marker, which is what tells
-the marker gates and the object gate apart. `pe_bytes` and `pe_with_marker` are the Windows
-counterpart and are written by hand, the way `payload.rs` writes tar headers by hand: there is no
-Windows toolchain here, and the only fields `check_object` reads out of a PE are the format and
-the COFF machine. `cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
+the marker gates and the object gate apart. `stub_copy_of` is `stub_copy` with the bytes supplied
+rather than read off this run's own binary, and it exists for `for_other_machine`, which E12
+added: the host's own object with its machine field rewritten in place — `e_machine` in an ELF,
+the COFF `Machine` in a PE, the Mach-O `cputype` — which is the fixture the *header* gate needs
+and the one no target name can produce on a platform with a single published architecture.
+`other_supported_target` (E11's `same_format_other_arch`, renamed in E12 when its contract
+changed) answers the *target* gate's question instead — a row of `ginary::target::ALL` that is
+not the host — and `other_arch`, now public, is the architecture flip both of them are built on.
+`pe_bytes` and `pe_with_marker` are the Windows counterpart and are written by hand, the way
+`payload.rs` writes tar headers by hand: there is no Windows toolchain here, and the only fields
+`check_object` reads out of a PE are the format and the COFF machine. `native::pe_with_imports`
+is the one PE fixture that is more than a header: it writes an import directory naming the
+libraries it was given, because `doctor::crypto_report_for` reads a file rather than taking a
+name and every PE fixture before it imported nothing at all.
+
+`cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
 a real cross-built stub, and its rule is `stubfile::choose_cross_stub`: a printed skip, unless
 `GINARY_REQUIRE_STUBS=1` says the file was supposed to be there.
 
@@ -746,6 +770,14 @@ D2 added a fifth thing, and it keeps the rule above rather than stepping outside
 `assemble::WINDOWS_REQUIRED_BINS` requires and the file assembly deletes — plus whatever
 `extra_erts_bins` named. Everything else about the root is the unix builder's, because
 everything else about a Windows runtime is the same.
+
+E12 added a sixth, for the same reason and in the same shape. `FakeOtp::with_crypto_for(os,
+bytes)` plants the `crypto` application carrying the NIF an `os` installation spells, and
+`fake_otp::crypto_nif_under_priv` is where that name comes from: `platform::crypto_nif` with the
+`priv/` the builder supplies itself removed, so the fixture and the probe that looks for it are
+one rule. Two `tests/doctor.rs` tests wrote `priv_file("lib/crypto.so", ..)` by hand, which is
+the unix name on every host, and then asserted a host probe had found it — on a Windows runner it
+was looking for `crypto.dll` and the fixture had planted a file nothing looks for.
 
 Every `.exe` and `.dll` it writes is a real, if minimal, PE image: a DOS header whose
 `e_lfanew` points at the PE signature, a COFF header naming the machine, and a PE32+ optional

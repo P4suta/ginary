@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ginary::target::{Arch, Target};
+use ginary::target::{ALL, Arch, Target};
 
 /// The byte [`IMAGE`] is masked with, the same one `ginary::stubid` uses.
 const MASK: u8 = 0x5a;
@@ -609,43 +609,257 @@ pub fn pe_with_marker(dir: &Path, name: &str, machine: u16, marker: &[u8; MARKER
 /// target asked about *was* the host, so the running executable answered.
 ///
 /// The architecture is what is flipped, because it is the one field the
-/// running binary can never disagree with the host on.
+/// running binary can never disagree with the host on. Flipping it is not
+/// always enough on its own: `windows-aarch64` is not a row of
+/// [`ginary::target::ALL`], and a `--target` naming it is refused by the
+/// parser before the claim under test is reached, so a host whose flip has
+/// no name falls back to the first supported target whose architecture is
+/// not the host's. See
+/// `tests/regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs`.
+///
+/// # Panics
+///
+/// If [`ginary::target::ALL`] holds no target of another architecture at
+/// all, which would leave the claim this exists for unaskable.
 pub fn foreign_target_for(host: Target) -> Target {
-    Target::new(host.os, other_arch(host.arch), host.libc)
+    let flipped = Target::new(host.os, other_arch(host.arch), host.libc);
+    if is_supported(flipped) {
+        return flipped;
+    }
+    ALL.into_iter()
+        .find(|candidate| candidate.arch != host.arch)
+        .expect("`ginary::target::ALL` carries more than one architecture")
 }
 
-/// A target with `host`'s own object format and another architecture.
+/// Whether `target` is one this ginary has a name for.
 ///
-/// The different question `stub::verify`'s header gate asks. That gate exists
-/// because the marker is text and copies while the object header is what the
-/// linker wrote, so a test of it needs a file whose header disagrees with its
-/// marker — which means a `want` in the *same container format* as the file,
-/// or the gate refuses the file as not being an object of that kind at all
-/// before it ever compares machines:
+/// Asked of the parser rather than of [`ginary::target::ALL`] directly,
+/// because the parser is what refuses a marker and a `--target`, and it is
+/// the refusal these helpers exist to stay on the right side of.
+fn is_supported(target: Target) -> bool {
+    target.name().parse::<Target>() == Ok(target)
+}
+
+/// A supported target that is not `host`.
+///
+/// What `stub::verify`'s *target* gate is tested with: a marker naming
+/// somebody else's target is refused before the object header is read at all,
+/// so the container format is irrelevant here and the only thing that matters
+/// is that the name is one this ginary can read back.
+///
+/// It used to be "the host's own object format and another architecture",
+/// written for the header gate, which the four `tests/stub.rs` failures of
+/// E12 showed has no answer on a single-architecture platform:
 ///
 /// ```text
-/// ---- a_marker_that_disagrees_with_the_file_is_refused_by_the_header ----
-/// expected StubError::ObjectMismatch, got NotAnObject {
-///   path: "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\.tmp9XqB81\\liar",
-///   reason: "the file is 14432256 bytes and begins `MZ`" }
+/// ---- a_stub_whose_marker_names_another_target_is_refused ----
+/// expected StubError::TargetMismatch, got Marker { path: "...\\cross", source:
+///   UnknownTarget { name: "windows-aarch64",
+///                   source: Unsupported("windows-aarch64") } }
 /// ```
 ///
-/// (same job, `tests/stub.rs:440`.) `NotAnObject` is the right answer to the
-/// question that was asked — a PE is not an ELF — and the wrong question. The
-/// PE branch of the gate was never reached on any runner, which is why C2's
-/// `the_pe_gate_was_never_exercised` regression exists and why this one is its
-/// Windows-host counterpart.
-pub fn same_format_other_arch(host: Target) -> Target {
-    Target::new(host.os, other_arch(host.arch), host.libc)
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>,
+/// `tests/stub.rs:467`.) The header gate is no longer asked for a second
+/// *target* at all — it is asked for a second *machine*, which is
+/// [`for_other_machine`].
+///
+/// The architecture is flipped where that names a supported target, so the
+/// answer on Linux and macOS is what it has always been; a host whose flip
+/// has no name takes the first supported target that is not itself.
+///
+/// # Panics
+///
+/// If [`ginary::target::ALL`] holds only one target.
+pub fn other_supported_target(host: Target) -> Target {
+    let flipped = Target::new(host.os, other_arch(host.arch), host.libc);
+    if is_supported(flipped) {
+        return flipped;
+    }
+    ALL.into_iter()
+        .find(|candidate| *candidate != host)
+        .expect("`ginary::target::ALL` carries more than one target")
 }
 
 /// The architecture that is not `arch`.
 ///
 /// The one field the running executable can never disagree with the host on,
-/// which is what makes it the field both rules above flip.
-const fn other_arch(arch: Arch) -> Arch {
+/// which is what makes it the field both rules above flip and the field
+/// [`for_other_machine`] rewrites.
+pub const fn other_arch(arch: Arch) -> Arch {
     match arch {
         Arch::X86_64 => Arch::Aarch64,
         Arch::Aarch64 => Arch::X86_64,
     }
+}
+
+// ------------------------------------------------- a header for another CPU --
+
+/// A copy of `image` whose object header names the other architecture, in the
+/// container format `image` already is.
+///
+/// "The other" is read off the file rather than off the host — the flip of
+/// the machine its own header names — so the answer for [`ginary_bin`] is the
+/// architecture [`Target::host`] is not, and the answer for a synthetic
+/// fixture is the flip of whatever that fixture was built for.
+///
+/// The fixture `same_format_other_arch` could not build on every host. That
+/// helper answers "a target in this container format for another machine",
+/// and on a Windows runner the only answer it has is `windows-aarch64` — a
+/// combination `ginary::target::ALL` does not carry, so the marker written
+/// from it does not scan back and the header gate is never reached:
+///
+/// ```text
+/// ---- a_marker_that_disagrees_with_the_file_is_refused_by_the_header ----
+/// expected StubError::ObjectMismatch, got Marker { path: "...\\liar", source:
+///   UnknownTarget { name: "windows-aarch64",
+///                   source: Unsupported("windows-aarch64") } }
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>,
+/// `tests/stub.rs:488`.)
+///
+/// The gate's subject is not a second *target*, it is a second *machine*: the
+/// marker is text and copies, the header is what the linker wrote, and the
+/// test needs a file whose header says one thing while its marker says
+/// another. So the machine field is rewritten instead of the target, and the
+/// marker and the `want` both stay the host — which is a supported target on
+/// every runner.
+///
+/// The field is one halfword in every format ginary reads: `e_machine` at
+/// offset 18 of an ELF, the COFF `Machine` four bytes past the PE signature,
+/// and the Mach-O `cputype` at offset 4.
+///
+/// # Panics
+///
+/// If `image` is not an object in a format this rewrites, or is too short to
+/// hold the field.
+pub fn for_other_machine(image: &[u8]) -> Vec<u8> {
+    let mut bytes = image.to_vec();
+    let format = ginary::platform::object_format_of(&bytes)
+        .expect("the fixture image is an object in a format ginary reads");
+    let (at, width) = machine_field(&bytes, format);
+    let found = read_field(&bytes, at, width);
+    let other = other_machine_code(format, found);
+    write_field(&mut bytes, at, width, other);
+    bytes
+}
+
+/// Where the machine field of an object in `format` is, and how wide it is.
+///
+/// The offset is the same in every file of its format, so no parser is
+/// needed and none is wanted: the fixture is deliberately a byte rewrite of a
+/// real binary, which is what makes it a file whose *header* says one thing
+/// while every other byte of it is the object a linker wrote.
+///
+/// # Panics
+///
+/// If `bytes` is too short to hold the field, or if the file is a fat Mach-O,
+/// which carries one machine per slice and is not a fixture this builds.
+fn machine_field(bytes: &[u8], format: ginary::platform::ObjectFormat) -> (usize, usize) {
+    match format {
+        // `e_machine`, a halfword at offset 18 of every ELF header.
+        ginary::platform::ObjectFormat::Elf => {
+            assert_eq!(
+                bytes.get(5),
+                Some(&1),
+                "the ELF fixture is little-endian, which every target ginary has a name for is"
+            );
+            (18, 2)
+        }
+        // The COFF header's `Machine`, a halfword four bytes past the `PE\0\0`
+        // signature the DOS header's `e_lfanew` points at.
+        ginary::platform::ObjectFormat::Pe => {
+            let at = usize::try_from(u32::from_le_bytes(
+                bytes[0x3c..0x40]
+                    .try_into()
+                    .expect("the PE fixture holds an `e_lfanew`"),
+            ))
+            .expect("the PE signature offset fits in this machine's usize");
+            assert_eq!(
+                bytes.get(at..at + 4),
+                Some(&b"PE\0\0"[..]),
+                "the PE fixture carries its signature where `e_lfanew` says"
+            );
+            (at + 4, 2)
+        }
+        // `cputype`, a word at offset 4 of a thin Mach-O header.
+        ginary::platform::ObjectFormat::MachO => {
+            assert!(
+                !bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]),
+                "a fat Mach-O carries one machine per slice; this builds a thin fixture"
+            );
+            assert_eq!(
+                bytes.first(),
+                Some(&0xcf),
+                "the Mach-O fixture is a little-endian 64-bit object"
+            );
+            (4, 4)
+        }
+    }
+}
+
+/// The `width` little-endian bytes at `at`, as a number.
+fn read_field(bytes: &[u8], at: usize, width: usize) -> u32 {
+    let mut value = 0u32;
+    for (index, byte) in bytes[at..at + width].iter().enumerate() {
+        value |= u32::from(*byte) << (8 * index);
+    }
+    value
+}
+
+/// Writes `value` back over the same `width` bytes.
+fn write_field(bytes: &mut [u8], at: usize, width: usize, value: u32) {
+    for index in 0..width {
+        bytes[at + index] = u8::try_from((value >> (8 * index)) & 0xff).unwrap_or_default();
+    }
+}
+
+/// The code for the architecture that is not the one `found` names, in
+/// `format`'s own numbering.
+///
+/// # Panics
+///
+/// If `found` is neither of the two architectures `ginary::target::Arch`
+/// carries, because then there is no "the other one" to answer with.
+fn other_machine_code(format: ginary::platform::ObjectFormat, found: u32) -> u32 {
+    let (x86_64, aarch64) = match format {
+        // `EM_X86_64` and `EM_AARCH64`.
+        ginary::platform::ObjectFormat::Elf => (62, 183),
+        ginary::platform::ObjectFormat::Pe => {
+            (u32::from(PE_MACHINE_AMD64), u32::from(PE_MACHINE_ARM64))
+        }
+        // `CPU_TYPE_X86_64` and `CPU_TYPE_ARM64`: the 32-bit type with
+        // `CPU_ARCH_ABI64` set.
+        ginary::platform::ObjectFormat::MachO => (0x0100_0007, 0x0100_000c),
+    };
+    if found == x86_64 {
+        aarch64
+    } else if found == aarch64 {
+        x86_64
+    } else {
+        panic!("the fixture names a machine ginary has no `Arch` for: {found:#x}")
+    }
+}
+
+/// A copy of `image` at `<dir>/<name>` carrying exactly `marker`.
+///
+/// [`stub_copy`] with the bytes supplied rather than read from
+/// [`ginary_bin`], so that a fixture built by [`for_other_machine`] can carry
+/// an identity too.
+///
+/// # Panics
+///
+/// If the copy cannot be written, or if `image` carries more than one marker
+/// already.
+pub fn stub_copy_of(dir: &Path, name: &str, image: &[u8], marker: &[u8; MARKER_LEN]) -> PathBuf {
+    let mut bytes = image.to_vec();
+    let found = offsets(&bytes);
+    match found.as_slice() {
+        [] => bytes.extend_from_slice(marker),
+        [offset] => bytes[*offset..*offset + MARKER_LEN].copy_from_slice(marker),
+        many => panic!("the image carries {} markers", many.len()),
+    }
+    write_executable(dir, name, &bytes)
 }

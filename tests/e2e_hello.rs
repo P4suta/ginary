@@ -27,6 +27,7 @@ use ginary::target::Target;
 use serde_json::Value;
 
 use crate::common::built::{BuiltProject, PINNED_EPOCH, names_in, sha256_of};
+use crate::common::hostpath::{names_the_same_directory, printed_cwd};
 use crate::common::tools::require_tools;
 
 /// The fixture this file builds, and therefore the artifact's file name.
@@ -114,9 +115,18 @@ fn the_built_artifact_runs_the_application_with_no_erlang_on_the_machine() {
         "code:priv_dir/1 must find the extracted priv:\n{stdout}"
     );
     let cwd = std::fs::canonicalize(run.cwd.as_path()).expect("canonicalise");
+    let printed = printed_cwd(&stdout)
+        .unwrap_or_else(|| panic!("the application printed no `cwd=` line:\n{stdout}"));
+    // Two spellings of one directory are one directory. On Windows the
+    // runtime prints a lower-case drive letter and forward separators, and
+    // `canonicalize` answers with the verbatim `\\?\` form — and `%TEMP%` on a
+    // runner is an 8.3 name whose long form only the filesystem knows. See
+    // `tests/regressions/e12_a_printed_working_directory_was_compared_as_text.rs`.
     assert!(
-        stdout.contains(&format!("cwd={}", cwd.display())),
-        "the application must start where the user is, not where the runtime unpacked:\n{stdout}"
+        names_the_same_directory(printed, &cwd),
+        "the application must start where the user is, not where the runtime unpacked:\n\
+         printed {printed}\nexpected {}\n{stdout}",
+        cwd.display()
     );
 }
 

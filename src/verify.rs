@@ -95,19 +95,34 @@ pub const MACOS_NEEDED_ALLOWLIST: [&str; 2] =
 /// a stranger's machine to supply a DLL is the finding this check exists for,
 /// and a system DLL missing from the list costs a reader one line to dismiss
 /// rather than costing a user a program that will not start.
-pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 14] = [
+///
+/// The Visual C++ redistributable is three files and it is named as three:
+/// `VCRUNTIME140.dll`, the exception-handling half `VCRUNTIME140_1.dll` that
+/// x64 splits out, and the C++ standard library `MSVCP140.dll`. The list
+/// carried the first alone, so `ginary verify` reported two findings against
+/// every healthy Windows artifact — a machine that has one of the three has
+/// all three, and Erlang/OTP's own Windows installer requires the package.
+/// The *debug* runtime is a different matter and is deliberately absent:
+/// `MSVCP140D.dll`, `VCRUNTIME140D.dll`, `VCRUNTIME140_1D.dll` and
+/// `ucrtbased.dll` are not redistributable and exist only where Visual Studio
+/// is installed, so an artifact needing one is exactly the finding this check
+/// is for. See
+/// `tests/regressions/e12_the_windows_allowlist_carried_one_vc_runtime_of_three.rs`.
+pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 16] = [
     "ADVAPI32.dll",
     "bcrypt.dll",
     "CRYPT32.dll",
     "dbghelp.dll",
     "IPHLPAPI.DLL",
     "KERNEL32.dll",
+    "MSVCP140.dll",
     "msvcrt.dll",
     "ole32.dll",
     "SHELL32.dll",
     "ucrtbase.dll",
     "USER32.dll",
     "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll",
     "WS2_32.dll",
     "WSOCK32.dll",
 ];

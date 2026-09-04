@@ -135,13 +135,17 @@
 
 #![warn(missing_docs)]
 // `deny` rather than `forbid`, and the difference is one module. Every line of
-// ginary is safe Rust except `launch_windows::win32`, which makes the three
-// `kernel32` calls the Windows launcher cannot be written without — the console
-// control handler and the job object that keeps a killed launcher from
-// orphaning a runtime. Neither has a safe counterpart anywhere, and `forbid`
-// cannot be lifted for a single module. That module carries the only
-// `#[allow(unsafe_code)]` in the crate; `deny` keeps every other file, and
-// every other target, exactly as strict as `forbid` was. See
+// ginary is safe Rust except `launch_windows::win32`, which makes the
+// `kernel32` calls the Windows half of this crate cannot be written without:
+// the console control handler and the job object that keeps a killed launcher
+// from orphaning a runtime, and — since E12 — `process_is_alive`, the
+// `OpenProcess` probe `cache::sweep` asks whether the launcher that owns a
+// temporary tree is still extracting into it. None of them has a safe
+// counterpart anywhere, and `forbid` cannot be lifted for a single module. The
+// module is `pub(crate)` so that `cache` can reach that one probe, and it
+// carries the only `#[allow(unsafe_code)]` in the crate; `deny` keeps every
+// other file, and every other target, exactly as strict as `forbid` was. The
+// calls and the blocks are enumerated in
 // `docs/adr/0015-windows-launcher-stays-resident.md`.
 #![deny(unsafe_code)]
 

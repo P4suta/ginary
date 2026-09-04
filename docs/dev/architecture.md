@@ -268,7 +268,11 @@ uses at the other end of the pipeline.
 
 **Nothing is copied by default.** Under `erts-<vsn>/bin` only `otp::REQUIRED_ERTS_BINARIES` and
 the names in `StageOptions::extra_bins` are staged; every other program that was there is
-recorded, with a one-line reason, in `StagedRoot::excluded_erts_bins()`. Under an application
+recorded, with a one-line reason, in `StagedRoot::excluded_erts_bins()`. A Windows tree cannot
+be a fixed list — the set of DLLs moves between releases — so `assemble::windows_required_bins`
+takes the three names of `WINDOWS_REQUIRED_BINS` and every DLL beside them, less
+`WINDOWS_DEBUG_EMULATOR_DLL`: nothing in a packaged artifact loads the debug emulator, and it
+needs a debug C runtime no user's machine is promised to have. Under an application
 only `ebin` and `priv` are staged, `*.appup` is dropped, and `src`, `include`, `doc`,
 `examples`, `c_src` and `mibs` never travel — they are left behind by not being on the
 allowlist, not by a filter, so nothing *inside* `ebin` or `priv` is pruned by name and
@@ -594,7 +598,7 @@ $ ./my_gleam_app --name world
         v
     cache::ensure_extracted         the ten steps of ADR 0005
         |   1  <key>/ginary.json a regular file?  -> hit, done
-        |   2  sweep .tmp-<pid>/.corrupt-<pid> whose /proc/<pid> is gone
+        |   2  sweep .tmp-<pid>/.corrupt-<pid> whose owning process is gone
         |   3  mkdir .<key>.tmp-<pid>            (<app> dir is 0700)
         |   4  seek -> Take(len) -> sha256 -> zstd -> tar
         |   5  refuse symlinks, hardlinks, devices, `..`, absolute paths

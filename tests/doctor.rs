@@ -32,10 +32,11 @@ use ginary::doctor::{
 use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use ginary::native::{self, NativeKind, Verdict};
 use ginary::otp::{OtpError, OtpInfo};
+use ginary::platform::{self, HOST};
 use ginary::target::{Libc, Linkage, Target};
 use serde_json::Value;
 
-use crate::common::fake_otp::FakeOtp;
+use crate::common::fake_otp::{CRYPTO_APP, FakeOtp};
 use crate::common::project::TempProject;
 use crate::common::repack::{foreign_machine, native_target, patch_elf_machine, test_binary};
 use crate::common::tools::require_tools;
@@ -500,17 +501,21 @@ fn crypto_is_reported_exactly_when_the_installation_carries_it() {
     let bare = tempdir();
     let with_crypto = tempdir();
     let plain = FakeOtp::new().build_in(bare.path());
+    // The NIF the *host* probe looks for, composed from the same rule the
+    // probe reads it from: `doctor::crypto_report` asks about
+    // `ginary::platform::HOST`, and a fixture that wrote the unix name down
+    // planted a file no Windows probe would ever look for. See
+    // `tests/regressions/e12_a_crypto_fixture_planted_the_unix_nif_for_a_host_probe.rs`.
     let full = FakeOtp::new()
-        .app_with("crypto", "5.9.2", |app| {
-            app.priv_file("lib/crypto.so", &test_binary())
-        })
+        .with_crypto_for(HOST, &test_binary())
         .build_in(with_crypto.path());
 
     // Both halves in one test: a `crypto_report` that always answered `None`
     // would satisfy the negative on its own.
     assert!(
         doctor::crypto_report(&full.root).is_some(),
-        "the installation carries a crypto NIF"
+        "the installation carries a crypto NIF, spelled `{}`",
+        platform::crypto_nif(HOST)
     );
     assert_eq!(
         doctor::crypto_report(&plain.root),
@@ -523,9 +528,7 @@ fn crypto_is_reported_exactly_when_the_installation_carries_it() {
 fn the_crypto_nif_is_found_and_read() {
     let dir = tempdir();
     let otp = FakeOtp::new()
-        .app_with("crypto", "5.9.2", |app| {
-            app.priv_file("lib/crypto.so", &test_binary())
-        })
+        .with_crypto_for(HOST, &test_binary())
         .build_in(dir.path());
     let host = ginary::elf::inspect_bytes(&test_binary()).expect("the test binary is ELF");
 
@@ -533,7 +536,7 @@ fn the_crypto_nif_is_found_and_read() {
 
     assert_eq!(
         report.path,
-        otp.app_dir("crypto").join("priv/lib/crypto.so")
+        otp.app_dir(CRYPTO_APP).join(platform::crypto_nif(HOST))
     );
     assert_eq!(report.needed, host.needed);
 }

@@ -207,6 +207,155 @@ pub fn pe_bytes(machine: u16, dll: bool) -> Vec<u8> {
     bytes
 }
 
+/// A minimal PE32+ library for `machine` whose import directory names
+/// `libraries`.
+///
+/// The shape no fixture in this suite had and two rules are decided by: what
+/// `src/native.rs` reads out of a PE is its *import list*, and every PE
+/// fixture here carried an empty one, so every assertion about a Windows
+/// object's `needed` was made against a list nothing had put anything into.
+/// [`verify::needed_is_allowed`] can be asked directly because it takes a
+/// name; `doctor::crypto_report_for` cannot — it reads a file — so the rule
+/// it applies to each import was reachable only through an object that really
+/// imports something.
+///
+/// Built on [`pe_bytes`], for the reason that one is built on
+/// [`crate::common::stubfile::pe_bytes`]: the headers are already the
+/// smallest `object` will parse, and what is written here is the one
+/// structure they leave empty. The section this claims is the `.text` section
+/// that helper already declares, which is why every offset it depends on is
+/// asserted before it is overwritten rather than assumed.
+///
+/// Each library is imported by *ordinal*, one symbol each. An import table
+/// names its library once per imported symbol and `object` reports the
+/// library on each of them, so one symbol is the whole list; an ordinal is
+/// the form that needs no `IMAGE_IMPORT_BY_NAME` beside it, and which symbol
+/// was imported is a thing no rule in this crate reads.
+///
+/// [`verify::needed_is_allowed`]: ginary::verify::needed_is_allowed
+///
+/// # Panics
+///
+/// If the fixture's layout has moved, or if the import structures do not fit
+/// in the one section the helper declares.
+pub fn pe_with_imports(machine: u16, libraries: &[&str]) -> Vec<u8> {
+    let mut bytes = pe_bytes(machine, true);
+
+    assert_eq!(
+        &bytes[PE_SECTION_HEADER_OFFSET..PE_SECTION_HEADER_OFFSET + 8],
+        b".text\0\0\0",
+        "the PE helper's one section header has moved"
+    );
+    for (field, at, expected) in [
+        (
+            "virtual address",
+            PE_SECTION_HEADER_OFFSET + 12,
+            PE_SECTION_RVA,
+        ),
+        (
+            "size of raw data",
+            PE_SECTION_HEADER_OFFSET + 16,
+            u32::try_from(PE_SECTION_LEN).expect("the section length is a u32"),
+        ),
+        (
+            "pointer to raw data",
+            PE_SECTION_HEADER_OFFSET + 20,
+            u32::try_from(PE_SECTION_FILE_OFFSET).expect("the file offset is a u32"),
+        ),
+        ("data directory count", PE_DATA_DIRECTORY_OFFSET - 4, 16),
+    ] {
+        assert_eq!(
+            u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")),
+            expected,
+            "the PE helper's {field} has moved"
+        );
+    }
+
+    let descriptors_len = (libraries.len() + 1) * PE_IMPORT_DESCRIPTOR_LEN;
+    let thunks_at = descriptors_len;
+    let names_at = thunks_at + libraries.len() * PE_THUNK_LIST_LEN;
+    let rva = |offset: usize| {
+        PE_SECTION_RVA + u32::try_from(offset).expect("an offset inside one 512-byte section")
+    };
+
+    let mut content = vec![0u8; names_at];
+    let mut name_rvas: Vec<u32> = Vec::with_capacity(libraries.len());
+    for library in libraries {
+        name_rvas.push(rva(content.len()));
+        content.extend_from_slice(library.as_bytes());
+        content.push(0);
+    }
+    for (index, name_rva) in name_rvas.iter().enumerate() {
+        let thunk_rva = rva(thunks_at + index * PE_THUNK_LIST_LEN);
+        let descriptor = index * PE_IMPORT_DESCRIPTOR_LEN;
+        content[descriptor..descriptor + 4].copy_from_slice(&thunk_rva.to_le_bytes());
+        content[descriptor + 12..descriptor + 16].copy_from_slice(&name_rva.to_le_bytes());
+        content[descriptor + 16..descriptor + 20].copy_from_slice(&thunk_rva.to_le_bytes());
+
+        // One thunk and the null that ends the list; the descriptor array
+        // ends with twenty zero bytes of its own, which are already there.
+        let thunk = thunks_at + index * PE_THUNK_LIST_LEN;
+        content[thunk..thunk + 8].copy_from_slice(&(PE_ORDINAL_FLAG | 1).to_le_bytes());
+    }
+    assert!(
+        content.len() <= PE_SECTION_LEN,
+        "{} libraries do not fit in the fixture's one section",
+        libraries.len()
+    );
+
+    bytes[PE_SECTION_FILE_OFFSET..PE_SECTION_FILE_OFFSET + content.len()].copy_from_slice(&content);
+    // The readable size of a section is the smaller of its two lengths, and
+    // the helper declares sixteen virtual bytes: without this the import
+    // directory is off the end of the section it lives in.
+    bytes[PE_SECTION_HEADER_OFFSET + 8..PE_SECTION_HEADER_OFFSET + 12].copy_from_slice(
+        &u32::try_from(PE_SECTION_LEN)
+            .expect("the section length is a u32")
+            .to_le_bytes(),
+    );
+    let directory = PE_DATA_DIRECTORY_OFFSET + PE_IMPORT_DIRECTORY * 8;
+    bytes[directory..directory + 4].copy_from_slice(&PE_SECTION_RVA.to_le_bytes());
+    bytes[directory + 4..directory + 8].copy_from_slice(
+        &u32::try_from(descriptors_len)
+            .expect("the descriptor array is a u32")
+            .to_le_bytes(),
+    );
+    bytes
+}
+
+/// Where the PE32+ optional header begins in [`pe_bytes`]'s output: the DOS
+/// stub, the `PE\0\0` signature and the twenty-byte COFF header.
+const PE_OPTIONAL_HEADER_OFFSET: usize = 0x40 + 4 + 20;
+
+/// Where the sixteen data directories begin: 112 bytes of PE32+ optional
+/// header fields precede them.
+const PE_DATA_DIRECTORY_OFFSET: usize = PE_OPTIONAL_HEADER_OFFSET + 112;
+
+/// Where the one section header begins: the optional header is 240 bytes.
+const PE_SECTION_HEADER_OFFSET: usize = PE_OPTIONAL_HEADER_OFFSET + 240;
+
+/// The virtual address [`pe_bytes`] gives that section.
+const PE_SECTION_RVA: u32 = 0x1000;
+
+/// Where that section's bytes begin in the file.
+const PE_SECTION_FILE_OFFSET: usize = 0x200;
+
+/// How many bytes of it there are.
+const PE_SECTION_LEN: usize = 0x200;
+
+/// `IMAGE_DIRECTORY_ENTRY_IMPORT`, the data directory that points at the
+/// import descriptor array.
+const PE_IMPORT_DIRECTORY: usize = 1;
+
+/// The length of one `IMAGE_IMPORT_DESCRIPTOR`.
+const PE_IMPORT_DESCRIPTOR_LEN: usize = 20;
+
+/// The length of one library's thunk list: one PE32+ thunk and the null that
+/// ends it.
+const PE_THUNK_LIST_LEN: usize = 16;
+
+/// `IMAGE_ORDINAL_FLAG64`, the bit that makes a thunk an import by ordinal.
+const PE_ORDINAL_FLAG: u64 = 0x8000_0000_0000_0000;
+
 /// A 64-bit Mach-O header, and nothing after it.
 ///
 /// Eight fields, no load commands, no sections: `ncmds` is zero, so the header

@@ -92,12 +92,30 @@ neither is worth refusing to run a packaged application over.
 three calls above — `SetConsoleCtrlHandler`, `CreateJobObjectW` with `SetInformationJobObject`,
 and `AssignProcessToJobObject` — are `kernel32` entry points with no safe wrapper in the
 standard library or anywhere else, and `forbid` cannot be lifted for a single module. So
-`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, four
+`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, seven
 `unsafe` blocks, each with a `SAFETY` note, every function total and every failure a `false` or
 a `None`. `deny` keeps every other file exactly as strict as `forbid` was, and the exception is
 one reviewable surface rather than three scattered blocks. The alternative was to ship a Windows
 launcher that orphans its runtime when it is killed and dies under Ctrl-C, which is a worse
 answer than a bounded exception.
+
+**Amendment, E12: a fourth call, and the module becomes `pub(crate)`.** The exception is no
+longer the resident launcher's alone. `cache::sweep` decides whether the launcher that owns a
+`.<key>.tmp-<pid>` tree is still extracting into it, and it decided by looking for `/proc/<pid>`
+— a directory Windows does not have, so every live launcher read as dead and the tree it was
+unpacking into was deleted underneath it. `win32::process_is_alive` is `OpenProcess` with
+`PROCESS_QUERY_LIMITED_INFORMATION`, the narrowest access right there is, and an immediate
+`CloseHandle`; `ERROR_INVALID_PARAMETER` is the only failure read as "no such process", and
+every other answer is "alive", because keeping a tree costs a directory and removing a live
+one destroys an extraction in progress.
+
+It lives in this module rather than in `cache.rs` for the reason the other three live here: a
+second `#[allow(unsafe_code)]` would be a second reviewable surface, and `CLAUDE.md` requires an
+ADR for one. `mod win32` therefore became `pub(crate) mod win32`, which widens what the crate can
+reach, not what the exception covers — the module is not exported and no new dependency or
+`windows-sys` feature was added. The counts this decision states are held to the module by
+`tests/regressions/e12_three_statements_of_the_unsafe_exception_said_three_calls.rs`, because
+they had already drifted twice before anything noticed.
 
 ## Consequences
 

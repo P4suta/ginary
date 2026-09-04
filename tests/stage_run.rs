@@ -31,6 +31,7 @@ use tempfile::TempDir;
 
 use crate::common::erl::{crash_dump_path, run_cwd, run_staged};
 use crate::common::fixture::FixtureProject;
+use crate::common::hostpath::{names_the_same_directory, printed_cwd};
 use crate::common::tools::{Toolchain, require_tools};
 
 /// The application the fixture ships, and the `-root` the closure starts from.
@@ -101,9 +102,18 @@ fn a_staged_hello_ffi_prints_its_arguments_and_its_priv_file() {
         stdout.contains("hello from priv"),
         "code:priv_dir/1 did not find the staged priv:\n{stdout}"
     );
+    let expected = run_cwd(&home);
+    let printed = printed_cwd(&stdout)
+        .unwrap_or_else(|| panic!("the application printed no `cwd=` line:\n{stdout}"));
+    // The same rule `tests/e2e_hello.rs` applies, and for the same reason:
+    // one directory has more than one spelling on Windows, and a
+    // `String::contains` over two of them says they are two directories. See
+    // `tests/regressions/e12_a_printed_working_directory_was_compared_as_text.rs`.
     assert!(
-        stdout.contains(&format!("cwd={}", run_cwd(&home).display())),
-        "the application did not start in the directory it was given:\n{stdout}"
+        names_the_same_directory(printed, &expected),
+        "the application did not start in the directory it was given:\n\
+         printed {printed}\nexpected {}\n{stdout}",
+        expected.display()
     );
     assert_eq!(
         output.status.code(),

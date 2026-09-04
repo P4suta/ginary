@@ -780,9 +780,10 @@ fn reported(path: &Path) -> PathBuf {
 /// Removes the temporary and corrupt trees of dead processes from `app_dir`.
 ///
 /// A tree is `.<key>.tmp-<pid>` or `.<key>.corrupt-<pid>`, and it is removed
-/// when `/proc/<pid>` does not exist — or when the pid is this process's own,
-/// because a leftover of a previous run of *this* pid is by definition not in
-/// use. A tree whose process is alive is left alone and reported in
+/// when `is_alive` says no process with that id exists — or when the pid is
+/// this process's own, because a leftover of a previous run of *this* pid is
+/// by definition not in use. A tree whose process is alive is left alone and
+/// reported in
 /// [`SweepReport::kept`]: killing another launcher's extraction is worse than
 /// leaving a directory behind.
 ///
@@ -852,8 +853,47 @@ fn owner_pid(name: &OsStr) -> Option<u32> {
 }
 
 /// Whether a process with this id exists.
+///
+/// The whole of [`sweep`]'s decision, and it was a Linux filesystem lookup:
+/// `Path::new("/proc").join(pid.to_string()).exists()`. That directory is
+/// Linux's alone — Windows has no such namespace and macOS has not carried
+/// one since 10.5 — so on two of the three platforms ginary packages for the
+/// answer was `false` for every process that has ever run, and a launcher
+/// sweeping the cache deleted the tree another launcher was at that moment
+/// extracting into. The Windows runner is where it surfaced; see
+/// `tests/regressions/e12_the_sweep_asked_proc_whether_a_process_was_alive.rs`.
+///
+/// Liveness is a question for the operating system's process table, so it is
+/// asked of the process table: `kill(pid, 0)` on unix, which answers
+/// `ESRCH` for a pid nothing holds and `EPERM` for one this user may not
+/// signal, and `launch_windows::win32::process_is_alive` on Windows,
+/// which opens the process object by id.
+///
+/// Every answer that is uncertain is `true`, in both implementations. The two
+/// mistakes are not symmetric: keeping a tree whose owner has gone costs a
+/// directory until the next sweep that can name it, and removing one whose
+/// owner is alive destroys an extraction in progress. A number that cannot be
+/// a process id at all is not uncertain and is `false`: a unix `pid_t` is a
+/// *positive* `i32`, so neither `0` — which names the caller's process group
+/// to `kill` — nor anything past `i32::MAX` has ever been a process, and a
+/// tree naming one is a leftover like any other.
+#[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    !matches!(rustix::process::test_kill_process(pid), Err(Errno::SRCH))
+}
+
+/// Whether a process with this id exists.
+///
+/// The Windows half of the rule the unix implementation above documents.
+#[cfg(windows)]
+fn is_alive(pid: u32) -> bool {
+    crate::launch_windows::win32::process_is_alive(pid)
 }
 
 /// Extracts the payload into the cache, or proves it is already there.

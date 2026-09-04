@@ -70,21 +70,18 @@ impl Search {
     }
 }
 
-/// A target whose architecture is not this machine's, in this machine's own
-/// container format.
+/// A supported target that is not this machine's.
 ///
-/// The fixtures below are copies of the running test binary with the marker
-/// rewritten, so the file's own header is whatever this host links. The header
-/// gate compares the *machine* the file names against the machine the target
-/// names, and it can only reach that comparison when the two agree about the
-/// container: a Windows host plants a PE, and a Linux `want` made the gate
-/// answer "this is not an ELF" long before it looked at a machine field.
-///
-/// So the operating system follows the host and only the architecture is
-/// flipped — the one field the running binary can never disagree with the host
-/// on. See `tests/regressions/e11_a_stub_search_target_was_the_host_on_one_machine.rs`.
-fn other_arch_target() -> Target {
-    stubfile::same_format_other_arch(Target::host())
+/// What the *target* gate is asked about: a stub whose marker names somebody
+/// else's target is refused before the object header is read, so the only
+/// thing this has to be is a name this ginary can read back. It was "the
+/// host's own container format and another architecture", written for the
+/// header gate, and on a Windows host that is `windows-aarch64` — a name
+/// `ginary::target::ALL` does not carry, so the marker parser refused it
+/// before any of the four claims that used it was reached. See
+/// `tests/regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs`.
+fn other_target() -> Target {
+    stubfile::other_supported_target(Target::host())
 }
 
 /// A Windows target, for the claims that are about the `.exe` suffix.
@@ -110,8 +107,10 @@ fn windows() -> Target {
 ///   ("D:\\a\\ginary\\ginary\\target\\debug\\deps\\stub-7dd5c00ea0f19c37.exe", SelfExe)
 /// ```
 ///
-/// Derived from the host, by the architecture, for the reason
-/// [`other_arch_target`] gives.
+/// Derived from the host by flipping the architecture, which is the one field
+/// the running binary can never disagree with the host on — and, where that
+/// names no supported target, by taking the first supported target of another
+/// architecture. See `stubfile::foreign_target_for`.
 fn unfindable_target() -> Target {
     stubfile::foreign_target_for(Target::host())
 }
@@ -159,7 +158,7 @@ fn the_search_list_is_the_four_sources_in_the_documented_order() {
 #[test]
 fn the_running_executable_is_not_a_candidate_for_another_target() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
 
     let candidates = stub::candidate_paths(&target, &search.opts());
 
@@ -180,7 +179,7 @@ fn a_search_with_no_stub_directory_still_looks_in_the_cache() {
         env_dir: None,
         ..search.opts()
     };
-    let target = other_arch_target();
+    let target = other_target();
 
     let candidates = stub::candidate_paths(&target, &opts);
 
@@ -196,7 +195,7 @@ fn a_search_with_no_stub_directory_still_looks_in_the_cache() {
 #[test]
 fn an_explicit_stub_wins_over_every_other_source() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     // Every other source is populated, so a search that ignored `--stub` would
     // still find something and would still look like it worked.
     let named = stub_copy(
@@ -223,7 +222,7 @@ fn an_explicit_stub_wins_over_every_other_source() {
 #[test]
 fn an_explicit_stub_that_is_not_there_is_refused_rather_than_searched_past() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     stub_copy(
         &search.env_dir,
         &stub_file_name(VERSION, &target),
@@ -246,7 +245,7 @@ fn an_explicit_stub_that_is_not_there_is_refused_rather_than_searched_past() {
 #[test]
 fn the_stub_spelling_wins_over_the_plain_one_in_the_same_directory() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     let marker = Marker::for_target(&target).bytes();
     let preferred = stub_copy(&search.env_dir, &stub_file_name(VERSION, &target), &marker);
     stub_copy(&search.env_dir, &plain_file_name(VERSION, &target), &marker);
@@ -260,7 +259,7 @@ fn the_stub_spelling_wins_over_the_plain_one_in_the_same_directory() {
 #[test]
 fn the_plain_spelling_is_used_when_it_is_the_only_one() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     let only = stub_copy(
         &search.env_dir,
         &plain_file_name(VERSION, &target),
@@ -276,7 +275,7 @@ fn the_plain_spelling_is_used_when_it_is_the_only_one() {
 #[test]
 fn the_stub_directory_is_searched_before_the_cache() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     let marker = Marker::for_target(&target).bytes();
     let cached = cache_stub_path(&search.cache_dir, VERSION, &target);
     stub_copy(
@@ -298,7 +297,7 @@ fn the_stub_directory_is_searched_before_the_cache() {
 #[test]
 fn the_cache_is_the_last_source_before_the_error() {
     let search = Search::new();
-    let target = other_arch_target();
+    let target = other_target();
     let cached = cache_stub_path(&search.cache_dir, VERSION, &target);
     stub_copy(
         cached.parent().expect("the cache has a directory"),
@@ -459,7 +458,7 @@ fn a_stub_that_reads_another_payload_format_is_refused() {
 #[test]
 fn a_stub_whose_marker_names_another_target_is_refused() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let other = other_arch_target();
+    let other = other_target();
     let path = stub_copy(dir.path(), "cross", &Marker::for_target(&other).bytes());
 
     let error = stub::verify(&path, &Target::host()).expect_err("a stub is for one target");
@@ -477,21 +476,31 @@ fn a_stub_whose_marker_names_another_target_is_refused() {
 #[test]
 fn a_marker_that_disagrees_with_the_file_is_refused_by_the_header() {
     // The whole point of the second gate: the marker is text and copies, and
-    // the ELF machine field is what the linker wrote. This file says it is for
-    // the other architecture and is this machine's own binary.
+    // the machine field is what the linker wrote. This file carries the
+    // host's own marker, is asked about as the host, and its header names the
+    // other machine — so nothing but the header can refuse it.
+    //
+    // The subject is a second *machine*, not a second target. Asking for the
+    // latter is what made this unaskable on a Windows runner, where the only
+    // target of another architecture in the host's container format is
+    // `windows-aarch64` and there is no such thing; see
+    // `tests/regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs`.
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let other = other_arch_target();
-    let path = stub_copy(dir.path(), "liar", &Marker::for_target(&other).bytes());
+    let host = Target::host();
+    let image = stubfile::for_other_machine(
+        &std::fs::read(stubfile::ginary_bin()).expect("the ginary binary is readable"),
+    );
+    let path = stubfile::stub_copy_of(dir.path(), "liar", &image, &Marker::host().bytes());
 
-    let error = stub::verify(&path, &other).expect_err("the header is believed, not the marker");
+    let error = stub::verify(&path, &host).expect_err("the header is believed, not the marker");
 
     assert!(
-        matches!(&error, StubError::ObjectMismatch { want, .. } if *want == other),
+        matches!(&error, StubError::ObjectMismatch { want, .. } if *want == host),
         "expected StubError::ObjectMismatch, got {error:?}"
     );
     let message = error.to_string();
     assert!(
-        message.contains(&Target::host().arch.as_str().to_owned()),
+        message.contains(stubfile::other_arch(host.arch).as_str()),
         "the message says what the file really is: {message}"
     );
 }
@@ -723,7 +732,7 @@ fn build_in(project: &Path, empty: &Path, args: &[&str]) -> assert_cmd::assert::
 fn a_cross_build_with_no_stub_names_every_path_it_searched() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let project = TempProject::named("hello");
-    let target = other_arch_target();
+    let target = other_target();
 
     let assert = build_in(
         project.root(),
@@ -755,7 +764,7 @@ fn a_cross_build_with_no_stub_names_every_path_it_searched() {
 fn the_build_command_takes_the_stub_it_is_given() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let project = TempProject::named("hello");
-    let target = other_arch_target();
+    let target = other_target();
     let missing = dir.path().join("no-such-stub");
 
     let assert = build_in(

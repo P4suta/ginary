@@ -423,17 +423,25 @@ const MACOS_SYSTEM_LIBRARIES: [&str; 2] =
 
 /// The C runtime a Windows program links against, whatever it does.
 ///
-/// `KERNEL32.dll` is the kernel interface every process has, and the other
-/// three are the three C runtimes a Windows toolchain links: the legacy
-/// `msvcrt`, the Universal CRT's `ucrtbase`, and MSVC's own compiler runtime.
+/// `KERNEL32.dll` is the kernel interface every process has, and the rest are
+/// the C runtimes a Windows toolchain links: the legacy `msvcrt`, the
+/// Universal CRT's `ucrtbase`, and MSVC's own compiler runtime, which is the
+/// three files of one redistributable — `VCRUNTIME140.dll`, the
+/// exception-handling half `VCRUNTIME140_1.dll` that x64 splits out, and the
+/// C++ standard library `MSVCP140.dll`. All three are named for the reason
+/// [`crate::verify::WINDOWS_NEEDED_ALLOWLIST`] names all three: a machine
+/// that has one of them has the other two, so a NIF needing two of them is
+/// still one whose OpenSSL was linked in statically.
 /// [`WINDOWS_CRT_PREFIX`] covers the rest of the Universal CRT, which ships as
 /// several dozen `api-ms-win-crt-*` forwarding libraries rather than as one
 /// file.
-const WINDOWS_C_RUNTIME_LIBRARIES: [&str; 4] = [
+const WINDOWS_C_RUNTIME_LIBRARIES: [&str; 6] = [
     "KERNEL32.dll",
+    "MSVCP140.dll",
     "msvcrt.dll",
     "ucrtbase.dll",
     "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll",
 ];
 
 /// The prefix of the Universal CRT's forwarding libraries, lower-cased.

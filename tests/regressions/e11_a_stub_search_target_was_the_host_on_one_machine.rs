@@ -45,10 +45,25 @@
 //! the running binary can never disagree with the host on. "The same file,
 //! another machine" keeps the host's operating system, so the header gate
 //! compares the two machine fields, which is the gate the test is for.
+//!
+//! **What E12 corrected.** The second half of that answer only works where
+//! the host's operating system has two published architectures, and
+//! `windows-aarch64` is not a row of `ginary::target::ALL`, so on a Windows
+//! host the marker parser refused the name before the gate was reached. The
+//! header gate is no longer asked for a second *target*: it is asked for a
+//! second *machine*, built by `stubfile::for_other_machine`, which rewrites
+//! the machine field of the host's own object and leaves the container format
+//! alone. The two tests below that stated the superseded rule state the
+//! replacement instead, and the gate itself is run in
+//! `tests/regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs`.
 #![cfg(feature = "cli")]
 
-use crate::common::stubfile::{foreign_target_for, same_format_other_arch};
-use ginary::platform::object_format;
+use crate::common::stubfile::{
+    Marker, PE_MACHINE_AMD64, for_other_machine, foreign_target_for, ginary_bin, other_arch,
+    other_supported_target, pe_bytes,
+};
+use ginary::native::inspect_object_bytes;
+use ginary::platform::{ObjectFormat, object_format, object_format_of};
 use ginary::target::{ALL, Target};
 
 #[test]
@@ -76,33 +91,52 @@ fn it_differs_by_architecture_so_the_running_binary_can_never_answer() {
 }
 
 #[test]
-fn the_target_the_header_gate_is_tested_with_shares_the_hosts_container() {
-    for host in ALL {
-        let other = same_format_other_arch(host);
-        assert_eq!(
-            other.os, host.os,
-            "{host}: the file planted is this machine's own binary, so `want` has to name the \
-             same operating system or the gate reads it as another platform's object"
-        );
-        assert_eq!(
-            object_format(other.os),
-            object_format(host.os),
-            "{host}: the file planted is this machine's own binary, so `want` has to be a \
-             target of the same container format or the gate refuses the file before it \
-             compares machines"
-        );
-        assert_ne!(
-            other.arch, host.arch,
-            "{host}: and another machine, or there is no disagreement to refuse"
-        );
-    }
+fn the_file_the_header_gate_is_tested_with_shares_the_hosts_container() {
+    // The rule E12 replaced this one's subject with: the fixture is the
+    // host's own object with its machine field rewritten, so the container
+    // format is the host's by construction and the gate reaches the machine
+    // comparison on every platform rather than only where the host's
+    // operating system has two published architectures.
+    let host = Target::host();
+    let image = std::fs::read(ginary_bin()).expect("the ginary binary is readable");
+    let other = for_other_machine(&image);
+
+    assert_eq!(
+        object_format_of(&other),
+        Some(object_format(host.os)),
+        "the fixture stays an object of the host's own container format"
+    );
+    assert_eq!(
+        inspect_object_bytes(&other)
+            .expect("the rewritten copy is still an object")
+            .machine,
+        other_arch(host.arch).as_str(),
+        "and its header names the machine the marker beside it does not"
+    );
 }
 
 #[test]
 fn the_pe_branch_of_the_header_gate_is_reachable_from_a_windows_host() {
     // The concrete case C2's `the_pe_gate_was_never_exercised` could not
-    // reach: on a Windows host, the target the gate is tested with is a
-    // Windows one, so `check_object` takes its PE arm.
+    // reach, and it is now reachable from *this* machine as well: a PE whose
+    // COFF machine field has been rewritten is still a PE, so on a Windows
+    // host `check_object` takes its PE arm and compares machines.
     let windows: Target = "windows-x86_64".parse().expect("a target name");
-    assert_eq!(same_format_other_arch(windows).os, windows.os);
+    let pe = pe_bytes(PE_MACHINE_AMD64, &Marker::for_target(&windows).bytes());
+
+    let other = for_other_machine(&pe);
+
+    assert_eq!(object_format_of(&other), Some(ObjectFormat::Pe));
+    assert_eq!(
+        inspect_object_bytes(&other)
+            .expect("the rewritten PE is still a PE")
+            .machine,
+        other_arch(windows.arch).as_str(),
+        "the machine field is what changed, so the gate has a disagreement to refuse"
+    );
+    assert_eq!(
+        other_supported_target(windows).name().parse::<Target>(),
+        Ok(other_supported_target(windows)),
+        "and the target gate beside it is asked about a name this ginary can read back"
+    );
 }

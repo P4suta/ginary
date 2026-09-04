@@ -41,6 +41,7 @@ use serde_json::Value;
 
 use crate::common::artifact::{ArtifactOptions, SyntheticArtifact};
 use crate::common::built::BuiltProject;
+use crate::common::hostpath::emulator_suffix;
 use crate::common::portability::unmet_needs;
 use crate::common::repack::{self, NATIVE_PATH, RepackOptions};
 use crate::common::tools::require_tools;
@@ -817,12 +818,18 @@ fn a_real_artifact_verifies_clean() {
             .map(|object| object.path.as_str())
             .collect::<Vec<_>>()
     );
+    // The emulator this host's runtime ships, by the rule rather than by one
+    // platform's answer: it is a program `erlexec` execs on unix and the
+    // library `erl.exe` loads on Windows, where a path ending `/beam.smp`
+    // names nothing. See
+    // `tests/regressions/e12_the_real_artifact_check_named_the_unix_emulator.rs`.
+    let emulator = emulator_suffix(ginary::platform::HOST);
     assert!(
         report
             .objects
             .iter()
-            .any(|object| object.path.ends_with("/beam.smp")),
-        "{:?}",
+            .any(|object| object.path.ends_with(&emulator)),
+        "the artifact has to carry `{emulator}`: {:?}",
         report.objects
     );
 }
