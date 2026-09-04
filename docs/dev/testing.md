@@ -389,7 +389,8 @@ itself, so a supervised run has a signal to turn into `128 + signo`), `--dump` (
 runtime to observe and a grandchild to inherit the lock). It exits 0 rather than 7 when its
 `-eval` is `erlang:halt(0)`, so that `GINARY_CMD=selftest` exercises the whole path on a machine
 with no Erlang, and the `env:` lines it prints cover `HEART_COMMAND` and the manifest's own
-`launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is therefore readable on
+`launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is
+therefore readable on
 standard output, and the launcher's whole contract is testable on a machine with no Erlang at
 all. `SyntheticArtifact` also carries the ways an artifact can be broken — `break_magic`,
 `break_geometry`, `break_payload`, `break_payload_tail`, `truncate` — because each one is a
@@ -544,17 +545,37 @@ body that hashes to the wrong digest, a 500 that becomes a 200 on the second ask
 *not* be asked again, and a connection that dies mid-body. `TestServer::start` takes a map of path
 to a list of `Reply` values, answers them in order and then repeats the last one for ever, and
 records every request — so a test asserts on *how many times* the client asked as readily as on
-what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has three
-shapes: `Body` with a status and a `Content-Length` that matches, `Truncated` with a
+what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has four
+shapes: `Body` with a status and a `Content-Length` that matches, `Encoded`, which adds the one
+header this fixture sends — a `Content-Encoding` naming what the body is compressed in, so that a
+bound on the document can be told apart from a bound on the transfer — `Truncated` with a
 `Content-Length` that promises more than is written before the close, and `Hangup`, which accepts
 the connection and writes nothing. It binds `127.0.0.1:0` and reports the port it was given, so
 any number of tests run in parallel without agreeing on anything, and `wait_for_requests` is
 bounded by `WAIT_BUDGET` (10 s) so a stalled client is a failed assertion rather than a hung test
 binary. It is hand-rolled rather than a dependency and it is the smallest server those claims
-need: HTTP/1.1, `GET` only, one connection at a time, no chunking, no ranges, no keep-alive — and
-**no read timeout**, so a client that connects and never sends a request line stalls the serving
-thread until the test binary exits. Nothing ginary sends does that; a helper that grew one would
-need one.
+need: HTTP/1.1, `GET` only, one connection at a time, no chunking, no ranges, no keep-alive. Every
+connection it accepts goes through `adopt` first, which puts it into the mode the fixture serves
+in rather than the one `accept` handed over — POSIX says an accepted socket does not inherit the
+listener's `O_NONBLOCK` and Winsock says it does, and this fixture polls its listener — and bounds
+the two waits that opens up by `REQUEST_BUDGET` (5 s for the request) and `REPLY_BUDGET` (5 s for
+one write of the reply to be taken), beside `DRAIN_BUDGET` (5 s for the peer's own close) and
+`WAIT_BUDGET` (10 s in `wait_for_requests`). Nothing ginary sends reaches any of them.
+
+What the fixture cannot serve through it records rather than discards, because it runs on a thread
+of its own and an error it swallows becomes a request nobody counted or a reply sent short under a
+full `Content-Length` — either of which a download test reads as the *client's* doing.
+`after_accept`, `after_request_read` and `after_write` are the three decisions — one per stage of
+serving a connection — written as functions of the error's kind so they can be asserted on where
+the platform that reaches them cannot run: an accept error the peer caused (`ConnectionAborted`,
+`ConnectionReset`, `Interrupted`) takes the next connection rather than ending the server, a read
+of a request and a write of a reply that failed because the peer let go (`BrokenPipe`,
+`ConnectionReset`, `ConnectionAborted`) are ordinary, and everything else — a `REQUEST_BUDGET` or
+`REPLY_BUDGET` timeout above all — is a fault. A peer that closes before sending a byte is not an
+error at all: nobody asked anything on that connection, so nothing is recorded either way.
+`TestServer::requests` — and so `hits` and `wait_for_requests` — refuses to answer while
+one stands, and `TestServer::faults` is the one accessor that does not assert, for the tests that
+are about the fixture itself.
 
 `tests/common/catalog.rs` is the other, and it builds the three fixtures the catalogue half needs.
 `CatalogBuilder` assembles a `catalog.json` out of the schema types and serialises it with
@@ -960,7 +981,8 @@ and a hand-written test for each way its input can be short.** A branch a random
 reach in a lifetime of cases — the gzip wrapper `beam::form` unwraps needs two exact magic bytes
 and then a decodable deflate stream — gets a property test of its own with the prefix fixed, and
 hand-built inputs for its failures; a branch covered only by a toolchain-gated test is not
-covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs` and `src/elf.rs` were
+covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs`
+and `src/elf.rs` were
 the first two; `src/trailer.rs` and `src/payload.rs` joined them in A3a, with
 `parse_never_panics_on_arbitrary_bytes`, `parse_never_panics_on_the_magic_followed_by_rubbish`,
 `unpack_never_panics_on_arbitrary_bytes`, `read_manifest_never_panics_on_arbitrary_bytes` and

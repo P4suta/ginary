@@ -415,3 +415,20 @@ mod e12_the_sweep_asked_proc_whether_a_process_was_alive;
 mod e12_the_windows_allowlist_carried_one_vc_runtime_of_three;
 #[path = "regressions/e12_three_statements_of_the_unsafe_exception_said_three_calls.rs"]
 mod e12_three_statements_of_the_unsafe_exception_said_three_calls;
+#[cfg(feature = "cli")]
+#[path = "regressions/e13_a_compressed_document_was_bounded_by_its_wire_bytes.rs"]
+mod e13_a_compressed_document_was_bounded_by_its_wire_bytes;
+#[cfg(feature = "cli")]
+#[path = "regressions/e13_a_document_over_the_bound_was_asked_for_twice_more.rs"]
+mod e13_a_document_over_the_bound_was_asked_for_twice_more;
+#[cfg(feature = "cli")]
+#[path = "regressions/e13_a_document_that_is_not_text_was_asked_for_twice_more.rs"]
+mod e13_a_document_that_is_not_text_was_asked_for_twice_more;
+#[path = "regressions/e13_a_reply_the_fixture_could_not_write_was_sent_short_in_silence.rs"]
+mod e13_a_reply_the_fixture_could_not_write_was_sent_short_in_silence;
+#[path = "regressions/e13_a_request_the_fixture_could_not_read_was_dropped_in_silence.rs"]
+mod e13_a_request_the_fixture_could_not_read_was_dropped_in_silence;
+#[path = "regressions/e13_the_fixture_server_inherited_its_listeners_non_blocking_mode.rs"]
+mod e13_the_fixture_server_inherited_its_listeners_non_blocking_mode;
+#[path = "regressions/e13_the_fixture_server_stopped_on_an_error_a_peer_can_cause.rs"]
+mod e13_the_fixture_server_stopped_on_an_error_a_peer_can_cause;

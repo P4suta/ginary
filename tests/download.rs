@@ -425,18 +425,23 @@ fn a_document_larger_than_the_bound_is_refused_rather_than_read_into_memory() {
     // a particular size crosses it.
     let oversized = vec![b'x'; MAX_TEXT_BYTES as usize + 1];
     let server = TestServer::one("/release", Reply::ok(&oversized));
+    let url = server.url("/release");
 
-    let error = download::get_text(&server.url("/release"), &Net::online())
+    let error = download::get_text(&url, &Net::online())
         .expect_err("a release description is not four megabytes");
 
     match &error {
-        DownloadError::Exhausted { attempts, .. } => assert_eq!(*attempts, MAX_ATTEMPTS),
-        other => panic!("expected the attempts to be exhausted, got {other:?}"),
+        DownloadError::TooLarge { url: named, limit } => {
+            assert_eq!(named, &url);
+            assert_eq!(*limit, MAX_TEXT_BYTES);
+        }
+        other => panic!("expected the bound to refuse the body, got {other:?}"),
     }
     assert_eq!(
         server.hits("/release"),
-        MAX_ATTEMPTS as usize,
-        "a body that would not fit is retried like any other read failure"
+        1,
+        "a body over the bound is an answer, not a transport failure: it is over the bound on \
+         the third ask too, so it is asked for exactly once — the same rule as the 404"
     );
 }
 
