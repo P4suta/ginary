@@ -29,6 +29,11 @@
 //! error's kind alone so that each can be held to on a platform this milestone
 //! can run; anything they call the fixture's own failure is recorded and read
 //! back by [`TestServer::requests`], which refuses to answer while one stands.
+//!
+//! The reply's half of that — decide, then record — is [`answer_reply`], over
+//! any writer rather than over the connection, so that it is held to over a
+//! [`HaltingSink`] that fails where the test says rather than over a socket
+//! whose buffering belongs to the host.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -187,7 +192,28 @@ pub fn after_request_read(kind: std::io::ErrorKind) -> AfterRequestRead {
 /// reports it as the client's doing. What it cannot serve through it records
 /// here instead, and [`TestServer::requests`] refuses to answer while anything
 /// stands in it.
-type Faults = Arc<Mutex<Vec<String>>>;
+///
+/// Public, with [`fault_log`] and [`reported`] beside it, so that a test about
+/// the fixture can hand a log to the serving code and read back what reached
+/// it, rather than asserting on a value that code was free to throw away.
+pub type Faults = Arc<Mutex<Vec<String>>>;
+
+/// A fault log with nothing recorded in it.
+pub fn fault_log() -> Faults {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Everything recorded in `faults`, in order.
+///
+/// A log left by a thread that panicked is read through the poison rather than
+/// around it: what the fixture managed to record before it died is exactly what
+/// the test needs to be told.
+pub fn reported(faults: &Faults) -> Vec<String> {
+    match faults.lock() {
+        Ok(faults) => faults.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
 
 /// Records one failure of the fixture itself.
 fn record(faults: &Faults, fault: String) {
@@ -290,7 +316,7 @@ impl TestServer {
             .expect("a non-blocking listener");
 
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let faults: Faults = Arc::new(Mutex::new(Vec::new()));
+        let faults = fault_log();
         let stop = Arc::new(AtomicBool::new(false));
         let served = Arc::clone(&requests);
         let reported = Arc::clone(&faults);
@@ -372,10 +398,7 @@ impl TestServer {
     /// remember to. A test *about* the fixture reads it here, because this is
     /// the one accessor that does not assert.
     pub fn faults(&self) -> Vec<String> {
-        match self.faults.lock() {
-            Ok(faults) => faults.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        reported(&self.faults)
     }
 
     /// How many requests have been made for `path`.
@@ -458,14 +481,10 @@ fn serve_one(
         _ => Reply::status(404),
     };
 
-    if let Err(error) = write_reply(&mut stream, &reply)
-        && after_write(error.kind()) == AfterWrite::Reported
-    {
-        record(
-            faults,
-            format!("the reply to {path} was not written whole: {error}"),
-        );
-    }
+    // Through `answer_reply`, so that both halves of the decision — which write
+    // failures are the fixture's own, and that one of those reaches the log a
+    // test reads — are stated once, in code a regression can hold directly.
+    answer_reply(&mut stream, &path, &reply, faults);
     finish_reply(&mut stream);
 }
 
@@ -485,16 +504,13 @@ fn serve_one(
 /// it as the peer's.
 pub fn answer_one(stream: TcpStream, routes: &BTreeMap<String, Vec<Reply>>) -> Option<Request> {
     let log: Arc<Mutex<Vec<Request>>> = Arc::new(Mutex::new(Vec::new()));
-    let faults: Faults = Arc::new(Mutex::new(Vec::new()));
+    let faults = fault_log();
     let mut answered = BTreeMap::new();
     serve_one(stream, routes, &mut answered, &log, &faults);
-    let reported = match faults.lock() {
-        Ok(faults) => faults.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    };
+    let faults = reported(&faults);
     assert!(
-        reported.is_empty(),
-        "the fixture server could not serve the connection it was handed: {reported:?}"
+        faults.is_empty(),
+        "the fixture server could not serve the connection it was handed: {faults:?}"
     );
     let requests = log.lock().ok()?;
     requests.last().cloned()
@@ -532,7 +548,7 @@ pub fn answer_one(stream: TcpStream, routes: &BTreeMap<String, Vec<Reply>>) -> O
 /// drop the listener with the serving thread and leave every later test on this
 /// server saying that no request arrived. Silently serving the connection in
 /// whatever mode it arrived in is the defect this exists to close.
-fn adopt(stream: &TcpStream) -> std::io::Result<()> {
+pub fn adopt(stream: &TcpStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(REQUEST_BUDGET))?;
     stream.set_write_timeout(Some(REPLY_BUDGET))
@@ -629,13 +645,17 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Option<Request>> {
 
 /// Writes one reply, including the deliberately broken shapes.
 ///
+/// It is generic over the writer rather than taking the connection, so that
+/// [`send_reply`] can be held to its claim over a transport that states what it
+/// did instead of one whose buffering the test would have to provoke.
+///
 /// # Errors
 ///
 /// Whatever the write said. A reply goes out under a `Content-Length` that
 /// promises the whole of it, so a write that stops early is a body shorter than
-/// the header claims; [`after_write`] is where the caller decides whether that
-/// was the peer letting go or the fixture failing.
-fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
+/// the header claims; [`send_reply`] asks [`after_write`] whether that was the
+/// peer letting go or the fixture failing.
+fn write_reply<W: Write>(sink: &mut W, reply: &Reply) -> std::io::Result<()> {
     match reply {
         Reply::Body { status, body } => {
             let head = format!(
@@ -643,9 +663,9 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
                 reason(*status),
                 body.len()
             );
-            stream.write_all(head.as_bytes())?;
-            stream.write_all(body)?;
-            stream.flush()
+            sink.write_all(head.as_bytes())?;
+            sink.write_all(body)?;
+            sink.flush()
         }
         Reply::Encoded {
             status,
@@ -658,19 +678,67 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
                 reason(*status),
                 body.len()
             );
-            stream.write_all(head.as_bytes())?;
-            stream.write_all(body)?;
-            stream.flush()
+            sink.write_all(head.as_bytes())?;
+            sink.write_all(body)?;
+            sink.flush()
         }
         Reply::Truncated { promised, body } => {
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nConnection: close\r\n\r\n"
             );
-            stream.write_all(head.as_bytes())?;
-            stream.write_all(body)?;
-            stream.flush()
+            sink.write_all(head.as_bytes())?;
+            sink.write_all(body)?;
+            sink.flush()
         }
         Reply::Hangup => Ok(()),
+    }
+}
+
+/// Writes one reply to `sink` and answers with the fixture's own failure to
+/// send it whole.
+///
+/// The reply half of `serve_one`, over any writer rather than over the
+/// connection, so that the claim can be stated of a transport that says what it
+/// did rather than provoked out of the host's socket buffers. `None` is a reply
+/// that went out whole, and also a peer that let go of a body it had stopped
+/// wanting: [`after_write`] decides which write failures are the fixture's, and
+/// only those become a fault for the caller to record.
+///
+/// `path` is the reply's own, and it names the reply in the fault, because a
+/// fault that says only that some write failed leaves the next assertion to
+/// guess which of a server's answers went out short.
+///
+/// [`answer_reply`] is what the server calls, and what a test about the server
+/// asserts over: the fault this hands back is only half the rule, and a caller
+/// that dropped it would be the same silence one level up.
+///
+/// See `tests/regressions/e13_a_reply_the_fixture_could_not_write_was_sent_short_in_silence.rs`.
+pub fn send_reply<W: Write>(sink: &mut W, path: &str, reply: &Reply) -> Option<String> {
+    match write_reply(sink, reply) {
+        Ok(()) => None,
+        Err(error) => match after_write(error.kind()) {
+            AfterWrite::Expected => None,
+            AfterWrite::Reported => Some(format!(
+                "the reply to {path} was not written whole: {error}"
+            )),
+        },
+    }
+}
+
+/// Writes one reply to `sink` and records a failure of the fixture's own.
+///
+/// The whole of `serve_one`'s reply: [`send_reply`] decides whether the write
+/// that failed was the fixture's doing, and this records the one that was.
+/// The two are one function to a caller, because a caller that asked the first
+/// question and dropped the answer is the defect this milestone exists to
+/// close, one level up from where it was found — a reply sent short under a
+/// full `Content-Length`, in silence, which every retry test in
+/// `tests/download.rs` reads as a connection that broke.
+///
+/// See `tests/regressions/e13_a_reply_the_fixture_could_not_write_was_sent_short_in_silence.rs`.
+pub fn answer_reply<W: Write>(sink: &mut W, path: &str, reply: &Reply, faults: &Faults) {
+    if let Some(fault) = send_reply(sink, path, reply) {
+        record(faults, fault);
     }
 }
 
@@ -683,5 +751,90 @@ fn reason(status: u16) -> &'static str {
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Status",
+    }
+}
+
+/// A transport that takes a stated number of bytes and then fails.
+///
+/// The peer of a reply, for a test that has to state what the transport did
+/// rather than provoke it out of the host. A socket does not offer that: how
+/// much a loopback connection with nothing reading it will take before a write
+/// blocks is a property of the operating system's buffering, and whether a
+/// blocked write ends in the time a test is prepared to wait is a property of
+/// its send timeout. Neither is a property of this fixture, and a claim about
+/// the fixture written in terms of either is a claim that holds on the host it
+/// was written on.
+///
+/// The one error it will not answer is `Interrupted`, which
+/// [`HaltingSink::halting_after`] refuses: `std::io::Write::write_all` retries
+/// that kind for ever, so a sink that keeps answering it never returns, and a
+/// fixture that could not send a reply has to fail an assertion rather than
+/// hang the test binary — the rule [`WAIT_BUDGET`], [`REPLY_BUDGET`] and
+/// [`DRAIN_BUDGET`] state everywhere else.
+///
+/// See `tests/regressions/e13_a_reply_the_fixture_could_not_write_was_sent_short_in_silence.rs`.
+pub struct HaltingSink {
+    /// Everything written to it so far, in order.
+    taken: Vec<u8>,
+    /// How many bytes it takes in total before it starts failing.
+    accepts: usize,
+    /// The error every write past `accepts` reports.
+    kind: std::io::ErrorKind,
+}
+
+impl HaltingSink {
+    /// A sink that takes `accepts` bytes and then fails every write with
+    /// `kind`.
+    ///
+    /// A write that spans the boundary takes what is left and reports the
+    /// number, the way a socket does; the failure is the write after it.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is `Interrupted`, which is the one kind this sink cannot
+    /// answer; see [`HaltingSink`]. It is refused here rather than at the write
+    /// because a test that asked for it would otherwise hang instead of
+    /// failing, and `after_write` calls `Interrupted` the fixture's own failure,
+    /// so it is exactly the kind the next test written against this sink would
+    /// reach for.
+    pub fn halting_after(accepts: usize, kind: std::io::ErrorKind) -> Self {
+        assert_ne!(
+            kind,
+            std::io::ErrorKind::Interrupted,
+            "`write_all` retries `Interrupted` for ever, so a sink that answers it never returns; \
+             a fixture that could not send a reply must fail an assertion rather than hang the \
+             test binary"
+        );
+        Self {
+            taken: Vec::new(),
+            accepts,
+            kind,
+        }
+    }
+
+    /// A sink that takes everything it is given.
+    pub fn taking_everything() -> Self {
+        Self::halting_after(usize::MAX, std::io::ErrorKind::Other)
+    }
+
+    /// Everything it took, in order: the bytes that reached the peer.
+    pub fn taken(&self) -> &[u8] {
+        &self.taken
+    }
+}
+
+impl Write for HaltingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.accepts.saturating_sub(self.taken.len());
+        if room == 0 {
+            return Err(std::io::Error::from(self.kind));
+        }
+        let take = buf.len().min(room);
+        self.taken.extend_from_slice(&buf[..take]);
+        Ok(take)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

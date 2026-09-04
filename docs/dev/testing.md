@@ -577,6 +577,19 @@ error at all: nobody asked anything on that connection, so nothing is recorded e
 one stands, and `TestServer::faults` is the one accessor that does not assert, for the tests that
 are about the fixture itself.
 
+The reply half of that is `answer_reply`, which is the one call `serve_one` makes once it has
+chosen an answer: `send_reply` writes the reply over any writer and says whether the write that
+failed was the fixture's own, and `answer_reply` records the one that was, so both halves of the
+rule live where a test can hold them — a caller that asked the first question and dropped the
+answer would be the same silence one level up, and the suite stayed green with exactly that in
+place, which is what E14 found. `HaltingSink` is the transport those tests write over: it takes a
+stated number of bytes and then fails every write with a stated `ErrorKind`, because how much a
+loopback connection with nothing reading it will buffer, and when a blocked send gives up, are
+properties of the host rather than of this fixture — the E14 argument, made after the live form of
+the claim passed on Linux and failed on Windows. It refuses `Interrupted` at construction, since
+`write_all` retries that kind for ever and a sink answering it would hang the test binary rather
+than fail it.
+
 `tests/common/catalog.rs` is the other, and it builds the three fixtures the catalogue half needs.
 `CatalogBuilder` assembles a `catalog.json` out of the schema types and serialises it with
 `serde_json` — deliberately **not** through `Catalog::to_json`, because a test that wrote its
