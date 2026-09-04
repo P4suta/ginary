@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! How a host spells a path in the output the suite reads back.
 //!
-//! Three rules, and each of them is a rule the suite already applies — badly.
+//! Six rules, and each of them is a rule the suite already applies — badly.
 //! A test that asserts on a *rendered* path is asserting on two things at
 //! once: what ginary decided, and how the machine underneath it writes a path
 //! down. The second half is not the subject, and every place it leaked in is a
@@ -97,4 +97,109 @@ pub fn strip_dir(text: &str, dir: &Path) -> String {
     }
     out.push_str(&text[at..]);
     out
+}
+
+/// The character `os` joins path components with.
+///
+/// `\` on Windows and `/` everywhere else. Asked of a named `os` rather than
+/// of `std::path::MAIN_SEPARATOR`, for the reason every rule in this module
+/// is: both answers are then asserted on one machine.
+pub const fn separator_for(os: Os) -> char {
+    match os {
+        Os::Windows => '\\',
+        Os::Linux | Os::Macos => '/',
+    }
+}
+
+/// `root`, joined to the `/`-separated `relative`, as `os` would spell the
+/// whole path.
+///
+/// The rule four expectations got wrong. A test that wants the path ginary
+/// *walked to* writes the relative half the way a listing carries it — a
+/// `/`-separated `lib/kernel-11.0.3/ebin/kernel.beam` — and then reaches for
+/// `Path::join`, which appends the host separator between the two halves and
+/// leaves every separator *inside* the relative half exactly as it was
+/// written. The result on Windows is the mixed spelling nothing produces:
+///
+/// ```text
+///   left: "C:\\Users\\RUNNER~1\\...\\out\\lib\\kernel-11.0.3\\ebin\\kernel.beam"
+///  right: "C:\\Users\\RUNNER~1\\...\\out\\lib/kernel-11.0.3/ebin/kernel.beam"
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>,
+/// `no_directory_is_passed_to_the_runtime_where_a_module_belongs`.)
+///
+/// `root` is left as it is: it came from the host and is already spelled the
+/// way the host spells it. Only the relative half is respelled, and only
+/// where the platform puts a backslash there in the first place — a `\` is an
+/// ordinary character in a unix file name, which is why this is a function of
+/// `os` and not a blanket `replace`.
+pub fn joined_for(os: Os, root: &str, relative: &str) -> String {
+    let separator = separator_for(os);
+    let relative = relative.replace('/', &separator.to_string());
+    if root.is_empty() {
+        return relative;
+    }
+    if relative.is_empty() {
+        return root.to_owned();
+    }
+    format!("{root}{separator}{relative}")
+}
+
+/// [`joined_for`] asked about the host this suite is running on.
+pub fn joined(root: &Path, relative: &str) -> String {
+    joined_for(
+        ginary::platform::HOST,
+        &root.display().to_string(),
+        relative,
+    )
+}
+
+/// `text` as it appears *inside* a JSON string.
+///
+/// A trace record is a JSON document, and one of its values is itself a JSON
+/// document, so a Windows path inside it is escaped twice: the four
+/// characters `\\\\` stand for the one separator a person typed. A test that
+/// looks for the raw path in the rendered line finds nothing, and says the
+/// path is missing when it is there:
+///
+/// ```text
+/// the record must name the entry that vanished, and it is:
+/// {"phase":"prune","kv":{"removed_paths":"[\"C:\\\\Users\\\\RUNNER~1\\\\...\\\\0000000000000000\"]"}}
+/// ```
+///
+/// (`b1_the_prune_trace_named_nothing_it_removed`, same job.) The escaping is
+/// JSON's and not the platform's, so it is applied on every host; on unix
+/// there is nothing in a path for it to act on and the answer is the argument.
+pub fn json_escaped(text: &str) -> String {
+    // `serde_json`'s own escaping and not a hand-rolled `replace`, so the
+    // needle is produced by the same code that produced the haystack. The
+    // rendered string carries the surrounding quotes; the needle is what is
+    // between them.
+    let rendered = serde_json::to_string(text).expect("a string always renders as JSON");
+    rendered
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(&rendered)
+        .to_owned()
+}
+
+/// Whether `left` and `right` name the same file, whichever spelling each
+/// carries.
+///
+/// `ginary::cache::ensure_extracted` deliberately answers with the verbatim
+/// `\\?\` spelling — `ginary::winpath` says why — and a test that built the
+/// same directory by hand holds the ordinary one. Both name one directory:
+///
+/// ```text
+///   left: "\\\\?\\C:\\Users\\RUNNER~1\\...\\cache\\hello\\1179d51043100e24"
+///  right: "C:\\Users\\RUNNER~1\\...\\cache\\hello\\1179d51043100e24"
+/// ```
+///
+/// (`a_cold_cache_extracts_into_the_key_directory`, same job.) The comparison
+/// is made on the plain spelling of both sides, which is
+/// `ginary::winpath::plain_path`'s whole purpose and is the identity on unix.
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    ginary::winpath::plain_path(left) == ginary::winpath::plain_path(right)
 }

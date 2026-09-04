@@ -333,3 +333,57 @@ mod e10_a_test_asked_posix_whether_a_windows_path_was_absolute;
 mod e10_an_x86_64_stub_had_no_code_signature_to_reuse;
 #[path = "regressions/e10_the_needle_halves_were_stored_side_by_side.rs"]
 mod e10_the_needle_halves_were_stored_side_by_side;
+
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_a_dll_the_import_table_spelt_in_lower_case_was_unexpected.rs"]
+mod e11_a_dll_the_import_table_spelt_in_lower_case_was_unexpected;
+#[path = "regressions/e11_a_fixture_built_a_directory_windows_cannot_name.rs"]
+mod e11_a_fixture_built_a_directory_windows_cannot_name;
+#[path = "regressions/e11_a_listing_path_was_joined_the_way_the_host_spells_one.rs"]
+mod e11_a_listing_path_was_joined_the_way_the_host_spells_one;
+#[path = "regressions/e11_a_live_process_fixture_needed_bin_sh.rs"]
+mod e11_a_live_process_fixture_needed_bin_sh;
+#[path = "regressions/e11_a_path_in_a_json_trace_was_looked_for_unescaped.rs"]
+mod e11_a_path_in_a_json_trace_was_looked_for_unescaped;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_a_pe_sentence_carried_two_raw_nul_bytes.rs"]
+mod e11_a_pe_sentence_carried_two_raw_nul_bytes;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_a_shell_script_test_ran_on_a_host_with_no_posix_shell.rs"]
+mod e11_a_shell_script_test_ran_on_a_host_with_no_posix_shell;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_a_stub_search_target_was_the_host_on_one_machine.rs"]
+mod e11_a_stub_search_target_was_the_host_on_one_machine;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_a_tree_of_objects_the_stripper_cannot_read_was_silent.rs"]
+mod e11_a_tree_of_objects_the_stripper_cannot_read_was_silent;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_an_artifact_run_isolated_its_cache_on_one_platform_only.rs"]
+mod e11_an_artifact_run_isolated_its_cache_on_one_platform_only;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_an_import_table_that_would_not_parse_read_as_no_imports.rs"]
+mod e11_an_import_table_that_would_not_parse_read_as_no_imports;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_doctor_looked_for_a_crypto_nif_windows_spells_otherwise.rs"]
+mod e11_doctor_looked_for_a_crypto_nif_windows_spells_otherwise;
+#[path = "regressions/e11_extract_only_printed_the_spelling_only_ginary_opens.rs"]
+mod e11_extract_only_printed_the_spelling_only_ginary_opens;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_the_argv_log_was_read_under_the_programs_unix_name.rs"]
+mod e11_the_argv_log_was_read_under_the_programs_unix_name;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_the_beam_argv_named_the_unix_bit_bucket.rs"]
+mod e11_the_beam_argv_named_the_unix_bit_bucket;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_the_deep_check_read_only_one_of_the_three_object_formats.rs"]
+mod e11_the_deep_check_read_only_one_of_the_three_object_formats;
+#[path = "regressions/e11_the_emulator_was_looked_for_under_its_unix_name.rs"]
+mod e11_the_emulator_was_looked_for_under_its_unix_name;
+#[path = "regressions/e11_the_fixture_server_tore_down_a_connection_it_had_just_answered.rs"]
+mod e11_the_fixture_server_tore_down_a_connection_it_had_just_answered;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_the_running_executable_was_taken_for_an_elf.rs"]
+mod e11_the_running_executable_was_taken_for_an_elf;
+#[cfg(feature = "cli")]
+#[path = "regressions/e11_the_temporary_fallback_was_named_after_one_platforms_variable.rs"]
+mod e11_the_temporary_fallback_was_named_after_one_platforms_variable;

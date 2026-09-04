@@ -39,7 +39,8 @@ use ginary::strip::{
 use tempfile::TempDir;
 
 use crate::common::fake_otp::{FakeOtp, FakeOtpRoot, FakeShipment, beam_bytes};
-use crate::common::tools::require_tools;
+use crate::common::hostpath::joined;
+use crate::common::tools::{require_elf_stripper, require_tools};
 
 /// A staged root, the runtime it came from, and the temporary directory both
 /// live in.
@@ -174,18 +175,24 @@ fn expected_erl_argv(root: &Path, modules: &[String]) -> Vec<String> {
         "-noshell".to_owned(),
         "-env".to_owned(),
         "ERL_CRASH_DUMP".to_owned(),
-        "/dev/null".to_owned(),
+        // The bit bucket this platform has, and not the one unix has: `nul`
+        // on Windows, where `/dev/null` is an ordinary relative path naming
+        // a directory that is not there. The value is composed from the rule
+        // rather than written down, because the *name* is the machine's and
+        // only the fact that the crash dump goes there is ginary's.
+        ginary::process::null_device_here().to_owned(),
         "-eval".to_owned(),
         "Files=init:get_plain_arguments(), case beam_lib:strip_files(Files) of {ok,_} -> \
          halt(0); Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end."
             .to_owned(),
         "-extra".to_owned(),
     ];
-    argv.extend(
-        modules
-            .iter()
-            .map(|module| root.join(module).display().to_string()),
-    );
+    // `hostpath::joined` and not `Path::join`: the modules come from this
+    // file's own walk and are `/`-separated, and `Path::join` would leave
+    // every separator inside the relative half as it was written, producing
+    // the mixed `…\out\lib/kernel-11.0.3/ebin/kernel.beam` spelling nothing
+    // on that platform writes.
+    argv.extend(modules.iter().map(|module| joined(root, module)));
     argv
 }
 
@@ -249,7 +256,7 @@ fn no_directory_is_passed_to_the_runtime_where_a_module_belongs() {
         .expect("the runtime is given plain arguments");
     let expected: Vec<String> = modules
         .iter()
-        .map(|module| scenario.root().join(module).display().to_string())
+        .map(|module| joined(scenario.root(), module))
         .collect();
     assert_eq!(argv[extra + 1..], expected[..]);
     assert!(
@@ -269,11 +276,7 @@ fn a_module_outside_an_ebin_is_handed_to_the_runtime_like_any_other() {
         "lib/notify/priv/helper.beam",
         &beam_bytes(&[(CODE_CHUNK, b"code".as_slice())]),
     );
-    let helper = scenario
-        .root()
-        .join("lib/notify/priv/helper.beam")
-        .display()
-        .to_string();
+    let helper = joined(scenario.root(), "lib/notify/priv/helper.beam");
 
     let report = scenario.stripped();
 
@@ -705,7 +708,14 @@ fn a_shared_object_in_the_staged_tree_is_stripped_and_still_loads_its_dependenci
 
 #[test]
 fn a_native_binary_in_the_staged_tree_is_stripped_and_stays_the_same_machine() {
-    let Some(_tools) = require_tools(&["strip"]) else {
+    // `require_elf_stripper` and not `require_tools(&["strip"])`: this claim
+    // is about what `strip --strip-all` does to a real ELF, and the fixture
+    // below is the running test binary, which is an ELF only where the host
+    // writes one. A Windows runner carries a GNU `strip` and no ELF at all,
+    // so the tool gate alone opened and the test then failed reading a PE as
+    // an ELF. What that host *can* be held to is
+    // `e11_a_tree_of_objects_the_stripper_cannot_read_was_silent`.
+    let Some(_tools) = require_elf_stripper() else {
         return;
     };
     let scenario = Scenario::new(true);

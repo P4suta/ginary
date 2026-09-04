@@ -433,7 +433,7 @@ fn a_needed_outside_the_allowlist_is_reported() {
     let report = verify::verify_with(
         artifact.path(),
         &VerifyOptions {
-            allowlist: &[],
+            allowlist: Some(&[]),
             ..VerifyOptions::default()
         },
     )
@@ -753,14 +753,25 @@ fn a_real_artifact_verifies_clean() {
     // no findings at all, because nothing accounts for it. See
     // `tests/regressions/e7_a_real_artifact_had_to_verify_on_the_hosts_own_erlang.rs`.
     let host = ginary::otp::discover(None).expect("the host runtime is discoverable");
+    // The installation's copy is read with `native::inspect_object_bytes` and
+    // held to `verify::platform_allowlist`, not with `elf::inspect` against
+    // glibc's list: the artifact's objects are in whatever container this
+    // platform writes, and asking the ELF reader about a PE answered `Err` for
+    // every one of them, so `accounted` stayed zero and the expectation was
+    // empty because nothing had been read. See
+    // `e11_the_deep_check_read_only_one_of_the_three_object_formats`.
+    let allowlist = verify::platform_allowlist(ginary::target::Target::host().os);
     let mut expected: Vec<String> = Vec::new();
     let mut accounted = 0usize;
     for object in &report.objects {
-        let Ok(info) = ginary::elf::inspect(&host.root.join(&object.path)) else {
+        let Ok(bytes) = std::fs::read(host.root.join(&object.path)) else {
+            continue;
+        };
+        let Ok(info) = ginary::native::inspect_object_bytes(&bytes) else {
             continue;
         };
         accounted += 1;
-        for needed in unmet_needs(&info.needed, &NEEDED_ALLOWLIST) {
+        for needed in unmet_needs(&info.needed, allowlist) {
             expected.push(
                 Issue::UnexpectedNeeded {
                     path: object.path.clone(),

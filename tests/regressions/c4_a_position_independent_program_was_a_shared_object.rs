@@ -34,8 +34,8 @@ use ginary::target::Target;
 use crate::common::fake_otp::{
     DEFAULT_ERTS_VSN, DEFAULT_OTP_VERSION, FakeOtp, FakeOtpRoot, FakeShipment,
 };
-use crate::common::native::{host_machine, plant, shared_object};
-use crate::common::repack::test_binary;
+use crate::common::native::{plant, shared_object};
+use crate::common::repack::{EM_AARCH64, EM_X86_64, native_arch, native_target, test_binary};
 
 /// The program: this test binary, which `cargo` links `-pie`.
 const PROGRAM: &str = "tooling/priv/bin/helper";
@@ -44,6 +44,14 @@ const PROGRAM: &str = "tooling/priv/bin/helper";
 /// is what a NIF built `-shared` is.
 const LIBRARY: &str = "esqlite/priv/esqlite3_nif.so";
 
+/// The `e_machine` the committed ELF fixture carries.
+fn fixture_machine() -> u16 {
+    match native_arch() {
+        ginary::target::Arch::X86_64 => EM_X86_64,
+        ginary::target::Arch::Aarch64 => EM_AARCH64,
+    }
+}
+
 /// A shipment holding one of each, and the runtime a reconciliation reads.
 fn shipment(dir: &Path) -> (std::path::PathBuf, FakeOtpRoot) {
     let root = FakeShipment::new()
@@ -51,7 +59,10 @@ fn shipment(dir: &Path) -> (std::path::PathBuf, FakeOtpRoot) {
         .app("esqlite", "1.0.0", &[])
         .build_in(dir.join("shipment"));
     plant(&root.root, PROGRAM, &test_binary());
-    plant(&root.root, LIBRARY, &shared_object(host_machine(), None));
+    // The machine the *fixture* names, not the host's: both files in this
+    // shipment describe one target, and that target is the committed ELF's,
+    // which is what `repack::native_target` answers.
+    plant(&root.root, LIBRARY, &shared_object(fixture_machine(), None));
     (root.root, FakeOtp::new().build_in(dir.join("otp")))
 }
 
@@ -118,7 +129,18 @@ fn a_runtime_that_cannot_load_a_nif_does_not_refuse_a_port_program() {
         overrides: &overrides,
         hooks: &hooks,
     };
-    let target = Target::host();
+    // The target the planted objects are *for*, and not `Target::host()`. Both
+    // files in the shipment are ELF, so on a Windows host reconciling them
+    // against `windows-x86_64` answered the question this test is not asking —
+    // an ELF cannot travel to a Windows target — and never reached the
+    // static-runtime rule:
+    //
+    // ```text
+    // a static runtime never has to open a program: Mismatch {
+    //   target: Target { os: Windows, arch: X86_64, libc: None },
+    //   rows: [ tooling/priv/bin/helper: ELF x86_64 glibc (linux-x86_64-gnu) ] }
+    // ```
+    let target = native_target();
 
     let done = native::reconcile(&programs, &refuse_nifs(&target, &cfg, dir.path(), &otp))
         .expect("a static runtime never has to open a program");
@@ -140,7 +162,10 @@ fn a_runtime_that_cannot_load_a_nif_still_refuses_the_shared_object_beside_it() 
         overrides: &overrides,
         hooks: &hooks,
     };
-    let target = Target::host();
+    // The same target its sibling above uses, and for the same reason: the
+    // rule under test is the static-runtime one, and the shipment's objects
+    // have to reach it.
+    let target = native_target();
 
     let error = native::reconcile(&found, &refuse_nifs(&target, &cfg, dir.path(), &otp))
         .expect_err("a static emulator cannot open a NIF");

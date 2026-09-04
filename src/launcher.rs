@@ -408,6 +408,26 @@ fn read_manifest(exe: &File, trailer: &Trailer, diag: &Diag) -> Result<Manifest,
     Ok(manifest)
 }
 
+/// The spelling of `path` that `GINARY_CMD` prints on standard output.
+///
+/// The one place the two directory-answering commands have to agree.
+/// `GINARY_CMD=directory` derives its answer from
+/// [`crate::cache::CacheDirs::key_dir`] and prints the ordinary spelling;
+/// `GINARY_CMD=extract-only` prints what
+/// [`crate::cache::ensure_extracted`] answered, which on Windows carries the
+/// `\\?\` prefix that function deliberately extracts under. So the same
+/// directory came back from one command as
+/// `C:\Users\me\AppData\Local\ginary\hello\<key>` and from the other as
+/// `\\?\C:\Users\me\AppData\Local\ginary\hello\<key>`.
+///
+/// Standard output is read by a person and by `$(…)`, and
+/// [`crate::winpath`] states the rule for exactly that: "ginary opens the
+/// verbatim spelling and hands `erl.exe` the ordinary one". A path that has
+/// stopped being something ginary opens is printed plainly.
+pub fn printed_path(path: &Path) -> String {
+    crate::winpath::plain_path(path).display().to_string()
+}
+
 /// The five `GINARY_CMD` values.
 fn maintenance(
     command: Cmd,
@@ -426,13 +446,13 @@ fn maintenance(
             // `directory` on a cold machine still answers.
             let dirs = cache::resolve_here(env);
             let entry = dirs.key_dir(&manifest.app, &trailer.cache_key());
-            let _ = writeln!(out, "{}", entry.display());
+            let _ = writeln!(out, "{}", printed_path(&entry));
             ExitCode::SUCCESS
         }
         Cmd::ExtractOnly => {
             let dirs = cache::prepare_here(env, &mut std::io::stderr())?;
             let entry = cache::ensure_extracted(exe, trailer, &manifest.app, &dirs, diag)?;
-            let _ = writeln!(out, "{}", entry.display());
+            let _ = writeln!(out, "{}", printed_path(&entry));
             ExitCode::SUCCESS
         }
         Cmd::Inspect => {

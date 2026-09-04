@@ -11,10 +11,12 @@
 //! nobody anything to act on.
 //!
 //! **Where will it not run?** An artifact carries its own BEAM but not its own
-//! libc. Every ELF file in the tree is inspected, the union of their
-//! `DT_NEEDED` entries and the highest `GLIBC_x.y` any of them requires become
-//! the `needs:` line, and that line is the artifact's portability floor stated
-//! at build time rather than discovered by a user whose loader refuses it.
+//! libc. Every native object in the tree is inspected — whichever of the three
+//! container formats it is in, see [`crate::platform::object_format_of`] — the
+//! union of what they load and the highest `GLIBC_x.y` any of them requires
+//! become the `needs:` line, and that line is the artifact's portability floor
+//! stated at build time rather than discovered by a user whose loader refuses
+//! it.
 //!
 //! Nothing here is fatal. A file that cannot be inspected, or that the listing
 //! names and the tree does not hold, lands in [`SizeReport::warnings`] and the
@@ -48,7 +50,15 @@ pub struct CategorySize {
     pub bytes_after: u64,
 }
 
-/// What one ELF file in the tree needs from the machine that runs it.
+/// What one native object in the tree needs from the machine that runs it.
+///
+/// Named for the format it was written for and kept: the JSON key is
+/// `elf_deps` and a rename would be a schema change for a word. What changed
+/// is that a PE and a Mach-O are described here too — see
+/// [`crate::native::ObjectNeeds`] — because a report that read one container
+/// format said `needs: (none)` about every artifact written in another.
+/// [`Self::glibc_max`] and [`Self::interp`] are ELF facts and are [`None`] for
+/// the other two.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ElfDep {
     /// The path relative to the staged root, `/`-separated.
@@ -85,7 +95,7 @@ pub struct SizeReport {
     pub total_before: u64,
     /// The whole tree's size now.
     pub total_after: u64,
-    /// One entry per ELF file in the tree, sorted by path.
+    /// One entry per native object in the tree, sorted by path.
     pub elf_deps: Vec<ElfDep>,
     /// The union of what those files need.
     pub needs_summary: NeedsSummary,
@@ -299,11 +309,12 @@ pub fn measure(
     })
 }
 
-/// Walks `dir`, inspecting every file whose first bytes are the ELF magic.
+/// Walks `dir`, inspecting every file whose first bytes name a container
+/// format.
 ///
-/// A file that starts like an ELF and cannot be parsed is a warning rather than
-/// a failure: one odd file in a staged tree must not cost the reader the whole
-/// account.
+/// A file that starts like an object and cannot be parsed is a warning rather
+/// than a failure: one odd file in a staged tree must not cost the reader the
+/// whole account.
 fn collect_elf_deps(
     root: &Path,
     dir: &Path,
@@ -328,7 +339,7 @@ fn collect_elf_deps(
             Some(listed) => listed,
             None => continue,
         };
-        match starts_like_an_elf(&path) {
+        match starts_like_an_object(&path) {
             Ok(false) => continue,
             Ok(true) => {}
             Err(error) => {
@@ -336,7 +347,14 @@ fn collect_elf_deps(
                 continue;
             }
         }
-        match elf::inspect(&path) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warnings.push(format!("{listed} cannot be read: {error}"));
+                continue;
+            }
+        };
+        match crate::native::inspect_object_bytes(&bytes) {
             Ok(info) => into.push(ElfDep {
                 path: listed,
                 needed: info.needed,
@@ -350,22 +368,28 @@ fn collect_elf_deps(
     Ok(())
 }
 
-/// Whether a file's first four bytes are the ELF magic.
+/// Whether a file's first bytes name a container format this build reads.
 ///
 /// Only the header is read: a staged tree holds a `beam.smp` of tens of
-/// megabytes, and asking whether it is an ELF must not cost the price of
+/// megabytes, and asking whether it is an object must not cost the price of
 /// reading it.
-fn starts_like_an_elf(path: &Path) -> Result<bool, std::io::Error> {
+///
+/// The question used to be "is this an ELF", and on a platform whose objects
+/// are PE it answered no for every file in the tree, so the `needs:` line —
+/// which is the artifact's portability floor stated in one sentence — read
+/// `needs: (none)` about a runtime that loads a dozen libraries.
+/// [`crate::platform::object_format_of`] is the rule.
+fn starts_like_an_object(path: &Path) -> Result<bool, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
     let mut magic = [0u8; 4];
     let mut read = 0;
     while read < magic.len() {
         match file.read(&mut magic[read..])? {
-            0 => return Ok(false),
+            0 => break,
             count => read += count,
         }
     }
-    Ok(elf::is_elf(&magic))
+    Ok(crate::platform::object_format_of(&magic[..read]).is_some())
 }
 
 /// A path relative to the staged root, `/`-separated, or `None` when a

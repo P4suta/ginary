@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use common::artifact::{APP, SyntheticArtifact};
 use common::cachefs::{DAY, HeldLock, plant_entry};
+use common::hostpath::same_path;
 use common::payload::SharedSink;
 use common::tools::require_tools;
 
@@ -196,7 +197,18 @@ fn a_cold_cache_extracts_into_the_key_directory() {
     let entry = cache::ensure_extracted(&file, &trailer, APP, &dirs(&root), &diag)
         .expect("a cold cache must extract");
 
-    assert_eq!(entry, root.join(APP).join(artifact.key()));
+    // `same_path` and not `==`: `ensure_extracted` answers with the verbatim
+    // `\\?\` spelling on Windows — `ginary::winpath` says why — and the
+    // directory this test built by hand holds the ordinary one. Both name one
+    // directory, and the comparison is about which directory rather than
+    // about which spelling.
+    let expected = root.join(APP).join(artifact.key());
+    assert!(
+        same_path(&entry, &expected),
+        "the entry is the key directory: {} is not {}",
+        entry.display(),
+        expected.display()
+    );
     assert!(
         entry.join("ginary.json").is_file(),
         "the manifest is the completeness marker and must be a regular file"
@@ -285,7 +297,12 @@ fn a_key_directory_without_a_manifest_is_moved_aside_and_extracted_again() {
     let extracted = cache::ensure_extracted(&file, &trailer, APP, &dirs(&root), &diag)
         .expect("an incomplete entry must be replaced");
 
-    assert_eq!(extracted, entry);
+    assert!(
+        same_path(&extracted, &entry),
+        "the incomplete entry is replaced in place: {} is not {}",
+        extracted.display(),
+        entry.display()
+    );
     assert!(entry.join("ginary.json").is_file());
     assert!(
         !entry.join("lib/leftover").exists(),
@@ -387,19 +404,26 @@ fn a_dead_process_s_temporary_tree_is_removed() {
     assert_eq!(names(&app_dir), Vec::<String>::new());
 }
 
+/// How long the planted live process stays alive for.
+///
+/// Thirty seconds, which is what the `/bin/sh -c 'sleep 30'` this replaced
+/// asked for: long enough that the sweep below certainly runs while the
+/// process is up, and finite so a leaked child cannot outlive the suite.
+const LIVE_MILLISECONDS: u64 = 30_000;
+
 #[test]
 fn a_live_process_s_temporary_tree_is_kept() {
     let dir = tempfile::tempdir().expect("tempdir");
     let app_dir = dir.path().join(APP);
     std::fs::create_dir_all(&app_dir).expect("create the application directory");
 
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "sleep 30"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn a live process");
+    // A planted program that sleeps, and not `/bin/sh -c 'sleep 30'`: the
+    // sweep's rule is "a process that is still alive", and a host with no
+    // POSIX shell has no way to make one that way — the spawn failed with
+    // `The system cannot find the path specified.` before the sweep ran at
+    // all. `script::live_process` renders the same behaviour twice, as a
+    // shell script and as the compiled shim.
+    let mut child = crate::common::script::live_process(dir.path(), LIVE_MILLISECONDS);
     let live = plant(&app_dir, "abc", "tmp", child.id());
 
     let report =

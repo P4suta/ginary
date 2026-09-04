@@ -51,6 +51,7 @@
 //! which is what makes "identical input produces identical artifact bytes"
 //! survive this phase.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -60,6 +61,7 @@ use serde::Serialize;
 use crate::beam::{self, BeamError};
 use crate::elf::{self, ElfError, ElfInfo, ElfKind};
 use crate::otp::OtpInfo;
+use crate::platform::ObjectFormat;
 use crate::process::{self, ProcessError};
 use crate::target::Target;
 
@@ -536,6 +538,26 @@ fn slash_path(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// What a tally of objects in containers the ELF stripper does not read says.
+///
+/// One sentence for the two places that report the tally: the whole tree,
+/// where it is the reason an `ElfOutcome::Skipped` gives, and the mixed tree,
+/// where it is a warning beside the bytes that *were* stripped. Both are the
+/// reported skip `CLAUDE.md` asks for in place of a silent one. See
+/// `tests/regressions/e11_a_tree_of_objects_the_stripper_cannot_read_was_silent.rs`.
+fn unreadable_sentence(unreadable: &BTreeMap<ObjectFormat, usize>) -> String {
+    let count: usize = unreadable.values().sum();
+    let formats: Vec<&str> = unreadable.keys().map(|format| format.as_str()).collect();
+    format!(
+        "{count} native {} in a container this build's stripper does not read ({}), so {} left \
+         as the runtime shipped {}",
+        if count == 1 { "file is" } else { "files are" },
+        formats.join(", "),
+        if count == 1 { "it was" } else { "they were" },
+        if count == 1 { "it" } else { "them" },
+    )
+}
+
 /// Runs `strip` over every ELF file in the staged tree.
 fn strip_elf(
     staged: &[Staged],
@@ -543,9 +565,18 @@ fn strip_elf(
     warnings: &mut Vec<String>,
 ) -> Result<ElfOutcome, StripError> {
     let mut natives: Vec<(&Staged, ElfInfo, u64)> = Vec::new();
+    // Objects in a container this build's stripper does not read. Counted
+    // rather than ignored: `NothingToStrip` says the tree holds no native
+    // code at all, and a Windows or a macOS tree holds a great deal of it.
+    let mut unreadable: BTreeMap<ObjectFormat, usize> = BTreeMap::new();
     for file in staged {
-        if !starts_like_an_elf(&file.path)? {
-            continue;
+        match object_format_at(&file.path)? {
+            None => continue,
+            Some(ObjectFormat::Elf) => {}
+            Some(other) => {
+                *unreadable.entry(other).or_default() += 1;
+                continue;
+            }
         }
         // A file that begins with the magic and is not a whole ELF is not
         // something `strip` can work on, and it is not a reason to abandon the
@@ -567,7 +598,25 @@ fn strip_elf(
     }
 
     if natives.is_empty() {
-        return Ok(ElfOutcome::NothingToStrip);
+        // The same decision C3 reached one step in — a tree whose ELF files
+        // are all for another machine is a *reported* skip — applied one step
+        // further out, to a tree whose objects are in a container this build
+        // does not read at all.
+        if unreadable.is_empty() {
+            return Ok(ElfOutcome::NothingToStrip);
+        }
+        return Ok(ElfOutcome::Skipped {
+            reason: unreadable_sentence(&unreadable),
+        });
+    }
+
+    // A tree that holds both — one ELF beside a dozen PE or Mach-O objects —
+    // is the mixed case the skip above does not reach, and it is what a
+    // partly cross-built tree looks like. Warned about rather than dropped,
+    // exactly as the foreign-machine rule below does with its own mixed tree:
+    // the bytes that were stripped are reported, and so is what nobody read.
+    if !unreadable.is_empty() {
+        warnings.push(unreadable_sentence(&unreadable));
     }
 
     // A cross build stages binaries for another machine, and `strip` on this
@@ -833,12 +882,19 @@ const BEAM_SUFFIX: &str = ".beam";
 /// only a Windows runner can find.
 const ERL_PROGRAM: &str = crate::platform::erl_program(crate::platform::HOST);
 
-/// Whether a file's first four bytes are the ELF magic.
+/// The container format a file's first bytes name, or [`None`] when they name
+/// none.
 ///
 /// Only the header is read: a staged tree holds a `beam.smp` of tens of
 /// megabytes, and asking whether it is native code must not cost the price of
 /// reading it.
-fn starts_like_an_elf(path: &Path) -> Result<bool, StripError> {
+///
+/// The question used to be "does this begin with the ELF magic", which on a
+/// platform whose objects are PE answered no for every file in the tree and
+/// left [`strip_elf`] reporting [`ElfOutcome::NothingToStrip`] over fifteen
+/// megabytes of untouched emulator. [`crate::platform::object_format_of`] is
+/// the rule, so a format this build cannot strip is a format it can name.
+fn object_format_at(path: &Path) -> Result<Option<ObjectFormat>, StripError> {
     use std::io::Read as _;
 
     let mut file = std::fs::File::open(path).map_err(|source| StripError::Io {
@@ -855,11 +911,11 @@ fn starts_like_an_elf(path: &Path) -> Result<bool, StripError> {
                 source,
             })?;
         if count == 0 {
-            return Ok(false);
+            break;
         }
         read += count;
     }
-    Ok(elf::is_elf(&magic))
+    Ok(crate::platform::object_format_of(&magic[..read]))
 }
 
 /// The arguments `strip` gets for one file.

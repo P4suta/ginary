@@ -320,3 +320,123 @@ pub fn real_elf_path() -> PathBuf {
 pub fn real_elf_bytes() -> Vec<u8> {
     std::fs::read(real_elf_path()).expect("tests/fixtures/elf/ is committed to the repository")
 }
+
+/// Whether this host's own executables and shared libraries are ELF files.
+///
+/// The question five fixtures asked without asking it. Each plants "a real,
+/// unstripped, dynamically linked ELF" and reaches for
+/// [`std::env::current_exe`] to get one, which is an ELF on Linux, a Mach-O on
+/// macOS and a PE on Windows:
+///
+/// ```text
+/// ---- a_native_binary_in_the_staged_tree_is_stripped_and_stays_the_same_machine ----
+/// the copy is an ELF file: NotElf
+///
+/// ---- a_tree_whose_natives_are_all_for_another_machine_is_a_reported_skip ----
+/// a tree `strip` here cannot read is a reported skip, not NothingToStrip
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// Where the claim is about a *real* object this machine wrote — one a linker
+/// produced, with a machine field, a `PT_INTERP` and symbols to remove — the
+/// running executable is still the right fixture and the test is the one that
+/// has to stand aside. [`object_for`] and [`host_native_object`] are for the
+/// other case, where a header is all the claim needs.
+pub fn host_writes_elf() -> bool {
+    ginary::platform::object_format(ginary::platform::HOST) == ginary::platform::ObjectFormat::Elf
+}
+
+/// A shared object for `target`, in the container format that target's
+/// operating system uses.
+///
+/// The rule two tests and one whole build had no name for. Both
+/// `tests/e2e_native.rs` and
+/// `tests/regressions/c4_a_position_independent_program_was_a_shared_object.rs`
+/// plant "the host's own native code" in a shipment and then build for
+/// [`ginary::target::Target::host`]; both planted an ELF, because the fixture
+/// they reached for is one, and on a Windows host the build refused its own
+/// machine's shipment:
+///
+/// ```text
+/// error: cannot ship the native code this shipment carries
+///   caused by: native code in the shipment does not match target windows-x86_64
+/// package    artifact                   object
+/// hello_ffi  hello_ffi/priv/lib/nif.so  ELF x86_64 glibc (linux-x86_64-gnu)
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// The refusal is correct — an ELF really cannot travel to a Windows target —
+/// so what has to change is the fixture. The format is chosen by
+/// [`ginary::platform::object_format`], so a test asserts all three answers on
+/// one machine rather than only the one it is running on.
+///
+/// # Panics
+///
+/// If `target` names an architecture no fixture builder here has a machine
+/// number for.
+pub fn object_for(target: &ginary::target::Target) -> Vec<u8> {
+    use ginary::platform::ObjectFormat;
+    use ginary::target::Arch;
+
+    match ginary::platform::object_format(target.os) {
+        ObjectFormat::Elf => {
+            let machine = match target.arch {
+                Arch::X86_64 => EM_X86_64,
+                Arch::Aarch64 => EM_AARCH64,
+            };
+            let interp = if target.libc == ginary::target::Libc::Musl {
+                musl_interp(machine)
+            } else {
+                gnu_interp(machine)
+            };
+            shared_object(machine, Some(&interp))
+        }
+        ObjectFormat::Pe => {
+            let machine = match target.arch {
+                Arch::X86_64 => crate::common::stubfile::PE_MACHINE_AMD64,
+                Arch::Aarch64 => crate::common::stubfile::PE_MACHINE_ARM64,
+            };
+            pe_bytes(machine, true)
+        }
+        ObjectFormat::MachO => {
+            let cpu = match target.arch {
+                Arch::X86_64 => MACHO_CPU_X86_64,
+                Arch::Aarch64 => MACHO_CPU_ARM64,
+            };
+            macho_bytes(cpu, MACHO_TYPE_DYLIB)
+        }
+    }
+}
+
+/// The bytes a test plants where the host's own native code goes.
+///
+/// [`object_for`] asked about [`ginary::target::Target::host`], except on the
+/// one host the committed fixture is really for: an x86-64 glibc Linux
+/// machine gets `tests/fixtures/elf/inet_gethost-x86_64-linux-gnu`, a file a
+/// real linker wrote, which is what every ELF-host assertion in the suite has
+/// been made against and what a `strip` run over the staged tree can actually
+/// work on.
+///
+/// The fixture is *not* returned on every ELF host, which is what this helper
+/// first did. `crate::common::repack::native_arch` is always `x86_64` and the
+/// bytes always name glibc's loader, so on a linux-aarch64 host the caller
+/// planted an object for another machine and the build refused its own
+/// shipment — the same machine mismatch, one platform over, that this
+/// milestone exists to remove. A fabricated header is the honest second best
+/// everywhere else.
+pub fn host_native_object() -> Vec<u8> {
+    let host = ginary::target::Target::host();
+    let fixture_is_for_this_host = ginary::platform::object_format(host.os)
+        == ginary::platform::ObjectFormat::Elf
+        && crate::common::repack::native_arch() == host.arch
+        && host.libc == ginary::target::Libc::Gnu;
+    if fixture_is_for_this_host {
+        crate::common::repack::test_binary()
+    } else {
+        object_for(&host)
+    }
+}

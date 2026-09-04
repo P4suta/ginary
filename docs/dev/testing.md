@@ -280,12 +280,35 @@ then *runs the test by name*. Both halves are asserted, because a check moved ou
 and into none is a check that was deleted rather than fixed; see
 `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
 
-The rule the three gates share is worth stating once. A gate is a claim somebody has to be able
-to make true, so it belongs to whichever job installs the thing it is about:
-`GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang and Gleam, `GINARY_REQUIRE_STUBS` to
-the jobs that build or download the cross stubs, `GINARY_REQUIRE_ACTIONLINT` to the job that
-installs actionlint. A fourth variable is warranted exactly when a fourth kind of thing is
-promised by a different job.
+E11 adds two gates that are not variables at all, and that is the point of them. Both live in
+`tests/common/tools.rs` beside the three above. `require_posix_shell` answers with `/bin/sh` by
+absolute path, or a printed skip: the claim those tests make is about what a POSIX shell does
+with a line, so a machine without one cannot answer it. It is a program the toolchain jobs do
+install, so it escalates under `GINARY_REQUIRE_TOOLCHAIN` exactly like `require_tools`, and a
+name looked up on `PATH` would not do — `bash` resolves on a Windows runner to the Windows
+Subsystem for Linux launcher, which exits `1` with nothing on either stream. What the gate
+answers is held equal to what the hook rule names by
+`tests/regressions/e11_a_shell_script_test_ran_on_a_host_with_no_posix_shell.rs`, so the two
+cannot drift.
+
+`require_elf_stripper` is the new *kind*. It asks two things: that `strip` is on `PATH`, which is
+the ordinary gate, and that the host's own executables are ELF files, which nobody can install.
+The fixture every ELF-stripping test plants is a real binary this machine wrote, and
+`ginary::strip`'s ELF phase reads what a linker put there rather than a header written by hand,
+so on a Windows runner the first condition holds and the second cannot. That half therefore
+escalates under **no** variable: `GINARY_REQUIRE_TOOLCHAIN=1` on a Windows job is a true claim
+about the toolchain and would be a false claim about the object format, and a gate that panicked
+there would be demanding a machine nobody can provide. The skip is printed and names the format
+the host writes, so the reason is in the log rather than in a reader's head.
+
+The rule the five gates share is worth stating once. A gate is a claim somebody has to be able to
+make true, so it belongs to whichever job installs the thing it is about:
+`GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang, Gleam and a POSIX shell,
+`GINARY_REQUIRE_STUBS` to the jobs that build or download the cross stubs,
+`GINARY_REQUIRE_ACTIONLINT` to the job that installs actionlint. A sixth variable is warranted
+exactly when a sixth kind of thing is promised by a different job — and *no* variable is
+warranted when the thing is a property of the platform, because then there is no job that could
+set it honestly.
 
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
@@ -306,10 +329,35 @@ inside the fixture builder itself. The shim reads its steps from `<program>.step
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
 with a placeholder, longest path first, and respells every separator as `/` through
 `tests/common/hostpath.rs`, so a snapshot pins the sentence and the shape of the path rather
-than the machine or the slash it writes between two components. `hostpath` holds the other two
-rules of the same kind: `is_absolute_for` decides absoluteness per platform, over drive-absolute,
+than the machine or the slash it writes between two components. `hostpath` holds seven more
+rules of the same kind. `is_absolute_for` decides absoluteness per platform, over drive-absolute,
 UNC and verbatim spellings, and `strip_dir` removes a fixture directory whichever separator
-joined it to the name behind it.
+joined it to the name behind it. E11 added five: `separator_for` names a platform's separator;
+`joined_for` joins a `/`-separated listing path onto a root the way a named platform spells one,
+respelling every separator of the relative half and leaving the root and every backslash in a
+unix file name alone, with `joined` the same rule asked about this machine; `json_escaped`
+spells a path the way a JSON document carries it, so a test that looks for a path inside a trace
+looks for what is actually written there; and `same_path` compares two paths as the host's file
+system does, which is not string equality on a platform whose names are case-insensitive. The
+join rules exist because `Path::join` spells one join with the host separator and leaves the rest
+alone, which on Windows produces the mixed spelling nothing writes — see
+`tests/regressions/e11_a_listing_path_was_joined_the_way_the_host_spells_one.rs`.
+
+`script` grew three helpers and a step alongside the shim rules above: `ShimStep::Sleep` is a
+program that stays alive for a while, expressed in milliseconds and rendered as whole seconds by
+the `/bin/sh` form and as milliseconds by the compiled one; `live_process` plants and spawns one,
+which is how a test gets a process it can observe without a `sleep` binary; and `recorded_argv`
+reads the argument vector a planted program wrote, through `argv_log_path`, which names the
+sidecar under the platform's own spelling of the program rather than under its unix name.
+`tests/common/native.rs` is the object-fixture builder: `object_for` writes a shared object for a
+named target in that target's own container format, `host_native_object` is what a test plants
+where the host's own native code goes — the committed x86-64 glibc ELF fixture on the one host it
+is really for, a fabricated header everywhere else — and `host_writes_elf` is the question a test
+asks before reaching for the running executable as a fixture. `tests/common/http.rs` gained
+`REPLY_SHUTDOWN`, `DRAIN_BUDGET` and `answer_one`: the first two are the close rule for a served
+connection, half-closed and then drained under a bound rather than dropped, because a fixture
+that tore down a connection it had just answered raced its own client; the third serves exactly
+one request and hands back what was asked.
 `tests/common/fixture.rs` and `tests/common/erl.rs` are the two A1c added, and they work on real
 trees rather than fake ones: the first copies a fixture Gleam project and exports it, the second
 boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that

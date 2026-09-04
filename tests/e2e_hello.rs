@@ -867,14 +867,34 @@ fn the_manifest_records_what_the_bundled_runtime_is_and_where_it_came_from() {
         otp["linkage"], "dynamic",
         "the host's own emulator is dynamically linked: {otp}"
     );
-    assert_eq!(otp["libc"]["kind"], "gnu", "{otp}");
-    let min = otp["libc"]["min"]
-        .as_str()
-        .unwrap_or_else(|| panic!("a gnu runtime records a minimum glibc: {otp}"));
-    assert!(
-        min.split('.').all(|part| part.parse::<u32>().is_ok()),
-        "the minimum is a version and not a sentence: {min}"
-    );
+    // The C library this host actually has, and not `gnu` written down. A
+    // platform with a single system C runtime records `null` here —
+    // `Libc::None` is what `Target::host().libc` answers there — and the
+    // block is right to say so, so it is the block that decides what to
+    // assert. `tests/target.rs` pins `Target::host` itself.
+    match ginary::target::Target::host().libc {
+        ginary::target::Libc::Gnu => {
+            assert_eq!(otp["libc"]["kind"], "gnu", "{otp}");
+            let min = otp["libc"]["min"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a gnu runtime records a minimum glibc: {otp}"));
+            assert!(
+                min.split('.').all(|part| part.parse::<u32>().is_ok()),
+                "the minimum is a version and not a sentence: {min}"
+            );
+        }
+        ginary::target::Libc::Musl => {
+            assert_eq!(otp["libc"]["kind"], "musl", "{otp}");
+            assert!(
+                otp["libc"]["min"].is_null(),
+                "musl carries no symbol versions, so there is no minimum: {otp}"
+            );
+        }
+        ginary::target::Libc::None => assert!(
+            otp["libc"].is_null(),
+            "a platform with one system C runtime names no C library: {otp}"
+        ),
+    }
     assert_eq!(otp["nif_loading"], true, "{otp}");
     assert!(
         otp["source"]

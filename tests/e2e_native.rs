@@ -34,7 +34,7 @@ use serde_json::Value;
 use crate::common::bounded::run_bounded;
 use crate::common::built::ginary_bin;
 use crate::common::fixture::FixtureProject;
-use crate::common::native::{plant, shared_object};
+use crate::common::native::{host_native_object, plant, shared_object};
 use crate::common::repack::{EM_AARCH64, EM_X86_64, patch_elf_machine, test_binary};
 use crate::common::stubfile::cross_stub;
 use crate::common::tools::{Toolchain, require_tools};
@@ -118,7 +118,11 @@ fn a_host_build_records_the_native_code_it_shipped() {
         return;
     };
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let project = prepared(dir.path(), &tools, &test_binary());
+    // The host's own native code, in the host's own container format, and not
+    // the committed ELF fixture: this build targets the host, and a build that
+    // is handed an ELF for a Windows target refuses it — correctly. See
+    // `common::native::host_native_object`.
+    let project = prepared(dir.path(), &tools, &host_native_object());
 
     let output = build(&project, dir.path(), &[]);
 

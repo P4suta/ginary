@@ -25,6 +25,7 @@
 //! print <text>                write <text> and a newline to standard output
 //! replace-beam-arguments      copy <program>.module over every argument ending in `.beam`
 //! print-stderr-file           write <program>.stderr, then a newline, to standard error
+//! sleep <milliseconds>        stay alive this long, doing nothing
 //! exit <status>               stop, with this status
 //! ```
 //!
@@ -65,6 +66,9 @@ fn main() {
             "print" => println!("{rest}"),
             "replace-beam-arguments" => replace_beam_arguments(&program, &arguments),
             "print-stderr-file" => print_stderr_file(&program),
+            "sleep" => std::thread::sleep(std::time::Duration::from_millis(
+                rest.parse::<u64>().unwrap_or(0),
+            )),
             "exit" => std::process::exit(rest.parse::<i32>().unwrap_or(1)),
             other => fail(&format!("{}: unknown step `{other}`", steps.display())),
         }

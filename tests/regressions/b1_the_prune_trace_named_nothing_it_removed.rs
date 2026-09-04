@@ -20,6 +20,7 @@ use ginary::cache::{self, PruneOptions};
 use ginary::diag::Diag;
 
 use crate::common::cachefs::{DAY, plant_entry};
+use crate::common::hostpath::json_escaped;
 use crate::common::payload::SharedSink;
 
 /// The stale entry, which pruning is for.
@@ -54,12 +55,17 @@ fn the_prune_record_names_the_entry_that_vanished() {
         .lines()
         .find(|line| line.contains("\"phase\":\"prune\""))
         .unwrap_or_else(|| panic!("no prune record in the trace:\n{trace}"));
+    // `json_escaped` and not the raw path: the record is a JSON document and
+    // the value looked at is itself a JSON document, so a backslash in a path
+    // is written `\\\\` by the time it is in the line. Looking for the raw
+    // spelling found nothing and reported the path as missing when it was
+    // there.
     assert!(
-        record.contains(&old.display().to_string()),
+        record.contains(&json_escaped(&old.display().to_string())),
         "the record must name the entry that vanished, and it is:\n{record}"
     );
     assert!(
-        record.contains(&fresh.display().to_string()),
+        record.contains(&json_escaped(&fresh.display().to_string())),
         "and the one it left, so that a trace explains a cache rather than counting it:\n{record}"
     );
 }

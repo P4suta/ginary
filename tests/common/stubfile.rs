@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ginary::target::Target;
+use ginary::target::{Arch, Target};
 
 /// The byte [`IMAGE`] is masked with, the same one `ginary::stubid` uses.
 const MASK: u8 = 0x5a;
@@ -587,4 +587,65 @@ pub fn pe_bytes(machine: u16, marker: &[u8; MARKER_LEN]) -> Vec<u8> {
 /// If the file cannot be written.
 pub fn pe_with_marker(dir: &Path, name: &str, machine: u16, marker: &[u8; MARKER_LEN]) -> PathBuf {
     write_executable(dir, name, &pe_bytes(machine, marker))
+}
+
+/// A target `host` is not, whichever machine `host` is.
+///
+/// `tests/stub.rs` needs one for every claim about a *search*: the running
+/// executable is a candidate only for the host's own target, so a search that
+/// must find nothing has to be asked about a target this binary is not for.
+/// The file picked `windows-x86_64` and said why — "it is not the host on any
+/// machine this suite runs on" — which stopped being true:
+///
+/// ```text
+/// ---- nothing_found_names_every_path_that_was_searched ----
+/// the directories are empty:
+///   ("D:\\a\\ginary\\ginary\\target\\debug\\deps\\stub-7dd5c00ea0f19c37.exe", SelfExe)
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>,
+/// `tests/stub.rs:325`.) The search worked perfectly: on that machine the
+/// target asked about *was* the host, so the running executable answered.
+///
+/// The architecture is what is flipped, because it is the one field the
+/// running binary can never disagree with the host on.
+pub fn foreign_target_for(host: Target) -> Target {
+    Target::new(host.os, other_arch(host.arch), host.libc)
+}
+
+/// A target with `host`'s own object format and another architecture.
+///
+/// The different question `stub::verify`'s header gate asks. That gate exists
+/// because the marker is text and copies while the object header is what the
+/// linker wrote, so a test of it needs a file whose header disagrees with its
+/// marker — which means a `want` in the *same container format* as the file,
+/// or the gate refuses the file as not being an object of that kind at all
+/// before it ever compares machines:
+///
+/// ```text
+/// ---- a_marker_that_disagrees_with_the_file_is_refused_by_the_header ----
+/// expected StubError::ObjectMismatch, got NotAnObject {
+///   path: "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\.tmp9XqB81\\liar",
+///   reason: "the file is 14432256 bytes and begins `MZ`" }
+/// ```
+///
+/// (same job, `tests/stub.rs:440`.) `NotAnObject` is the right answer to the
+/// question that was asked — a PE is not an ELF — and the wrong question. The
+/// PE branch of the gate was never reached on any runner, which is why C2's
+/// `the_pe_gate_was_never_exercised` regression exists and why this one is its
+/// Windows-host counterpart.
+pub fn same_format_other_arch(host: Target) -> Target {
+    Target::new(host.os, other_arch(host.arch), host.libc)
+}
+
+/// The architecture that is not `arch`.
+///
+/// The one field the running executable can never disagree with the host on,
+/// which is what makes it the field both rules above flip.
+const fn other_arch(arch: Arch) -> Arch {
+    match arch {
+        Arch::X86_64 => Arch::Aarch64,
+        Arch::Aarch64 => Arch::X86_64,
+    }
 }

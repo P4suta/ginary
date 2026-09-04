@@ -9,7 +9,7 @@
 //! still be held to — each one arrived as a live-runner failure and each one
 //! is now a value a test can name.
 //!
-//! The seven facts, and where each came from:
+//! The thirteen facts, and where each came from:
 //!
 //! | rule | the runner that found it |
 //! |---|---|
@@ -19,8 +19,15 @@
 //! | [`erl_program`] | the beam strip step skipped every module, looking for `bin\erl` |
 //! | [`probe_program`], [`probe_suffix`] | `ginary doctor` reported every healthy Windows cache as one no program can be run from |
 //! | [`has_local_app_data`] | every Windows build failed with `CacheDir(Unresolved)` before it started |
+//! | [`null_device`] | the beam step's argument vector named `/dev/null` on a host that has no such file |
+//! | [`temp_dir_var`] | `cache dir --json` reported a `TEMP fallback` a test only knew as `TMPDIR` |
+//! | [`object_format`] | thirteen tests took the running executable for an ELF |
+//! | [`object_format_of`] | `ginary verify` read a Windows artifact and reported `objects: 0` |
+//! | [`crypto_nif`] | `doctor` looked for `crypto.so` in an installation that spells it `crypto.dll` |
+//! | [`is_legal_file_name`] | two fixtures built directories named `out*` and `x:` |
 //!
-//! `docs/dev/log/E8.md` records the excerpt behind each row.
+//! `docs/dev/log/E8.md` records the excerpt behind each row, and
+//! `docs/dev/log/E11.md` the six E11 added.
 
 use crate::target::Os;
 
@@ -195,3 +202,222 @@ pub const fn has_local_app_data(os: Os) -> bool {
         Os::Linux | Os::Macos => false,
     }
 }
+
+/// The container format an operating system's own executables and shared
+/// libraries are written in.
+///
+/// Moved here from [`crate::native`], which re-exports it: the format is a
+/// fact about a platform rather than about one shipment's `priv` directory,
+/// and half the suite needs to ask [`object_format`] the question without
+/// the `cli` feature's scanner in scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectFormat {
+    /// An ELF object, the Linux shape.
+    Elf,
+    /// A PE object, the Windows shape.
+    Pe,
+    /// A Mach-O object, the macOS shape.
+    MachO,
+}
+
+impl ObjectFormat {
+    /// The word this format prints as in a table and in a manifest.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Elf => "elf",
+            Self::Pe => "pe",
+            Self::MachO => "macho",
+        }
+    }
+}
+
+/// The object format `os` writes its own executables in.
+///
+/// The fact thirteen Windows failures turned on. A test that copies
+/// `std::env::current_exe()` somewhere and then reads it back with
+/// [`crate::elf`] is asserting that this host links ELF, and five of them
+/// said so out loud in their own comments — "the only real, unstripped,
+/// dynamically linked ELF a test can count on". It is not one on Windows,
+/// where the same line produces `NotElf`, and it is not one on macOS either.
+///
+/// Stated as a function of a named `os` so a Linux machine can assert all
+/// three answers, exactly as [`erl_program`] and [`probe_program`] are.
+pub const fn object_format(os: Os) -> ObjectFormat {
+    match os {
+        Os::Linux => ObjectFormat::Elf,
+        Os::Macos => ObjectFormat::MachO,
+        Os::Windows => ObjectFormat::Pe,
+    }
+}
+
+/// The path of the file `os` throws writes away into.
+///
+/// `/dev/null` on unix and `nul` on Windows, where it is a reserved *device
+/// name* rather than a file: it resolves in every directory and it has no
+/// `\\?\` spelling at all, which is why the value is a name and not a path.
+///
+/// [`crate::strip`] passes it as `ERL_CRASH_DUMP` to the runtime it starts
+/// for `beam_lib:strip_files/1`, so that a runtime which dies mid-strip does
+/// not drop an `erl_crash.dump` into the directory the developer happened to
+/// be standing in. [`crate::process`] holds the same constant for the same
+/// reason and now derives it from here, so the two cannot drift.
+pub const fn null_device(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "nul",
+        Os::Linux | Os::Macos => "/dev/null",
+    }
+}
+
+/// The environment variable `os` names the per-user temporary directory with.
+///
+/// `TMPDIR` on unix and `TEMP` on Windows. It is the variable
+/// [`crate::cache::fallback_root`] and [`crate::cache::windows_fallback_root`]
+/// read, and it is the word `ginary cache dir --json` puts in its `origin`
+/// field — `"TMPDIR fallback"` or `"TEMP fallback"` — so a test that wants to
+/// name the origin composes it from here rather than pinning one host's.
+///
+/// Windows also honours `TMP` when `TEMP` is unset, which is why this is the
+/// *first* variable rather than the only one; see
+/// [`crate::cache::windows_fallback_root`] for the whole ladder.
+pub const fn temp_dir_var(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "TEMP",
+        Os::Linux | Os::Macos => "TMPDIR",
+    }
+}
+
+/// Where the `crypto` NIF sits inside `lib/crypto-<vsn>` on `os`.
+///
+/// A NIF is a shared library and every platform spells one differently:
+/// `priv/lib/crypto.so` on Linux and on macOS — OTP builds NIFs with the
+/// `.so` suffix there rather than `.dylib` — and `priv/lib/crypto.dll` on
+/// Windows. [`crate::doctor::crypto_report`] answers "does this installation
+/// carry crypto, and what does it need" and answered [`None`] for every
+/// healthy Windows installation because it looked for the unix name.
+///
+/// The path is `/`-separated because it is joined onto a root with
+/// [`std::path::Path::join`], which reads either separator on every platform.
+pub const fn crypto_nif(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "priv/lib/crypto.dll",
+        Os::Linux | Os::Macos => "priv/lib/crypto.so",
+    }
+}
+
+/// Whether `name` is a file name `os` will let a directory or a file be
+/// created under.
+///
+/// Almost anything is a unix file name: the two characters that are not are
+/// the separator and NUL. Windows reserves nine printable characters —
+/// `< > : " / \ | ? *` — and a name may not end in a dot or a space, because
+/// the normalisation step strips both and a file created as `a.` is a file
+/// called `a`.
+///
+/// Two fixtures built directories that are not names there. `out*` is the
+/// staged root
+/// `tests/regressions/a2_the_staged_root_became_a_wildcard.rs` uses to prove
+/// that a `filelib:wildcard` prefix does not reach a sibling, and `x:` is the
+/// awkward path
+/// `tests/regressions/c3_otp_update_truncated_the_catalog_it_replaced.rs`
+/// uses to prove that `//` in a path is not a URL scheme. Both failed at
+/// `create_dir_all` with `ERROR_INVALID_NAME` before the assertion they carry
+/// was reached.
+///
+/// Reserved device names — `nul`, `con`, `aux`, `com1` and the rest — are
+/// *not* rejected here. They are a separate rule about a name that is legal
+/// and resolves somewhere surprising, and no fixture builds one; adding them
+/// would be a rule with no failure behind it.
+pub fn is_legal_file_name(os: Os, name: &str) -> bool {
+    if name.is_empty() || name.contains(['/', '\0']) {
+        return false;
+    }
+    match os {
+        Os::Linux | Os::Macos => true,
+        Os::Windows => {
+            !name.contains(WINDOWS_RESERVED_CHARACTERS)
+                && !name.ends_with('.')
+                && !name.ends_with(' ')
+        }
+    }
+}
+
+/// The container format the first bytes of a file name, when they name one.
+///
+/// The magic and nothing else: `\x7fELF`, `MZ`, and the four Mach-O magics
+/// (32- and 64-bit, either byte order). A file's *name* decides nothing — a
+/// `priv/lib/x.so` that is really a shell wrapper is not an object, and a NIF
+/// may be called anything at all.
+///
+/// The rule three call sites each spell for themselves, and each of them
+/// spells only the ELF half:
+///
+/// - [`crate::verify`]'s entry reader treats a payload entry as an object
+///   only when it begins `\x7fELF`, so a Windows artifact — every object of
+///   which is a PE — is reported as having none;
+/// - [`crate::strip`]'s ELF phase collects only such files, so a tree with
+///   fifteen megabytes of PE emulator in it answers
+///   [`crate::strip::ElfOutcome::NothingToStrip`];
+/// - [`crate::report::measure`] reaches the same decision for the `needs:`
+///   line, which then reads `needs: (none)`.
+///
+/// The Windows runner shows all three at once:
+///
+/// ```text
+/// ---- a_real_artifact_verifies_clean ----
+/// not one of the artifact's objects was found in the installation at
+/// d:/a/_temp/.setup-beam/otp, so the expectation below is empty because
+/// nothing was read rather than because nothing is wrong. The objects are []
+///
+/// ---- the_needs_line_lists_the_libraries_the_runtime_loads ----
+/// `libc.so.6` is what beam.smp loads, and an artifact that does not say so
+/// is a trap:
+/// needs: (none)
+/// ```
+///
+/// Answering `None` for a PE is what makes those two silent. A caller that
+/// knows the file is an object it cannot read can say so; a caller that was
+/// told the file is not an object has nothing to report.
+pub fn object_format_of(head: &[u8]) -> Option<ObjectFormat> {
+    if head.starts_with(ELF_MAGIC) {
+        return Some(ObjectFormat::Elf);
+    }
+    if head.starts_with(PE_MAGIC) {
+        return Some(ObjectFormat::Pe);
+    }
+    if MACHO_MAGICS.iter().any(|magic| head.starts_with(magic)) {
+        return Some(ObjectFormat::MachO);
+    }
+    None
+}
+
+/// The four bytes every ELF object begins with.
+const ELF_MAGIC: &[u8] = &[0x7f, b'E', b'L', b'F'];
+
+/// The two bytes every PE object begins with, the DOS header's `e_magic`.
+///
+/// Two bytes is the whole of the magic: what follows is a DOS stub whose
+/// length is not fixed, and the `PE\0\0` signature it points at is a *later*
+/// reader's business. A file that begins `MZ` and carries no signature is a
+/// broken PE, which a caller reports, and not a file of some other kind.
+const PE_MAGIC: &[u8] = b"MZ";
+
+/// The four magics a Mach-O object begins with: 32- and 64-bit, either byte
+/// order.
+///
+/// A `fat`/universal archive begins `0xcafebabe` instead and is deliberately
+/// not here: ginary neither writes nor reads one, and a caller handed one
+/// would be told it holds an object it can read when it does not.
+const MACHO_MAGICS: [&[u8]; 4] = [
+    &[0xfe, 0xed, 0xfa, 0xce],
+    &[0xce, 0xfa, 0xed, 0xfe],
+    &[0xfe, 0xed, 0xfa, 0xcf],
+    &[0xcf, 0xfa, 0xed, 0xfe],
+];
+
+/// The nine printable characters Windows reserves in a file name.
+///
+/// `/` is checked separately, because it is not a file-name character on any
+/// platform: it is the separator, and a `name` holding one is two components
+/// rather than an illegal one.
+const WINDOWS_RESERVED_CHARACTERS: [char; 8] = ['<', '>', ':', '"', '\\', '|', '?', '*'];

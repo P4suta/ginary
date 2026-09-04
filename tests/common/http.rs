@@ -26,6 +26,29 @@ use std::time::{Duration, Instant};
 /// How long [`TestServer::wait_for_requests`] waits before giving up.
 pub const WAIT_BUDGET: Duration = Duration::from_secs(10);
 
+/// Which halves of a connection a finished reply closes.
+///
+/// A reply is finished by closing the *sending* half and nothing else. Closing
+/// both halves and dropping the socket is an abortive close: the receiving
+/// half is gone, so anything the peer had in flight — or anything the local
+/// stack had not finished handing over — becomes a reset rather than data, and
+/// a reset discards whatever the peer had already buffered. Unix tolerates
+/// that, because a reset there is delivered after the bytes that arrived
+/// before it. Windows does not: the buffered reply is thrown away and the
+/// client is told `An established connection was aborted by the software in
+/// your host machine. (os error 10053)`.
+///
+/// See `tests/regressions/e11_the_fixture_server_tore_down_a_connection_it_had_just_answered.rs`.
+pub const REPLY_SHUTDOWN: Shutdown = Shutdown::Write;
+
+/// How long the server waits for the peer's own close before letting go.
+///
+/// A graceful close reads until the peer closes, and a client that never does
+/// would hang the serving thread and, with it, every later request. The budget
+/// bounds that: it is long enough that no client of this fixture reaches it,
+/// and short enough that a stuck one is a slow test rather than a hung binary.
+pub const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
 /// One scripted answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
@@ -212,7 +235,59 @@ fn serve_one(
     };
 
     write_reply(&mut stream, &reply);
-    let _ = stream.shutdown(Shutdown::Both);
+    finish_reply(&mut stream);
+}
+
+/// Answers one connection that the caller has already accepted.
+///
+/// The body of the server's own loop, exposed so a test can hand it a
+/// connection it controls both ends of and watch what the connection does
+/// afterwards. Returns the request that was read, or `None` when the peer sent
+/// nothing that parsed as one.
+pub fn answer_one(stream: TcpStream, routes: &BTreeMap<String, Vec<Reply>>) -> Option<Request> {
+    let log: Arc<Mutex<Vec<Request>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut answered = BTreeMap::new();
+    serve_one(stream, routes, &mut answered, &log);
+    let requests = log.lock().ok()?;
+    requests.last().cloned()
+}
+
+/// Lets go of a connection whose reply has been written.
+///
+/// See [`REPLY_SHUTDOWN`] for why the two halves are not the same question,
+/// and [`DRAIN_BUDGET`] for the bound on waiting.
+fn finish_reply(stream: &mut TcpStream) {
+    // The end of the body, which is what a client reading to EOF is waiting
+    // for. The receiving half stays open, so nothing the peer still has in
+    // flight becomes a reset.
+    let _ = stream.shutdown(REPLY_SHUTDOWN);
+
+    // Then wait for the peer's own close before letting the socket go. A
+    // close that follows the peer's cannot reset anything, because there is
+    // nothing left in flight to reset. The deadline is the whole of what
+    // bounds this: a client that never closes makes one slow request rather
+    // than a hung binary, and every client of this fixture closes at once.
+    let deadline = Instant::now() + DRAIN_BUDGET;
+    let mut discard = [0_u8; 1024];
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        // `Duration::ZERO` means "no timeout at all" to the socket layer,
+        // which would turn an expired budget into an unbounded wait.
+        if left.is_zero() {
+            break;
+        }
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut discard) {
+            // The peer closed: the connection is this side's to drop now.
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            // A timeout or a reset: there is nothing further to wait for
+            // either way, and neither is a failure of the test being served.
+            Err(_) => break,
+        }
+    }
 }
 
 /// Reads the request line and the headers, and drains any body.

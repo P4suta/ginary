@@ -67,7 +67,7 @@ use crate::otp::{OtpError, OtpInfo};
 use crate::target::{Libc, Linkage, Target};
 
 /// The emulator a unix ERTS installation holds, and the file that is read.
-pub const EMULATOR: &str = "beam.smp";
+pub const EMULATOR: &str = crate::target::EMULATOR_PROGRAM;
 
 /// The emulator a Windows ERTS installation holds, and the file that is read.
 ///

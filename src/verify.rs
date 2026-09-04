@@ -12,14 +12,17 @@
 //!   index does not describe it is an artifact ginary built wrongly, which the
 //!   payload hash alone cannot see.
 //! - **Will the native code run on the machine this artifact targets?** Every
-//!   entry whose first bytes are [`crate::elf::ELF_MAGIC`] is read into memory
-//!   — and only then, and only up to [`MAX_OBJECT_BYTES`] — and inspected, so
-//!   a NIF built for another architecture is a build-time finding rather than
-//!   a loader error on somebody else's machine.
-//! - **Does it need anything the runtime does not carry?** A `DT_NEEDED`
-//!   outside [`NEEDED_ALLOWLIST`] is a library the artifact expects to find on
-//!   the target and does not bring, which is the whole of the portability
-//!   promise.
+//!   entry whose first bytes name a container format
+//!   ([`crate::platform::object_format_of`]) is read into memory — and only
+//!   then, and only up to [`MAX_OBJECT_BYTES`] — and inspected, so a NIF built
+//!   for another architecture is a build-time finding rather than a loader
+//!   error on somebody else's machine. All three formats, because an artifact
+//!   built on Windows carries no ELF at all and a check that read one format
+//!   reported such an artifact as holding no native code.
+//! - **Does it need anything the runtime does not carry?** A library outside
+//!   the target platform's own floor ([`platform_allowlist`]) is one the
+//!   artifact expects to find on the target and does not bring, which is the
+//!   whole of the portability promise.
 //! - **Will a launcher extract it at all?** Every rule
 //!   [`crate::payload::unpack`] refuses a payload for is a rule this module
 //!   reports: an entry that leaves the extracted root, one landing on a name
@@ -39,7 +42,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::Digest as _;
 
-use crate::elf::{self, ElfKind};
+use crate::elf::ElfKind;
 use crate::inspect::{self, ArtifactInfo, InspectError, Verification};
 use crate::manifest::IndexFile;
 
@@ -71,6 +74,67 @@ pub const NEEDED_ALLOWLIST: [&str; 8] = [
     "libtinfo.so.6",
 ];
 
+/// The libraries a macOS target guarantees.
+///
+/// Two spellings of one umbrella dylib, because a Mach-O's `LC_LOAD_DYLIB`
+/// commands name it by absolute path and both paths are in use: macOS
+/// re-exports `libm`, `libpthread`, `libdl` and the rest from that one file.
+pub const MACOS_NEEDED_ALLOWLIST: [&str; 2] =
+    ["/usr/lib/libSystem.B.dylib", "/usr/lib/libSystem.dylib"];
+
+/// The libraries a Windows target guarantees.
+///
+/// The system DLLs that live in `%SystemRoot%\System32` on every supported
+/// Windows, plus the two C runtimes a toolchain links there. The Universal
+/// CRT ships as several dozen `api-ms-win-crt-*` forwarding libraries rather
+/// than as one file, so [`WINDOWS_CRT_PREFIX`] matches that family the way
+/// [`LOADER_PREFIX`] matches glibc's loader.
+///
+/// The list is deliberately conservative: a name it does not carry is
+/// *reported*, which is the safe direction. An artifact that really does need
+/// a stranger's machine to supply a DLL is the finding this check exists for,
+/// and a system DLL missing from the list costs a reader one line to dismiss
+/// rather than costing a user a program that will not start.
+pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 14] = [
+    "ADVAPI32.dll",
+    "bcrypt.dll",
+    "CRYPT32.dll",
+    "dbghelp.dll",
+    "IPHLPAPI.DLL",
+    "KERNEL32.dll",
+    "msvcrt.dll",
+    "ole32.dll",
+    "SHELL32.dll",
+    "ucrtbase.dll",
+    "USER32.dll",
+    "VCRUNTIME140.dll",
+    "WS2_32.dll",
+    "WSOCK32.dll",
+];
+
+/// The prefix of the Universal CRT's forwarding libraries.
+///
+/// Matched case-insensitively, like every name in
+/// [`WINDOWS_NEEDED_ALLOWLIST`]: a PE import table spells `KERNEL32.dll` and
+/// `kernel32.dll` for one file, because the platform's own file names are
+/// case-insensitive.
+pub const WINDOWS_CRT_PREFIX: &str = "api-ms-win-crt-";
+
+/// The libraries the target platform `os` guarantees, which an artifact may
+/// expect to find and need not carry.
+///
+/// The allowlist is a statement about a *target*, not about the machine
+/// verifying. Reading one container format and holding it to glibc's floor is
+/// what let a Windows artifact verify as one holding no objects at all; now
+/// that all three formats are read, each is held to its own platform's floor.
+pub const fn platform_allowlist(os: crate::target::Os) -> &'static [&'static str] {
+    match os {
+        crate::target::Os::Linux => &NEEDED_ALLOWLIST,
+        crate::target::Os::Macos => &MACOS_NEEDED_ALLOWLIST,
+        crate::target::Os::Windows => &WINDOWS_NEEDED_ALLOWLIST,
+    }
+}
+
 /// The prefix every glibc dynamic loader's name begins with.
 pub const LOADER_PREFIX: &str = "ld-linux-";
 
@@ -86,12 +150,21 @@ pub const LOADER_PREFIX: &str = "ld-linux-";
 /// is assumed, the loader included.
 pub const LOADER_COMPANION: &str = "libc.so.6";
 
+/// How many of an entry's first bytes are read to decide whether it is an
+/// object.
+///
+/// Four: the longest of the three magics [`crate::platform::object_format_of`]
+/// reads. A PE's is two and an ELF's and a Mach-O's are four, so four is
+/// enough for all three and is still nothing beside the entry itself.
+const OBJECT_MAGIC_BYTES: usize = 4;
+
 /// The largest payload entry that is read into memory to be inspected.
 ///
-/// An entry is only read at all once its first bytes are the ELF magic, so the
-/// bound is about a *hostile* artifact rather than about a large one: a tar
-/// header can claim any length, and a verifier that believed it would be
-/// killed rather than report anything. The largest object a real artifact
+/// An entry is only read at all once its first bytes name a container format
+/// [`crate::platform::object_format_of`] knows, so the bound is about a
+/// *hostile* artifact rather than about a large one: a tar header can claim
+/// any length, and a verifier that believed it would be killed rather than
+/// report anything. The largest object a real artifact
 /// carries is `beam.smp`, two orders of magnitude below this.
 pub const MAX_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -104,8 +177,16 @@ pub const MAX_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
 /// what makes "this name is refused" a test rather than a hope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifyOptions<'a> {
-    /// The `DT_NEEDED` names that are not reported.
-    pub allowlist: &'a [&'a str],
+    /// The names that are not reported, or [`None`] for the artifact's own
+    /// target platform's list.
+    ///
+    /// [`None`] rather than a default array, because the answer depends on
+    /// what the artifact targets and the artifact has not been opened yet
+    /// when the options are built: [`platform_allowlist`] is consulted once
+    /// the manifest names a target. A test that wants to narrow the list
+    /// passes [`Some`] and gets exactly what it named, the loader rule
+    /// included.
+    pub allowlist: Option<&'a [&'a str]>,
     /// The bound on an entry that is read into memory to be inspected.
     ///
     /// Injectable for the same reason as the allowlist and not for a
@@ -119,7 +200,7 @@ pub struct VerifyOptions<'a> {
 impl Default for VerifyOptions<'_> {
     fn default() -> Self {
         Self {
-            allowlist: &NEEDED_ALLOWLIST,
+            allowlist: None,
             max_object_bytes: MAX_OBJECT_BYTES,
         }
     }
@@ -132,7 +213,36 @@ impl Default for VerifyOptions<'_> {
 pub fn needed_is_allowed(name: &str, allowlist: &[&str]) -> bool {
     allowlist.contains(&name)
         || (name.starts_with(LOADER_PREFIX) && allowlist.contains(&LOADER_COMPANION))
+        || windows_name_is_allowed(name, allowlist)
 }
+
+/// The case-insensitive half of [`needed_is_allowed`], for a PE import name.
+///
+/// Only a list that names a Windows library at all takes this arm, so an
+/// allowlist a test narrowed to `&[]` admits nothing here either and the seam
+/// stays a seam.
+fn windows_name_is_allowed(name: &str, allowlist: &[&str]) -> bool {
+    allowlist.iter().any(|known| {
+        // The suffix is asked about case-insensitively too, or the one entry
+        // spelled `IPHLPAPI.DLL` never reaches the comparison beside it and is
+        // admitted in its own spelling alone. See
+        // `tests/regressions/e11_a_dll_the_import_table_spelt_in_lower_case_was_unexpected.rs`.
+        known.to_ascii_lowercase().ends_with(WINDOWS_LIBRARY_SUFFIX)
+            && known.eq_ignore_ascii_case(name)
+    }) || (name.to_ascii_lowercase().starts_with(WINDOWS_CRT_PREFIX)
+        && allowlist.contains(&WINDOWS_CRT_COMPANION))
+}
+
+/// The suffix that makes a name on an allowlist a Windows library.
+const WINDOWS_LIBRARY_SUFFIX: &str = ".dll";
+
+/// The library whose presence on an allowlist admits the Universal CRT's
+/// `api-ms-win-crt-*` family.
+///
+/// [`LOADER_COMPANION`]'s counterpart: the family *is* the Universal CRT, so
+/// an allowlist that admits `ucrtbase.dll` admits its forwarding libraries and
+/// one that does not admits neither.
+pub const WINDOWS_CRT_COMPANION: &str = "ucrtbase.dll";
 
 /// One native object found in the payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -582,8 +692,8 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         }
 
         match scan.object {
-            Some(Ok(bytes)) => match elf::inspect_bytes(&bytes) {
-                Ok(info_elf) => objects.push(describe(&name, &info_elf, &info, options)),
+            Some(Ok(bytes)) => match crate::native::inspect_object_bytes(&bytes) {
+                Ok(needs) => objects.push(describe(&name, &needs, &info, options)),
                 Err(error) => issues.push(Issue::UnreadableObject {
                     path: name.clone(),
                     message: error.to_string(),
@@ -769,21 +879,24 @@ fn or_dash(value: &str) -> &str {
 /// Builds one object's row, with the issues it raised.
 fn describe(
     name: &str,
-    elf_info: &elf::ElfInfo,
+    object: &crate::native::ObjectNeeds,
     artifact: &ArtifactInfo,
     options: &VerifyOptions<'_>,
 ) -> ObjectInfo {
     let expected = artifact.manifest.target.arch.as_str();
+    let allowlist = options
+        .allowlist
+        .unwrap_or_else(|| platform_allowlist(artifact.manifest.target.os));
     let mut issues = Vec::new();
-    if elf_info.machine != expected {
+    if object.machine != expected {
         issues.push(Issue::MachineMismatch {
             path: name.to_owned(),
-            found: elf_info.machine.clone(),
+            found: object.machine.clone(),
             expected: expected.to_owned(),
         });
     }
-    for needed in &elf_info.needed {
-        if !needed_is_allowed(needed, options.allowlist) {
+    for needed in &object.needed {
+        if !needed_is_allowed(needed, allowlist) {
             issues.push(Issue::UnexpectedNeeded {
                 path: name.to_owned(),
                 needed: needed.clone(),
@@ -793,12 +906,12 @@ fn describe(
 
     ObjectInfo {
         path: name.to_owned(),
-        machine: elf_info.machine.clone(),
-        class: elf_info.class,
-        kind: elf_info.kind,
-        interp: elf_info.interp.clone(),
-        needed: elf_info.needed.clone(),
-        glibc_max: elf_info.glibc_max.clone(),
+        machine: object.machine.clone(),
+        class: object.class,
+        kind: object.kind,
+        interp: object.interp.clone(),
+        needed: object.needed.clone(),
+        glibc_max: object.glibc_max.clone(),
         issues,
     }
 }
@@ -816,18 +929,24 @@ struct Scan {
     object: Option<Result<Vec<u8>, String>>,
 }
 
-/// Streams one entry past a hasher, keeping it only when it is an ELF.
+/// Streams one entry past a hasher, keeping it only when it is an object.
 ///
 /// The first bytes decide: nothing is held for a file that is not native code,
 /// and an entry whose header claims more than `bound` is refused before a byte
 /// of it is kept rather than after.
+///
+/// Which bytes name an object is [`crate::platform::object_format_of`], and
+/// not [`crate::elf::is_elf`]. Asking only the ELF question is what let a
+/// Windows artifact — every object of which is a PE — verify as one holding
+/// no objects at all, and the anti-vacuity guard of
+/// `tests/verify.rs::a_real_artifact_verifies_clean` is what caught it.
 fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io::Result<Scan> {
     let mut hasher = sha2::Sha256::new();
     let mut len = 0u64;
 
-    let mut head = Vec::with_capacity(elf::ELF_MAGIC.len());
+    let mut head = Vec::with_capacity(OBJECT_MAGIC_BYTES);
     let mut byte = [0u8; 1];
-    while head.len() < elf::ELF_MAGIC.len() {
+    while head.len() < OBJECT_MAGIC_BYTES {
         if entry.read(&mut byte)? == 0 {
             break;
         }
@@ -836,7 +955,7 @@ fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io:
     hasher.update(&head);
     len = len.saturating_add(head.len() as u64);
 
-    let mut object = if elf::is_elf(&head) {
+    let mut object = if crate::platform::object_format_of(&head).is_some() {
         if size > bound {
             Some(Err(format!(
                 "it is {size} bytes, and this verifier reads at most {bound}"
@@ -1096,8 +1215,8 @@ mod tests {
 
     /// The bytes of an entry that begins with the ELF magic.
     fn elf_bytes(length: usize) -> Vec<u8> {
-        let mut bytes = elf::ELF_MAGIC.to_vec();
-        bytes.resize(length.max(elf::ELF_MAGIC.len()), 0u8);
+        let mut bytes = crate::elf::ELF_MAGIC.to_vec();
+        bytes.resize(length.max(crate::elf::ELF_MAGIC.len()), 0u8);
         bytes
     }
 

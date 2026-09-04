@@ -24,8 +24,9 @@ use std::path::Path;
 
 use ginary::assemble::{Category, StageOptions, StagedRoot};
 use ginary::closure::app_dependency_closure;
+use ginary::platform::{self, ObjectFormat};
 use ginary::report::SizeReport;
-use ginary::strip::{StripOptions, StripReport};
+use ginary::strip::{ElfOutcome, StripOptions, StripReport};
 use tempfile::TempDir;
 
 use crate::common::erl::{crash_dump_path, run_cwd, run_staged};
@@ -301,12 +302,29 @@ fn stage_and_strip(tools: &Toolchain) -> Stripped {
     }
 }
 
-/// The staged `beam.smp` of a tree.
-fn beam_smp(staged: &Staged) -> std::path::PathBuf {
+/// The staged emulator of a tree.
+///
+/// `Target::emulator_program` and not `beam.smp` written down: the unix tree's
+/// emulator is a program `erlexec` execs and the Windows tree's is a DLL
+/// `erl.exe` loads into its own process, so the file is `beam.smp.dll` there
+/// and the lookup answered `The system cannot find the file specified`.
+fn emulator(staged: &Staged) -> std::path::PathBuf {
     staged
         .root()
         .join(format!("erts-{}", staged.root.erts_vsn()))
-        .join("bin/beam.smp")
+        .join("bin")
+        .join(ginary::target::Target::host().emulator_program())
+}
+
+/// Whether the ELF half of stripping can have run on this host.
+///
+/// `ginary::strip`'s native phase reads ELF, so a tree whose objects are PE or
+/// Mach-O is a *reported* skip — see
+/// `tests/regressions/e11_a_tree_of_objects_the_stripper_cannot_read_was_silent.rs`.
+/// The two size claims below are claims about a tree that phase ran on, so
+/// they ask this first rather than asserting a saving no run could have made.
+fn native_code_is_strippable_here() -> bool {
+    platform::object_format(platform::HOST) == ObjectFormat::Elf
 }
 
 #[test]
@@ -331,13 +349,35 @@ fn a_stripped_hello_ffi_fits_in_the_size_budget() {
         "stripping a real runtime has to remove something"
     );
 
-    let smp = std::fs::metadata(beam_smp(&stripped.staged))
-        .expect("the staged beam.smp")
+    let emulator = emulator(&stripped.staged);
+    let smp = std::fs::metadata(&emulator)
+        .unwrap_or_else(|error| panic!("the staged {}: {error}", emulator.display()))
         .len();
-    assert!(
-        smp < BEAM_SMP_BUDGET,
-        "beam.smp is {smp} bytes, over the {BEAM_SMP_BUDGET} budget"
-    );
+    if native_code_is_strippable_here() {
+        assert!(
+            smp < BEAM_SMP_BUDGET,
+            "{} is {smp} bytes, over the {BEAM_SMP_BUDGET} budget",
+            emulator.display()
+        );
+    } else {
+        // The budget is a measurement of a *stripped* emulator, and this host
+        // ships one in a container `ginary::strip` does not read, so it is the
+        // size the runtime shipped it at and no run could have changed that.
+        // The report says so out loud rather than reporting nothing, which is
+        // what the assertion below holds it to.
+        assert!(
+            matches!(stripped.strip.elf, ElfOutcome::Skipped { .. }),
+            "native code this host's stripper cannot read is a reported skip, and the report \
+             says {:?}",
+            stripped.strip.elf
+        );
+        eprintln!(
+            "not asserting the {BEAM_SMP_BUDGET}-byte emulator budget: this host's native \
+             code is {}, which `ginary::strip` reports rather than strips ({} is {smp} bytes)",
+            platform::object_format(platform::HOST).as_str(),
+            emulator.display()
+        );
+    }
 }
 
 #[test]
@@ -444,21 +484,58 @@ fn the_needs_line_lists_the_libraries_the_runtime_loads() {
     let stripped = stage_and_strip(&tools);
 
     let needs = stripped.report.needs_line();
-    for library in [
-        "libc.so.6",
-        "libtinfo.so.6",
-        "libstdc++.so.6",
-        "libgcc_s.so.1",
-    ] {
+    // What the emulator loads is a fact about the platform that built it, so
+    // the list asked for is that platform's. Writing glibc's four sonames down
+    // asserted that this host links glibc, and on a host whose emulator is a
+    // PE the line read `needs: (none)` — which is the trap this test exists to
+    // catch, reported as the absence of the check rather than of the
+    // libraries.
+    let (libraries, lowercase): (&[&str], bool) = match platform::object_format(platform::HOST) {
+        ObjectFormat::Elf => (
+            &[
+                "libc.so.6",
+                "libtinfo.so.6",
+                "libstdc++.so.6",
+                "libgcc_s.so.1",
+            ],
+            false,
+        ),
+        // `KERNEL32.dll` is the kernel interface every Windows process
+        // has; an import table that names none of it is one that was not
+        // read. The comparison is case-insensitive because a PE import
+        // table spells one file both ways.
+        ObjectFormat::Pe => (&["kernel32.dll"], true),
+        // macOS re-exports `libm`, `libpthread` and the rest from one
+        // umbrella dylib, so there is one name to look for.
+        ObjectFormat::MachO => (&["/usr/lib/libSystem.B.dylib"], false),
+    };
+    let haystack = if lowercase {
+        needs.to_ascii_lowercase()
+    } else {
+        needs.clone()
+    };
+    for library in libraries {
         assert!(
-            needs.contains(library),
-            "`{library}` is what beam.smp loads, and an artifact that does not say so is a trap:\n{needs}"
+            haystack.contains(library),
+            "`{library}` is what the emulator loads, and an artifact that does not say so is a \
+             trap:\n{needs}"
         );
     }
-    assert!(
-        needs.contains("(GLIBC_"),
-        "the glibc floor is the number a user needs most:\n{needs}"
-    );
+    // The glibc floor is a fact about an ELF, and a PE or a Mach-O has no
+    // such number. Narrowed rather than dropped: the opposite claim is
+    // asserted on the other hosts, so a `(GLIBC_` appearing in a Windows
+    // `needs:` line is a failure and not a silence.
+    if platform::object_format(platform::HOST) == ObjectFormat::Elf {
+        assert!(
+            needs.contains("(GLIBC_"),
+            "the glibc floor is the number a user needs most:\n{needs}"
+        );
+    } else {
+        assert!(
+            !needs.contains("(GLIBC_"),
+            "there is no glibc floor in a container that has no glibc in it:\n{needs}"
+        );
+    }
 }
 
 #[test]
@@ -475,10 +552,28 @@ fn the_report_accounts_for_every_byte_stripping_removed() {
         .categories
         .get(&Category::ErtsBinary)
         .expect("the tree holds ERTS binaries");
-    assert!(
-        erts.bytes_after < erts.bytes_before,
-        "the ERTS binaries are where most of the saving is: {erts:?}"
-    );
+    if native_code_is_strippable_here() {
+        assert!(
+            erts.bytes_after < erts.bytes_before,
+            "the ERTS binaries are where most of the saving is: {erts:?}"
+        );
+    } else {
+        // No byte of native code was removed here, and the account has to say
+        // so exactly: a category that reports a saving nothing made would be
+        // the defect this test is about, in the other direction.
+        assert_eq!(
+            erts.bytes_after,
+            erts.bytes_before,
+            "this host's stripper reads no {} object, so the ERTS binaries kept every byte and \
+             the account has to agree: {erts:?}",
+            platform::object_format(platform::HOST).as_str()
+        );
+        assert!(
+            matches!(stripped.strip.elf, ElfOutcome::Skipped { .. }),
+            "and it is a reported skip rather than silence: {:?}",
+            stripped.strip.elf
+        );
+    }
     let beams = stripped
         .report
         .categories

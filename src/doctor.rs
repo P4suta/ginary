@@ -412,41 +412,108 @@ const C_RUNTIME_LIBRARIES: [&str; 6] = [
     "libgcc_s.so.1",
 ];
 
+/// The two spellings of the one library every macOS program links against.
+///
+/// There is no separate `libm`, `libpthread` or `libdl` there: all of them are
+/// re-exported from this one umbrella dylib, which a Mach-O's `LC_LOAD_DYLIB`
+/// commands name by absolute path. Both of the paths it answers to are in
+/// use, so both are listed.
+const MACOS_SYSTEM_LIBRARIES: [&str; 2] =
+    ["/usr/lib/libSystem.B.dylib", "/usr/lib/libSystem.dylib"];
+
+/// The C runtime a Windows program links against, whatever it does.
+///
+/// `KERNEL32.dll` is the kernel interface every process has, and the other
+/// three are the three C runtimes a Windows toolchain links: the legacy
+/// `msvcrt`, the Universal CRT's `ucrtbase`, and MSVC's own compiler runtime.
+/// [`WINDOWS_CRT_PREFIX`] covers the rest of the Universal CRT, which ships as
+/// several dozen `api-ms-win-crt-*` forwarding libraries rather than as one
+/// file.
+const WINDOWS_C_RUNTIME_LIBRARIES: [&str; 4] = [
+    "KERNEL32.dll",
+    "msvcrt.dll",
+    "ucrtbase.dll",
+    "VCRUNTIME140.dll",
+];
+
+/// The prefix of the Universal CRT's forwarding libraries, lower-cased.
+const WINDOWS_CRT_PREFIX: &str = "api-ms-win-crt-";
+
 /// The prefix of the application directory `crypto`'s NIF lives under.
 const CRYPTO_APP_PREFIX: &str = "crypto-";
 
-/// The NIF, relative to the `crypto` application directory.
-const CRYPTO_NIF: &str = "priv/lib/crypto.so";
-
-/// Finds `crypto.so` under an OTP root and reads what it needs.
+/// Finds the `crypto` NIF under an OTP root and reads what it needs.
+///
+/// The host's answer: [`crypto_report_for`] asked about
+/// [`crate::platform::HOST`].
 ///
 /// `None` when the installation carries no `crypto` application, which a
 /// runtime assembled from ERTS binaries alone legitimately does not, and also
-/// when the file is there and is not an ELF this build can read: `doctor`
-/// never fails, and a NIF nothing can parse is named by `ginary verify` on the
-/// artifact that carries it rather than guessed at here.
+/// when the file is there and cannot be read: `doctor` never fails, and a NIF
+/// nothing can parse is named by `ginary verify` on the artifact that carries
+/// it rather than guessed at here.
 pub fn crypto_report(otp_root: &Path) -> Option<CryptoReport> {
-    let path = crypto_nif(otp_root)?;
-    let info = elf::inspect(&path).ok()?;
-    let statically_linked_openssl = info
-        .needed
-        .iter()
-        .all(|needed| C_RUNTIME_LIBRARIES.contains(&needed.as_str()));
+    crypto_report_for(crate::platform::HOST, otp_root)
+}
+
+/// Finds the `crypto` NIF an `os` installation spells, and reads what it
+/// needs.
+///
+/// Two things vary with the platform and both were fixed to unix. The file
+/// name is [`crate::platform::crypto_nif`] — `crypto.so` on Linux and macOS,
+/// `crypto.dll` on Windows — and the header that lists what it loads is an
+/// ELF `DT_NEEDED` table on one platform and a PE import directory on the
+/// other. `doctor` answered [`None`] for every healthy Windows installation
+/// because it looked for the unix name, and would have answered [`None`]
+/// again for the right file because it read the file as an ELF.
+///
+/// `os` is a parameter rather than a `#[cfg]` so that both answers are
+/// asserted on one machine; see `docs/dev/log/E11.md`.
+pub fn crypto_report_for(os: Os, otp_root: &Path) -> Option<CryptoReport> {
+    let path = crypto_nif(os, otp_root)?;
+    let bytes = std::fs::read(&path).ok()?;
+    let needs = crate::native::inspect_object_bytes(&bytes).ok()?;
+    let statically_linked_openssl = needs.needed.iter().all(|needed| is_c_runtime(os, needed));
     Some(CryptoReport {
         path,
-        needed: info.needed,
+        needed: needs.needed,
         statically_linked_openssl,
     })
 }
 
-/// `<root>/lib/crypto-<vsn>/priv/lib/crypto.so`, found by prefix.
+/// Whether `name` is a library every program on `os` links against whatever
+/// it does.
+///
+/// A `crypto` NIF that needs only these is one whose OpenSSL was linked in
+/// statically, which is the whole question [`CryptoReport`] exists to answer.
+/// Each platform's floor is its own: glibc's six sonames on Linux, the one
+/// umbrella library on macOS, and on Windows the C runtime plus the
+/// `api-ms-win-crt-*` family the Universal CRT splits itself across. The
+/// comparison is case-insensitive on Windows, where an import table spells
+/// `KERNEL32.dll` and `kernel32.dll` for the same file.
+fn is_c_runtime(os: Os, name: &str) -> bool {
+    match os {
+        Os::Linux => C_RUNTIME_LIBRARIES.contains(&name),
+        Os::Macos => MACOS_SYSTEM_LIBRARIES.contains(&name),
+        Os::Windows => {
+            let lower = name.to_ascii_lowercase();
+            WINDOWS_C_RUNTIME_LIBRARIES
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(name))
+                || lower.starts_with(WINDOWS_CRT_PREFIX)
+        }
+    }
+}
+
+/// `<root>/lib/crypto-<vsn>/<`[`crate::platform::crypto_nif`]`>`, found by
+/// prefix.
 ///
 /// The version is not known here and is not worth discovering separately: the
 /// directory is the only `crypto-*` an installation has, and reading
 /// `OTP_VERSION` to learn a number that is already in the path would be a
 /// second source of truth. The highest name wins if an installation somehow
 /// holds two, so the answer does not depend on directory order.
-fn crypto_nif(otp_root: &Path) -> Option<PathBuf> {
+fn crypto_nif(os: Os, otp_root: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(otp_root.join("lib"))
         .ok()?
         .filter_map(Result::ok)
@@ -456,7 +523,7 @@ fn crypto_nif(otp_root: &Path) -> Option<PathBuf> {
                 .and_then(OsStr::to_str)
                 .is_some_and(|name| name.starts_with(CRYPTO_APP_PREFIX))
         })
-        .map(|path| path.join(CRYPTO_NIF))
+        .map(|path| path.join(crate::platform::crypto_nif(os)))
         .filter(|path| path.is_file())
         .collect();
     candidates.sort();

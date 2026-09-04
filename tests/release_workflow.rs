@@ -496,9 +496,18 @@ fn the_notice_script_exits_zero_under_the_shell_that_runs_it() {
     // GitHub runs a `run:` block on Linux as `bash -e -o pipefail {0}`, so the
     // last command's status is the step's status and any command failing ends
     // it. Reading the script and asserting it has no `exit 1` in it says
-    // nothing about that; running it does. `bash` not being here is a reported
-    // skip rather than a failure — this file is ungated, and the assertion is
-    // about the script rather than about the machine.
+    // nothing about that; running it does.
+    //
+    // The gate is `require_posix_shell` and not a `Command::new("bash")` whose
+    // failure is caught: `bash` is a `PATH` lookup, and on a Windows runner
+    // the first one on `PATH` is `C:\Windows\System32\bash.exe`, the WSL
+    // launcher, which starts, exits `1` in silence when no distribution is
+    // installed, and made this test report the Release workflow as red. A
+    // machine with no POSIX shell cannot answer the question at all, so it
+    // says so.
+    let Some(_shell) = crate::common::tools::require_posix_shell() else {
+        return;
+    };
     let run = std::process::Command::new("bash")
         .args(["-e", "-o", "pipefail", "-c", &step.run])
         .output();

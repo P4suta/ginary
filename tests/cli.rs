@@ -21,7 +21,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 
 use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
-use crate::common::hostpath::is_absolute_for;
+use crate::common::hostpath::{is_absolute_for, joined};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
@@ -789,13 +789,14 @@ fn stage_trees_with(erl: fn(FakeOtp) -> FakeOtp) -> (tempfile::TempDir, PathBuf,
     (dir, shipment_root, otp_root, out)
 }
 
-/// The argument vector the stub `bin/erl` under `otp` was called with.
+/// The argument vector the stub `erl` under `otp` was called with.
+///
+/// `script::recorded_argv` and not `<otp>/bin/erl.argv` by name: the program
+/// the fake runtime plants is `erl.exe` where the platform spells it that
+/// way, so its log is `erl.exe.argv`, and reading the unix name answered
+/// `NotFound` and made three tests report that stripping had never started.
 fn erl_argv(otp: &Path) -> Vec<String> {
-    match std::fs::read_to_string(otp.join("bin/erl.argv")) {
-        Ok(text) => text.lines().map(str::to_owned).collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("cannot read the argv log: {error}"),
-    }
+    crate::common::script::recorded_argv(&otp.join("bin"), "erl")
 }
 
 /// Every `.beam` under `root`, as absolute paths, in staged-tree path order.
@@ -826,9 +827,13 @@ fn staged_modules(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     collect(root, root, &mut found);
     found.sort();
+    // `hostpath::joined` and not `Path::join`: the walk above respells every
+    // separator as `/`, and joining that back on with `Path::join` leaves the
+    // relative half as it was written, producing a mixed spelling nothing on
+    // that platform writes.
     found
         .iter()
-        .map(|relative| root.join(relative).display().to_string())
+        .map(|relative| joined(root, relative))
         .collect()
 }
 
@@ -1110,7 +1115,9 @@ fn stage_runs_the_otp_roots_own_erl_with_the_beam_lib_one_liner() {
         "-noshell".to_owned(),
         "-env".to_owned(),
         "ERL_CRASH_DUMP".to_owned(),
-        "/dev/null".to_owned(),
+        // The bit bucket this platform has: `nul` on Windows, where
+        // `/dev/null` is a relative path naming a directory that is not there.
+        ginary::process::null_device_here().to_owned(),
         "-eval".to_owned(),
         "Files=init:get_plain_arguments(), case beam_lib:strip_files(Files) of {ok,_} -> \
          halt(0); Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end."
@@ -1132,10 +1139,18 @@ fn stage_skips_the_beam_step_when_the_otp_root_holds_no_erl() {
     let assert = stage_command(&shipment, &otp, &out).assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
 
+    // `platform::erl_program` and not `erl`: the runtime ginary looks for on
+    // Windows is `bin\erl.exe`, which is the name the skip prints.
+    let looked_for = joined(
+        &otp,
+        &format!(
+            "bin/{}",
+            ginary::platform::erl_program(ginary::platform::HOST)
+        ),
+    );
     assert!(
-        stdout.contains("beams: skipped:")
-            && stdout.contains(&otp.join("bin/erl").display().to_string()),
-        "the skip names the `erl` that was looked for:\n{stdout}"
+        stdout.contains("beams: skipped:") && stdout.contains(&looked_for),
+        "the skip names the `{looked_for}` that was looked for:\n{stdout}"
     );
     assert!(
         out.join("ginary.stage.json").is_file(),
@@ -1415,18 +1430,23 @@ fn cache_dir_json_carries_the_provenance_and_the_fallback_flag() {
 #[test]
 fn cache_dir_reports_the_temporary_fallback_when_nothing_is_set() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // The variable *this* platform's resolver reads, and the origin word it
+    // puts in the JSON: `TMPDIR` on unix and `TEMP` on Windows. Written down,
+    // the test set a variable Windows ignores and then asked for an origin no
+    // Windows run reports.
+    let variable = ginary::platform::temp_dir_var(ginary::platform::HOST);
     let mut command = ginary();
-    command.env_clear().env("TMPDIR", dir.path());
+    command.env_clear().env(variable, dir.path());
     crate::common::coverage::preserve_coverage_env_assert(&mut command);
     let assert = command.args(["cache", "dir", "--json"]).assert().success();
     let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
-    assert_eq!(value["origin"], Value::from("TMPDIR fallback"));
+    assert_eq!(value["origin"], Value::from(format!("{variable} fallback")));
     assert_eq!(value["is_fallback"], Value::from(true));
     assert!(
         value["path"]
             .as_str()
             .is_some_and(|path| path.starts_with(&dir.path().display().to_string())),
-        "the fallback must live under TMPDIR, and it is {:?}",
+        "the fallback must live under {variable}, and it is {:?}",
         value["path"]
     );
 }

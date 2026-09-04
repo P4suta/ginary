@@ -26,7 +26,7 @@ use assert_cmd::Command;
 use ginary::manifest::FORMAT_VERSION;
 use ginary::stub::{self, StubError, StubOpts, StubSource};
 use ginary::stubid::{Flavor, StubId, StubIdError};
-use ginary::target::{Arch, Target};
+use ginary::target::Target;
 
 use crate::common::artifact::SyntheticArtifact;
 use crate::common::fixture::FixtureProject;
@@ -70,28 +70,50 @@ impl Search {
     }
 }
 
-/// A Linux gnu target whose architecture is not this machine's.
+/// A target whose architecture is not this machine's, in this machine's own
+/// container format.
 ///
-/// The one target that is certainly foreign and certainly an ELF, which is
-/// what the header gate needs: a marker can be rewritten to say anything, and
-/// the machine field of the file cannot.
+/// The fixtures below are copies of the running test binary with the marker
+/// rewritten, so the file's own header is whatever this host links. The header
+/// gate compares the *machine* the file names against the machine the target
+/// names, and it can only reach that comparison when the two agree about the
+/// container: a Windows host plants a PE, and a Linux `want` made the gate
+/// answer "this is not an ELF" long before it looked at a machine field.
+///
+/// So the operating system follows the host and only the architecture is
+/// flipped — the one field the running binary can never disagree with the host
+/// on. See `tests/regressions/e11_a_stub_search_target_was_the_host_on_one_machine.rs`.
 fn other_arch_target() -> Target {
-    let arch = if Target::host().arch == Arch::X86_64 {
-        Arch::Aarch64
-    } else {
-        Arch::X86_64
-    };
-    Target::new(ginary::target::Os::Linux, arch, ginary::target::Libc::Gnu)
+    stubfile::same_format_other_arch(Target::host())
 }
 
-/// The target the search snapshot is written for.
+/// A Windows target, for the claims that are about the `.exe` suffix.
 ///
-/// Windows rather than a Linux target, for two reasons: it is not the host on
-/// any machine this suite runs on, so the self-executable source never appears
-/// and the snapshot is the same everywhere, and its `.exe` suffix is part of
-/// every name the search builds.
+/// Only that: this is no longer "a target that is not the host", because a
+/// Windows runner is now one of the machines this suite runs on. A search that
+/// must find nothing asks [`unfindable_target`] instead.
 fn windows() -> Target {
     "windows-x86_64".parse().expect("a target name")
+}
+
+/// A target no file on this machine can answer for.
+///
+/// The search's four sources end with the running executable, so a test that
+/// wants an empty search needs a target the running executable is not for. It
+/// was written down as `windows-x86_64`, which on a Windows runner is exactly
+/// what the running executable *is*, and the search that was supposed to find
+/// nothing found itself:
+///
+/// ```text
+/// ---- nothing_found_names_every_path_that_was_searched ----
+/// the directories are empty:
+///   ("D:\\a\\ginary\\ginary\\target\\debug\\deps\\stub-7dd5c00ea0f19c37.exe", SelfExe)
+/// ```
+///
+/// Derived from the host, by the architecture, for the reason
+/// [`other_arch_target`] gives.
+fn unfindable_target() -> Target {
+    stubfile::foreign_target_for(Target::host())
 }
 
 /// The identity a stub of this ginary for `target` reports.
@@ -321,8 +343,9 @@ fn a_windows_stub_is_looked_for_with_its_exe_suffix() {
 #[test]
 fn nothing_found_names_every_path_that_was_searched() {
     let search = Search::new();
+    let wanted = unfindable_target();
 
-    let error = stub::locate(&windows(), &search.opts()).expect_err("the directories are empty");
+    let error = stub::locate(&wanted, &search.opts()).expect_err("the directories are empty");
 
     let StubError::NotFound {
         target,
@@ -332,15 +355,40 @@ fn nothing_found_names_every_path_that_was_searched() {
     else {
         panic!("expected StubError::NotFound, got {error:?}");
     };
-    assert_eq!(*target, windows());
+    assert_eq!(*target, wanted);
     assert_eq!(version, VERSION);
     assert_eq!(searched.len(), 3, "{searched:?}");
+    // The suffix the snapshot below no longer shows, asserted here instead:
+    // the target is derived from the host now, so its name — and with it
+    // whether an `.exe` belongs on the end — is different on each machine,
+    // and a snapshot that held one host's spelling would be a snapshot only
+    // one host could produce.
+    for path in searched {
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("a searched path names a file");
+        assert!(
+            name.ends_with(&format!("{wanted}{}", wanted.exe_suffix())),
+            "every name the search builds ends in the target and its suffix: {name}"
+        );
+    }
 
     let rendered = scrub(
         &error.to_string(),
         &[
             (&search.env_dir, "<env>"),
             (&search.cache_dir, "<cache>"),
+            // The name with the suffix first and the bare name second, so
+            // that both the file names and the sentence's own mention of the
+            // target read the same on every host. `scrub` applies the longer
+            // needle first, and on a host with no suffix the two are one
+            // needle applied twice.
+            (
+                Path::new(&format!("{wanted}{}", wanted.exe_suffix())),
+                "<target>",
+            ),
+            (Path::new(&wanted.to_string()), "<target>"),
             (Path::new(VERSION), "<ver>"),
         ],
     );

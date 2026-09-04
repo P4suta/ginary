@@ -90,6 +90,16 @@ pub enum ShimStep {
     ReplaceBeamArguments,
     /// Write `<program>.stderr`, then a newline, to standard error.
     PrintStderrFile,
+    /// Stay alive for this many milliseconds, doing nothing.
+    ///
+    /// The step a test needs when the *subject* is a live process rather than
+    /// what a program prints. `tests/cache.rs` proves that a sweep keeps the
+    /// temporary tree of a process that is still running, and reached for
+    /// `/bin/sh -c 'sleep 30'` to get one; Windows has no `/bin/sh` and the
+    /// test failed at `spawn a live process` with `os error 3`. A planted
+    /// program is the form that exists on both platforms, so the wait belongs
+    /// in its step list.
+    Sleep(u64),
     /// Stop, with this status. A program with no such step exits `0`.
     Exit(i32),
 }
@@ -156,6 +166,25 @@ pub fn program(dir: &Path, name: &str, steps: &[ShimStep]) -> PathBuf {
 
 /// Writes `steps` as a `/bin/sh` script and marks it executable.
 fn write_shell_script(path: &Path, steps: &[ShimStep]) {
+    let body = shell_script_body(steps);
+    std::fs::write(path, body)
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    }
+}
+
+/// `steps` as the text of a `/bin/sh` script, the [`ShimForm::ShellScript`]
+/// rendering.
+///
+/// Public so that a test can assert the two renderings cover the same closed
+/// set: a step that exists in one and not the other is a fixture that behaves
+/// differently on two platforms, which is exactly the class of defect this
+/// module was created to remove.
+pub fn shell_script_body(steps: &[ShimStep]) -> String {
     let mut body = format!("#!/bin/sh\ncase \"$1\" in {EXEC_PROBE}) exit 0;; esac\n");
     for step in steps {
         match step {
@@ -176,22 +205,40 @@ fn write_shell_script(path: &Path, steps: &[ShimStep]) {
             ShimStep::PrintStderrFile => {
                 body.push_str("cat \"$0.stderr\" >&2\nprintf '\\n' >&2\n");
             }
+            // `sleep` takes whole seconds and nothing finer, so a fraction is
+            // rounded *up*: the step says how long the program must still be
+            // alive for, and a rendering that waited less would be one the
+            // test racing it could lose.
+            ShimStep::Sleep(milliseconds) => {
+                body.push_str(&format!("sleep {}\n", milliseconds.div_ceil(1000)));
+            }
             ShimStep::Exit(status) => body.push_str(&format!("exit {status}\n")),
         }
     }
     body.push_str("exit 0\n");
-    std::fs::write(path, body)
-        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
-    }
+    body
 }
 
 /// Copies the compiled shim onto `path` and writes `steps` beside it.
 fn write_compiled_program(path: &Path, steps: &[ShimStep]) {
+    let sidecar = shim_sidecar(path, "steps");
+    std::fs::write(&sidecar, compiled_steps_text(steps))
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", sidecar.display()));
+    let shim = compiled_shim();
+    std::fs::copy(&shim, path).unwrap_or_else(|error| {
+        panic!(
+            "cannot copy {} onto {}: {error}",
+            shim.display(),
+            path.display()
+        )
+    });
+}
+
+/// `steps` as the `<program>.steps` sidecar `examples/ginary_test_shim.rs`
+/// reads, the [`ShimForm::CompiledProgram`] rendering.
+///
+/// Public for the reason [`shell_script_body`] is.
+pub fn compiled_steps_text(steps: &[ShimStep]) -> String {
     let mut text = String::new();
     for step in steps {
         match step {
@@ -203,20 +250,13 @@ fn write_compiled_program(path: &Path, steps: &[ShimStep]) {
             }
             ShimStep::ReplaceBeamArguments => text.push_str("replace-beam-arguments\n"),
             ShimStep::PrintStderrFile => text.push_str("print-stderr-file\n"),
+            ShimStep::Sleep(milliseconds) => {
+                text.push_str(&format!("sleep {milliseconds}\n"));
+            }
             ShimStep::Exit(status) => text.push_str(&format!("exit {status}\n")),
         }
     }
-    let sidecar = shim_sidecar(path, "steps");
-    std::fs::write(&sidecar, text)
-        .unwrap_or_else(|error| panic!("cannot write {}: {error}", sidecar.display()));
-    let shim = compiled_shim();
-    std::fs::copy(&shim, path).unwrap_or_else(|error| {
-        panic!(
-            "cannot copy {} onto {}: {error}",
-            shim.display(),
-            path.display()
-        )
-    });
+    text
 }
 
 /// `text` as one `/bin/sh` word, safe to interpolate whatever it holds.
@@ -259,4 +299,66 @@ fn wait_until_executable(path: &Path) {
         }
     }
     panic!("{} is still not executable", path.display());
+}
+
+/// Where a program called `name`, planted in `dir`, records its argument
+/// vector on `os`.
+///
+/// The composition of [`shim_file_name`] and [`shim_sidecar`], and the rule
+/// three `tests/cli.rs` expectations were written without. `erl_argv` there
+/// reads `<otp>/bin/erl.argv` by name; the planted program on Windows is
+/// `erl.exe`, so its log is `erl.exe.argv`, the read answered `NotFound`, and
+/// the tests reported that stripping had never started:
+///
+/// ```text
+/// ---- stage_strips_by_default_and_prints_the_strip_table stdout ----
+/// stripping is on by default, so the runtime was started
+///
+/// ---- stage_runs_the_otp_roots_own_erl_with_the_beam_lib_one_liner stdout ----
+///   left: []
+///  right: ["-noshell", "-env", "ERL_CRASH_DUMP", ...]
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// `FakeOtpRoot::erl_argv` already composes the two correctly; this is the
+/// same composition for a caller that holds a directory rather than a
+/// builder, so there is one rule rather than two spellings of it.
+pub fn argv_log_path(dir: &Path, name: &str, os: Os) -> PathBuf {
+    shim_sidecar(&dir.join(shim_file_name(name, os)), "argv")
+}
+
+/// The argument vector a program called `name` in `dir` recorded, or an empty
+/// vector when it never ran.
+///
+/// # Panics
+///
+/// If the log exists and cannot be read.
+pub fn recorded_argv(dir: &Path, name: &str) -> Vec<String> {
+    let log = argv_log_path(dir, name, ginary::platform::HOST);
+    match std::fs::read_to_string(&log) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("cannot read {}: {error}", log.display()),
+    }
+}
+
+/// Starts a program in `dir` that stays alive for `milliseconds` and answers
+/// the child.
+///
+/// The platform-neutral replacement for `/bin/sh -c 'sleep 30'`. The caller
+/// owns the child and has to kill and reap it.
+///
+/// # Panics
+///
+/// If the program cannot be planted or started.
+pub fn live_process(dir: &Path, milliseconds: u64) -> std::process::Child {
+    let path = program(dir, "ginary_live", &[ShimStep::Sleep(milliseconds)]);
+    Command::new(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("cannot start {}: {error}", path.display()))
 }
