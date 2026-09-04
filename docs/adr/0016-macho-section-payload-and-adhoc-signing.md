@@ -1,7 +1,17 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
-# 0016 — A Mach-O section carries the payload, ad-hoc signed, not an appended trailer
+# 0016 — The payload grows `__LINKEDIT`, ad-hoc signed; not a new section, not a plain trailer
 
-Status: Accepted · 2026-09-01
+Status: Accepted · 2026-09-01 · amended 2026-09-03 after two Macs ran it
+
+> **Amendment (2026-09-03).** The original decision below — *the payload lives
+> in a new `__GINARY,__payload` section* — was **falsified by the runner** and
+> is superseded by the section "2026-09-03 — the section approach does not run,
+> and what replaced it" at the foot of this file. The Context still holds; the
+> Decision now reads: **the payload is appended inside the stub's existing
+> `__LINKEDIT` segment, which is grown to cover it, no load command is added and
+> no byte of code moves.** The prose from "## Decision" to that closing section
+> is kept as the record of what was tried and why it was wrong, not as current
+> guidance.
 
 ## Context
 
@@ -101,7 +111,7 @@ validation rules, and `docs/dev/log/D3.md` for the crate and API this was implem
   structural: the section lands where `macho.rs` itself says it does, an `LC_CODE_SIGNATURE`
   load command is present exactly when signing was asked for, and `payload::locate` round-trips
   the exact bytes and digest that went in. `docs/dev/log/D3.md` records exactly that split, and
-  CI on a `macos-13`/`macos-14` runner is the GitHub Actions milestone that closes it.
+  CI on a `macos-15-intel`/`macos-14` runner is the GitHub Actions milestone that closes it.
 - A Mach-O object found *inside* a payload (a NIF, a port program) is not required to carry its
   own code signature: only the artifact itself, the one the kernel loads directly, needs one.
   Giving `ginary verify`'s native-object scan the same `cputype`/target awareness for an inner
@@ -109,3 +119,169 @@ validation rules, and `docs/dev/log/D3.md` for the crate and API this was implem
   scoped out of this pass rather than silently skipped — the scan's `DT_NEEDED` allowlist logic
   is Linux-specific throughout, and building its macOS counterpart honestly needs the same kind
   of care this ADR gave the artifact-level signature, not a quick pattern match bolted on.
+
+## 2026-09-03 — what a Mac reported (provisional; sufficiency not yet re-run)
+
+The `macos-14` and `macos-15-intel` runners of
+<https://github.com/P4suta/ginary/actions/runs/33712111530> are the milestone the Consequences
+above named, and they ran this decision for the first time. **The section-plus-ad-hoc-signature
+shape is not in question** — the payload belongs in a `__GINARY,__payload` section and the
+artifact carries an ad-hoc `CodeDirectory`. What is recorded below is *provisional*: no macOS
+runner has yet executed the fixed writer, so the *sufficiency* of the fix — that
+`codesign --verify --strict` accepts the artifact and it runs to `exit 3` — is unverified until
+a runner passes. What the runners falsified was the writer, not the ADR, and two independent
+writer defects were found, one of them only on a later review pass.
+
+Both jobs died at the same line, before `codesign` was reached at all:
+
+```text
+/Users/runner/work/_temp/84fd6172-....sh: line 10:  7695 Killed: 9   "$artifact" 0 hello world
+##[error]Process completed with exit code 137.
+```
+
+`Killed: 9` before a program prints anything is the kernel refusing to map a page whose SHA-256
+does not match the slot the `CodeDirectory` holds for it — and an *invalid* signature turns out
+to be worse than no signature on x86_64 as well as on arm64, which is a fact this ADR's second
+bullet stated only for arm64.
+
+**Defect one — hash ordering.** `Writer::build` hashed the assembled body and *then* wrote
+four more fields into it: `LC_CODE_SIGNATURE`'s `dataoff` and `datasize`, and `__LINKEDIT`'s
+`vmsize` and `filesize`. All four live in the load-command area, which is page 0, so slot 0
+described a page that no longer existed by the time the file was closed. The signature now
+covers the finished file: the section is injected, the signature's own offset and size and
+`__LINKEDIT`'s grown extent are patched in, the signature is aligned to a 16-byte boundary as
+every linker-produced one is, and only then are the pages hashed. This is proven on Linux by
+`tests/regressions/e8_the_ad_hoc_signature_did_not_cover_the_finished_file.rs` and
+`tests/sign_macos.rs`, which parse the superblob field by field and recompute every page hash
+without going through `src/sign_macos.rs`.
+
+**Defect two — segment page alignment (found on the Fix round 1 review, not by the runner).**
+The `Killed: 9` above does not, on its own, isolate the ordering defect as the *only* cause: a
+misaligned load map is an independent reason the same binary cannot be mapped, and the writer
+had one. The new `__GINARY` segment was inserted by shifting every following byte forward by the
+raw load-command growth (152 bytes), which is not a multiple of a page, so on arm64 every
+segment after `__TEXT` lost `0x4000` alignment and `round_page(__TEXT.vmsize)` swallowed
+`__DATA_CONST` and `__DATA`. `Writer::plan` now rounds the shift up to a whole page and pads the
+load-command area to match, and emits `__GINARY` before `__LINKEDIT` so segments stay in
+increasing `vmaddr` order; this too is pure arithmetic and is pinned on Linux by
+`tests/regressions/e8_the_injected_segment_broke_page_alignment.rs`. Whether these two together
+are *sufficient* — whether the artifact now maps, runs, and passes `codesign --verify --strict`
+— is the open question a macOS runner has still to answer. `docs/dev/log/E8.md` records both
+defects and the run.
+
+## 2026-09-03 — the section approach does not run, and what replaced it
+
+The `macos-14` and `macos-15-intel` runners of
+<https://github.com/P4suta/ginary/actions/runs/33724862229> answered that open question, and the
+answer is that **the section approach is wrong at the root, not in its details.** The E8 writer
+produced a Mach-O whose ad-hoc signature is genuinely valid — `codesign --verify --strict
+--verbose=4` now exits `0`, `valid on disk` and `satisfies its Designated Requirement` both
+print — and which then **segfaults on exec** (`Segmentation fault: 11`, exit `139`) before it
+runs a single useful instruction. A valid signature over a structurally broken image is exactly
+what a section-plus-shift writer produces, and no further round of shifting fixes it.
+
+The cause is structural and unavoidable for a *new section*. A section needs a new
+`LC_SEGMENT_64` load command, and a linker leaves almost no room in the load-command area — the
+committed arm64 fixture has forty spare bytes before its first section and a segment-with-section
+command is a hundred and fifty-two. So the command cannot be added without sliding every byte of
+code and data that follows it forward by a page. That slide is fatal twice over:
+
+- **The entry point.** `LC_MAIN`'s `entryoff` is a file offset into `__TEXT`. Move `__TEXT`'s
+  contents and leave `entryoff` alone and the kernel jumps into the load commands; move both and
+  you are relocating a linked image by hand.
+- **Every rebase.** `LC_DYLD_CHAINED_FIXUPS` encodes each rebase target as an offset from the
+  image base. Slide the segment a target points into and the stored offset is stale: dyld writes
+  a pointer to where the datum *used to be*. The signature covers the moved bytes faithfully —
+  it just describes an image dyld can no longer fix up. This is why `codesign --verify` passes
+  and the process still dies.
+
+The "widen an existing segment" alternative this ADR rejected in 2026-09-01 as "more invasive
+for no benefit" turns out to be the *only* shape that runs, and the benefit is decisive: it adds
+no load command, so nothing slides, so the entry point and every fixup keep the offsets the
+linker gave them.
+
+**Amended decision.** `sign_macos.rs` appends the payload — the packed bytes followed by the
+64-byte trailer — immediately after `__LINKEDIT`'s existing content, grows `__LINKEDIT`'s
+`filesize` and `vmsize` so the segment still ends the file, reuses the `LC_CODE_SIGNATURE`
+command the linker already left (repointing its `dataoff`/`datasize`; **no** load command is
+added or removed for a signed build), and computes a fresh ad-hoc `CodeDirectory` over the
+finished bytes. This is precisely how `codesign(1)` itself embeds a signature: as more bytes at
+the tail of `__LINKEDIT`, covered by the hashes, described by no section. The entry point, every
+segment's `fileoff`/`vmaddr`, and every fixup are byte-for-byte what the stub carried.
+
+`payload::locate` finds the payload by reading `LC_CODE_SIGNATURE`'s `dataoff` and parsing the
+trailer at `dataoff - 64` (`PayloadVia::MachOAppended`); an unsigned build — only the tests ask
+for one — has no signature after the payload, so its trailer is the last 64 bytes of the file and
+the ordinary end-of-file reader finds it. The `__GINARY,__payload` section an earlier ginary
+wrote is still *read* (`macho::section`, `PayloadVia::MachOSection`) so an artifact built by an
+older build still opens, but it is no longer *written*.
+
+What a Linux host can prove about this is structural and is proven, in `tests/sign_macos.rs`: the
+finished artifact's mapped entry holds the stub's own first instructions (an image that jumps
+into its load commands is the segfault above), the `CodeDirectory` carries `CS_ADHOC` and **not**
+`CS_LINKER_SIGNED` (ginary rewrote this binary; it did not come from a linker), the payload lies
+inside what the hashes cover, and `__LINKEDIT` ends the file. That the artifact now also *runs*
+and passes `codesign --verify --strict` is what the macOS runners confirm, with the load-command
+diff the job prints beside the run as the standing evidence. `docs/dev/log/E9.md` records the run
+and the fix.
+
+## 2026-09-03 — an x86_64 stub has no `LC_CODE_SIGNATURE` to reuse, so one is added
+
+The amendment above is right about the layout and incomplete about one input. It says the writer
+"reuses the `LC_CODE_SIGNATURE` command the linker already left", and on arm64 there always is
+one: the platform linker ad-hoc signs every arm64 Mach-O it produces. On x86_64 it does not, and
+`macos-15-intel` of <https://github.com/P4suta/ginary/actions/runs/33739517757> failed at the
+packaging step with the honest refusal the writer emits in that case:
+
+```text
+error: cannot write the macOS payload section
+  caused by: cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse;
+             its load-command area cannot grow without relocating code
+```
+
+The arm64 job passed on the same code and the same day. The difference is entirely what the
+platform linker left behind.
+
+**Amended decision, second amendment.** The signed path now has two branches, and the report
+`InjectReport::code_signature` says which one a given artifact took, because they are not
+interchangeable:
+
+- **`Reused`** — the stub carries an `LC_CODE_SIGNATURE`. Its `dataoff`/`datasize` are repointed
+  at the fresh signature; no load command is added or removed. Unchanged from the first
+  amendment, and the branch every arm64 stub takes.
+- **`Added`** — the stub carries **no `LC_CODE_SIGNATURE`**. A `linkedit_data_command` is
+  appended to the load commands: `cmd`, `cmdsize`, `dataoff`, `datasize`, **16 bytes** in total.
+  `ncmds` grows by one and `sizeofcmds` by sixteen.
+
+The second branch is safe for exactly the reason the section approach was not, and the numbers
+are the ones this ADR already recorded. A segment-plus-section command is 152 bytes and the
+committed arm64 fixture has 40 spare before its first section, so a section could not be added
+without sliding the image. A signature command is 16, and 16 fits in 40. The bytes it is written
+into lie between the end of the load commands and the first section's file offset: they belong to
+no load command and no section, so the command area grows into spare room and **not one file
+offset in the image changes**. `LC_MAIN`'s `entryoff`, every segment's `fileoff` and `vmaddr`, and
+every `LC_DYLD_CHAINED_FIXUPS` target are byte-for-byte what the stub carried — which is the
+property the segfault of the section approach taught us to check, and which
+`nothing_before_linkedit_moves_when_a_code_signature_is_added` checks over the whole prefix.
+
+The slack is measured rather than assumed. `sign_macos::load_command_slack` reports
+`commands_end` (`32 + sizeofcmds`), `first_content_offset` (the lowest non-zero section file
+offset in the image) and `free` (the difference), so a stub whose layout is unknown is asked
+instead of trusted. A stub with less free space than a command needs is still refused, now with
+both numbers in the message:
+
+```text
+cannot ad-hoc sign a Mach-O with no LC_CODE_SIGNATURE to reuse: adding one needs 16 bytes of
+load command and only 8 are free before the first section, and the load-command area cannot
+grow without relocating code
+```
+
+Both branches are tested on Linux, and neither rests on a fabricated file alone. The reuse branch
+is exercised against the committed arm64 fixture, which arrives with the command its linker left.
+The add branch is exercised against that same real image with the command taken away again —
+`ncmds`/`sizeofcmds` reduced, the sixteen bytes it occupied returned to slack, `__LINKEDIT` shrunk
+and the file truncated at `dataoff`, which is what a linker that never signed its output would
+have left — and against a hand-built `CPU_TYPE_X86_64` stub, so the claim does not rest on one
+file. No arm64 binary is restamped as an x86_64 one: the branch is selected by the *absence of the
+command*, not by the architecture, and a fixture that claimed a `cputype` it does not have would
+be evidence of nothing. `docs/dev/log/E10.md` records the run and the fix.

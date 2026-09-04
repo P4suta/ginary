@@ -24,9 +24,11 @@
 //! people built.
 //!
 //! It also carries the one thing the synthetic tree deliberately has not got:
-//! a real ELF. [`NATIVE_PATH`] is this test run's own binary, copied in under
-//! an application's `priv`, so the object table is built from a file a linker
-//! wrote rather than from one a test made up.
+//! a real ELF. [`NATIVE_PATH`] is the committed `x86_64` Linux ELF fixture,
+//! copied in under an application's `priv`, so the object table is built from a
+//! file a linker wrote rather than from one a test made up — and from a genuine
+//! ELF whatever host runs the test, which the test run's own binary is not
+//! (a PE on Windows, a Mach-O on macOS). See `tests/fixtures/elf/README.md`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -437,26 +439,73 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn write_executable(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt as _;
     let temporary = path.with_extension("writing");
     std::fs::write(&temporary, bytes)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", temporary.display()));
-    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", temporary.display()));
+    // Only the chmod is unix; the write and the rename are the same everywhere.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", temporary.display()));
+    }
     std::fs::rename(&temporary, path)
         .unwrap_or_else(|error| panic!("cannot rename onto {}: {error}", path.display()));
 }
 
 // ------------------------------------------------------- the real ELF --
 
-/// This test run's own binary, which is a real ELF a linker wrote.
+/// The committed real ELF fixture a linker wrote: a genuine `x86_64` Linux
+/// object whatever host reads it.
+///
+/// This used to be *this test run's own binary* (`current_exe()`), which is a
+/// real ELF only when the host is Linux — on Windows it is a PE and on macOS a
+/// Mach-O, so `elf::inspect_bytes` refused it and every "plant a real ELF"
+/// test saw an empty object table. The fixture's machine comes from the file,
+/// not from the host, so these tests read the same object on every runner. See
+/// `tests/fixtures/elf/README.md` and `docs/dev/log/E9.md`.
+pub fn test_binary() -> Vec<u8> {
+    // Read straight from disk rather than through `common::native`, which is
+    // gated behind the `cli` feature (it leans on `ginary::elf`): `repack` is
+    // also compiled into the `--no-default-features` launcher-side test
+    // binaries, and this helper has to build there too.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/elf/inet_gethost-x86_64-linux-gnu");
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("cannot read the ELF fixture {}: {error}", path.display()))
+}
+
+/// The architecture [`test_binary`] is built for, read from the file's own
+/// `e_machine` rather than assumed from the host.
+///
+/// Reads the two `e_machine` bytes directly rather than through
+/// `ginary::elf`, for the same `--no-default-features` reason [`test_binary`]
+/// reads the file directly.
 ///
 /// # Panics
 ///
-/// If the running executable cannot be read.
-pub fn test_binary() -> Vec<u8> {
-    let path = std::env::current_exe().expect("the running test binary has a path");
-    std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+/// If the fixture is too short to be an ELF header.
+pub fn native_arch() -> Arch {
+    let bytes = test_binary();
+    assert!(
+        bytes.len() > E_MACHINE_OFFSET + 1,
+        "the ELF fixture is longer than its header"
+    );
+    let machine = u16::from_le_bytes([bytes[E_MACHINE_OFFSET], bytes[E_MACHINE_OFFSET + 1]]);
+    match machine {
+        EM_AARCH64 => Arch::Aarch64,
+        _ => Arch::X86_64,
+    }
+}
+
+/// The machine string [`test_binary`] carries, e.g. `x86_64`.
+pub fn native_machine() -> String {
+    native_arch().as_str().to_owned()
+}
+
+/// A Linux target for [`test_binary`]'s own architecture.
+pub fn native_target() -> Target {
+    Target::new(Os::Linux, native_arch(), Libc::Gnu)
 }
 
 /// Staging options that put a real ELF at [`NATIVE_PATH`].
@@ -492,17 +541,19 @@ pub fn patch_elf_machine(bytes: &[u8], machine: u16) -> Vec<u8> {
     patched
 }
 
-/// The `e_machine` this host is *not*.
+/// The `e_machine` [`test_binary`] is *not* — the machine to rewrite its
+/// header to so it becomes a foreign object, read from the fixture rather than
+/// assumed from the host.
 pub fn foreign_machine() -> u16 {
-    match Target::host().arch {
+    match native_arch() {
         Arch::X86_64 => EM_AARCH64,
         Arch::Aarch64 => EM_X86_64,
     }
 }
 
-/// A Linux target for the architecture this host is not.
+/// A Linux target for the architecture [`test_binary`] is not.
 pub fn foreign_target() -> Target {
-    let arch = match Target::host().arch {
+    let arch = match native_arch() {
         Arch::X86_64 => Arch::Aarch64,
         Arch::Aarch64 => Arch::X86_64,
     };

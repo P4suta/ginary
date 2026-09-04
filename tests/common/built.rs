@@ -19,10 +19,13 @@
 //! tests exist to catch, and an unbounded wait reports either one as a stalled
 //! job with no diagnosis.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
+
+use ginary::cache;
+use ginary::target::Os;
 
 use crate::common::bounded::run_bounded;
 use crate::common::fixture::FixtureProject;
@@ -174,6 +177,123 @@ impl BuiltProject {
     }
 }
 
+/// The variables that pin a built artifact's cache root inside `home` on
+/// `os`, so that one test run's cache is nobody else's.
+///
+/// The rule five `tests/e2e_hello.rs` failures turned on. [`ArtifactRun`]
+/// clears the environment and then sets `HOME` and `XDG_CACHE_HOME` — the two
+/// unix conventions — so on Windows nothing was set that
+/// `ginary::cache::resolve_windows` reads, every run fell through to
+/// `%TEMP%\ginary-<user>` with no `%TEMP%` and no `%USERNAME%` either, and
+/// every run of every test in the binary shared one directory:
+///
+/// ```text
+/// ginary: the runtime cache at \\?\C:\Windows\Temp\ginary-unknown\hello_ffi\
+///   .4459c55fbab39b91.tmp-2352\lib\kernel-11.0.3\ebin\heart.beam is unusable:
+///   The system cannot find the file specified. (os error 2)
+///
+/// the printed entry must be under this run's own cache:
+///   \\?\C:\Windows\Temp\ginary-unknown\hello_ffi\5e6351992db98538
+///
+/// a warm run must not write a second entry
+///   left: 0
+///  right: 1
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// Two concurrent runs extracting the same key into one shared entry is what
+/// produced the missing `.beam` files and the `os error 2 while canonicalizing`
+/// the tar reader reported: one run's sweep of the leftovers removed the other
+/// run's half-finished tree.
+///
+/// `GINARY_CACHE_DIR` is deliberately not the answer. It is the override, and
+/// a run that used it would prove that the override works rather than that the
+/// platform's own rule lands inside this run's `home`, which is what these
+/// tests are for. So the pairs are the platform's ordinary ones, and
+/// [`isolated_cache_root`] checks that they are read as such.
+pub fn isolating_cache_env(os: Os, home: &Path) -> Vec<(&'static str, PathBuf)> {
+    match os {
+        Os::Linux | Os::Macos => vec![
+            (cache::HOME_VAR, home.to_path_buf()),
+            (cache::XDG_CACHE_HOME_VAR, home.to_path_buf()),
+        ],
+        // `%LOCALAPPDATA%` is what `cache::resolve_windows` reads, and
+        // `%USERNAME%` is set beside it so that the *fallback* would also be
+        // this run's own rather than the machine's shared
+        // `%TEMP%\ginary-unknown` — which is the directory every run of every
+        // test in the binary was sharing. The name is the run's own directory,
+        // so two runs never collide even if the fallback is ever reached.
+        Os::Windows => vec![
+            (cache::LOCALAPPDATA_VAR, home.to_path_buf()),
+            (cache::USERNAME_VAR, PathBuf::from(run_user_name(home))),
+        ],
+    }
+}
+
+/// A user name unique to the run that owns `home`.
+///
+/// `home` is a fresh temporary directory per run, so its own file name is
+/// already unique; anything a separator could hide in is replaced, because
+/// `cache::current_user` refuses a name holding one and would fall back to the
+/// shared `unknown`.
+fn run_user_name(home: &Path) -> String {
+    let name = home.file_name().map_or_else(
+        || String::from("run"),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        String::from("run")
+    } else {
+        cleaned
+    }
+}
+
+/// The cache root [`isolating_cache_env`]'s pairs resolve to on `os`.
+///
+/// Derived by running `ginary::cache`'s own resolver over those pairs rather
+/// than by rebuilding the layout here, so the helper cannot claim an isolation
+/// the product does not perform. A root the resolver calls a *fallback* is one
+/// the pairs failed to pin, and that is a panic rather than a silent share.
+///
+/// # Panics
+///
+/// If the pairs do not pin a root, or pin one outside `home`.
+pub fn isolated_cache_root(os: Os, home: &Path) -> PathBuf {
+    let env = cache::Env::from_pairs(
+        isolating_cache_env(os, home)
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+    );
+    let dirs = match os {
+        Os::Windows => cache::resolve_windows(&env, "tester"),
+        Os::Linux | Os::Macos => cache::resolve(&env, 0),
+    };
+    assert!(
+        !dirs.is_fallback,
+        "the variables for {os:?} did not pin a cache root; {:?} is the fallback",
+        dirs.origin
+    );
+    assert!(
+        dirs.root.starts_with(home),
+        "a run's cache has to live under the directory the run owns: {} is not under {}",
+        dirs.root.display(),
+        home.display()
+    );
+    dirs.root
+}
+
 /// A pending run of a built artifact.
 #[derive(Debug)]
 pub struct ArtifactRun {
@@ -251,8 +371,11 @@ impl ArtifactRun {
     }
 
     /// `<cache>/<app>`, the application directory under this run's cache.
+    ///
+    /// The layout the *platform's* resolver produces, not the unix one:
+    /// see [`isolating_cache_env`].
     pub fn app_dir(&self, app: &str) -> PathBuf {
-        self.home.join("ginary").join(app)
+        isolated_cache_root(ginary::platform::HOST, &self.home).join(app)
     }
 
     /// Runs it to completion.
@@ -265,11 +388,12 @@ impl ArtifactRun {
         let mut command = Command::new(&self.program);
         command
             .env_clear()
-            .env("HOME", &self.home)
             .env("PATH", &self.empty_path)
-            .env("XDG_CACHE_HOME", &self.home)
             .current_dir(&self.cwd)
             .args(&self.args);
+        for (key, value) in isolating_cache_env(ginary::platform::HOST, &self.home) {
+            command.env(key, value);
+        }
         super::coverage::preserve_coverage_env(&mut command);
         for (key, value) in &self.env {
             command.env(key, value);

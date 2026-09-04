@@ -60,9 +60,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
       - name: Build the full binary and the stub
         env:
           CARGO_TARGET_DIR: target/cross
@@ -98,7 +98,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          # macos-15-intel, not the withdrawn macos-13: a label GitHub no longer
+          # schedules leaves the job queued for ever and the release run with
+          # it. See tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
+          - runner: macos-15-intel
             target: macos-x86_64
           - runner: macos-14
             target: macos-aarch64

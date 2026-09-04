@@ -19,6 +19,7 @@ nothing today.
 | `GINARY_PRUNE_DAYS=<n>` | implemented | How many days an unused cache entry of the running application may live before the next launch prunes it. Defaults to 14; `0` turns pruning off for that run. A value that is not a count of days falls back to the default rather than failing a launch: a misspelt housekeeping preference must not stop an application from starting. |
 | `GINARY_OFFLINE=1` | planned | The builder refuses to reach the network and lists what it would have fetched. |
 | `GINARY_REQUIRE_TOOLCHAIN=1` | implemented (convention) | Turns a skipped toolchain-gated test into a failure. See [testing.md](testing.md). |
+| `GINARY_REQUIRE_STUBS=1` | implemented (convention) | Turns a *missing cross-built stub* into a failure rather than a skip. Deliberately not the same switch as `GINARY_REQUIRE_TOOLCHAIN`: that one is a claim about programs the machine installs, and a stub is the output of `mise run stubs:build`, which needs `cross`, a docker daemon and minutes per target. Only a job that obtains them — by cross-building them, or by downloading what the job that did uploaded — sets it. See [testing.md](testing.md). |
 
 The launcher **removes** `ERL_LIBS`, `ERL_FLAGS`, `ERL_AFLAGS`, `ERL_ZFLAGS`, `ERL_ROOTDIR`,
 `ERL_EPMD_PORT` and every variable whose name begins `ERL_OTP` and ends `_FLAGS` before starting
@@ -165,12 +166,20 @@ instead, and the two locks become two share modes:
 
 Two launchers of one entry both succeed — each asks for read access and each permits it — and a
 prune is refused for as long as either holds it. The prune's `FILE_SHARE_DELETE` shares no
-reading and no writing, so that answer is unchanged; what it permits is the prune's own next
-step. It renames the entry directory while still holding `<entry>\.lock` inside it, and Windows
-refuses to rename a directory whose open handles do not permit deletion — without the bit every
-prunable entry would be reported unremovable and `ginary cache prune` would remove nothing. The
-lock is not dropped before the rename instead, because that would reopen the window between
-"nobody holds this" and "it is gone" that the lock exists to close.
+reading and no writing, so that answer is unchanged; what it permits is the removal that
+follows, which deletes `<entry>\.lock` along with the tree it is in.
+
+What it does **not** permit is renaming the entry directory while the lock is still open inside
+it. `FILE_SHARE_DELETE` speaks for the file it is on, not for an ancestor directory, and the
+first Windows runner reported every complete entry `unremovable` because of it. So the two
+happen in that order rather than at once: the lock proves nobody is using the entry, it is
+released, and then the rename makes the claim. That leaves a window between "nobody holds this"
+and "it is gone", and it is the price of being able to prune on Windows at all — an entry
+another process grabs in that window is one whose rename fails, and a failed rename is reported
+`unremovable` rather than forced. On unix nothing is given up: `rename(2)` asks nothing about
+open descriptors, so the lock is held across the rename and no window opens.
+`ginary::platform::rename_refuses_open_children` is the rule that separates the two, and
+`docs/dev/log/E8.md` records the run that found it.
 
 Three differences from the unix side are worth knowing when a Windows entry will not go away:
 

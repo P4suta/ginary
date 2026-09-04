@@ -19,27 +19,40 @@
 //! pipeline (write a `.tmp` and rename, or otherwise keep the read and the
 //! write off the same name).
 
-use crate::common::repo::root;
-use crate::common::tools::require_tools;
+use crate::common::repo::{root, yaml_files_under};
+use crate::common::tools::require_actionlint;
 use std::process::Command;
 
-/// Every workflow actionlint must accept.
-const WORKFLOWS: &[&str] = &[
-    ".github/workflows/ci.yml",
-    ".github/workflows/nightly.yml",
-    ".github/workflows/release.yml",
-    ".github/workflows/distribute.yml",
-];
+/// The fewest workflows this repository has ever had, and the floor a scan
+/// that found none has to fail against.
+///
+/// The list used to be four names written out here, which went stale the
+/// moment E3 added three workflows: the lint the milestone claims to run over
+/// every workflow ran over four of seven. It is read out of the directory
+/// now, and a directory read that answers with nothing is a green run that
+/// linted nothing.
+const FEWEST_WORKFLOWS: usize = 4;
 
 #[test]
 fn actionlint_accepts_every_workflow() {
-    let Some(tools) = require_tools(&["actionlint"]) else {
+    // Gated on `GINARY_REQUIRE_ACTIONLINT` and not on the toolchain flag: the
+    // tool belongs to the job that lints, and demanding it of every job that
+    // has `erl` installed is what failed three CI jobs at once. See
+    // `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+    let Some(actionlint) = require_actionlint() else {
         return;
     };
-    let actionlint = tools.path("actionlint");
 
-    for workflow in WORKFLOWS {
-        let output = Command::new(actionlint)
+    let workflows = yaml_files_under(".github/workflows");
+    assert!(
+        workflows.len() >= FEWEST_WORKFLOWS,
+        "`.github/workflows` holds {} files, which is not this repository: a lint over nothing \
+         passes for the wrong reason",
+        workflows.len()
+    );
+
+    for workflow in &workflows {
+        let output = Command::new(&actionlint)
             .current_dir(root())
             .arg(workflow)
             .output()

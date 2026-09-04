@@ -88,7 +88,25 @@ fn catalog_with_two_variants(dir: &Path) -> PathBuf {
     write_catalog_text(&out, &text)
 }
 
-/// The command inside the backticks of `message`.
+/// The command inside the backticks of `message`, split into the words a
+/// POSIX shell would hand the program.
+///
+/// The split respects the single quotes `ginary::process::shell_quote` puts
+/// round a word that needs them, because the whole point of the remedy is that
+/// it is pasted into a shell — and the test below runs it *without* one, so
+/// the splitting a shell would do has to be done here. Splitting on
+/// whitespace alone worked only where the path happened to need no quoting;
+/// on a Windows runner the catalogue path holds backslashes, so it was
+/// quoted, and the quotes travelled into the argument:
+///
+/// ```text
+/// error: cannot use 'C:\Users\...\dist/otp\catalog.json': The filename,
+///   directory name, or volume label syntax is incorrect. (os error 123)
+/// ```
+///
+/// `shell_quote` emits exactly one construction — a word wrapped in single
+/// quotes, with an embedded quote written `'\''` — so that is the whole of
+/// what is undone here.
 fn suggested_command(message: &str) -> Vec<String> {
     let (_, rest) = message
         .split_once("run `")
@@ -96,7 +114,41 @@ fn suggested_command(message: &str) -> Vec<String> {
     let (command, _) = rest
         .split_once('`')
         .unwrap_or_else(|| panic!("the command is closed: {message}"));
-    command.split_whitespace().map(str::to_owned).collect()
+    shell_words(command)
+}
+
+/// `line` split the way `/bin/sh` splits a command line of quoted words.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    for character in line.chars() {
+        match character {
+            '\'' => {
+                quoted = !quoted;
+                started = true;
+            }
+            character if character.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            character => {
+                word.push(character);
+                started = true;
+            }
+        }
+    }
+    assert!(
+        !quoted,
+        "the command line closes every quote it opens: {line}"
+    );
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 #[test]

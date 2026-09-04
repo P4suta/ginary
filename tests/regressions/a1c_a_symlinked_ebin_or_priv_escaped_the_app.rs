@@ -17,6 +17,10 @@
 //! **The correct behaviour.** Both are `AssembleError::UnsafeSymlink` naming
 //! the link, and nothing outside the application reaches the staged tree.
 
+// A unix file: every input is a symlink, and the fixture plants each one
+// with `std::os::unix::fs::symlink`.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use ginary::assemble::{self, AssembleError, StageOptions};
@@ -102,7 +106,6 @@ fn walk(root: &Path) -> Vec<String> {
     found
 }
 
-#[cfg(unix)]
 #[test]
 fn a_priv_that_is_a_symlink_out_of_the_application_is_refused() {
     let trees = Trees::new();
@@ -129,7 +132,6 @@ fn a_priv_that_is_a_symlink_out_of_the_application_is_refused() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn an_ebin_that_is_a_symlink_out_of_the_application_is_refused() {
     let trees = Trees::new();

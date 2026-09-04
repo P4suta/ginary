@@ -20,6 +20,7 @@ use ginary::cache::{self, PruneOptions};
 use ginary::diag::Diag;
 
 use crate::common::cachefs::{DAY, plant_entry};
+use crate::common::hostpath::nested_json_escaped;
 use crate::common::payload::SharedSink;
 
 /// The stale entry, which pruning is for.
@@ -27,6 +28,11 @@ const OLD: &str = "0000000000000000";
 
 /// The one beside it that nobody has finished with.
 const FRESH: &str = "1111111111111111";
+
+/// How many JSON documents a path in a `prune` record is written into: the
+/// array `ginary::launch::json_array` renders, and the record `Diag::kv`
+/// renders around it.
+const RECORD_DEPTH: usize = 2;
 
 #[test]
 fn the_prune_record_names_the_entry_that_vanished() {
@@ -54,12 +60,26 @@ fn the_prune_record_names_the_entry_that_vanished() {
         .lines()
         .find(|line| line.contains("\"phase\":\"prune\""))
         .unwrap_or_else(|| panic!("no prune record in the trace:\n{trace}"));
+    // `nested_json_escaped` and not the raw path: the record is a JSON
+    // document and the value looked at is itself a JSON document, so a
+    // backslash in a path is escaped once on the way into the array
+    // `cache::record_prune` renders and once on the way into the record
+    // `Diag::kv` renders around it — four characters by the time it is on the
+    // line. Looking for the raw spelling found nothing, and looking for one
+    // level of escaping found nothing either. See
+    // `tests/regressions/e12_a_nested_json_trace_path_was_escaped_once_and_written_twice.rs`.
     assert!(
-        record.contains(&old.display().to_string()),
+        record.contains(&nested_json_escaped(
+            &old.display().to_string(),
+            RECORD_DEPTH
+        )),
         "the record must name the entry that vanished, and it is:\n{record}"
     );
     assert!(
-        record.contains(&fresh.display().to_string()),
+        record.contains(&nested_json_escaped(
+            &fresh.display().to_string(),
+            RECORD_DEPTH
+        )),
         "and the one it left, so that a trace explains a cache rather than counting it:\n{record}"
     );
 }

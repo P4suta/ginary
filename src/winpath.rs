@@ -211,3 +211,33 @@ pub fn plain_path_str(path: &str) -> String {
 
 /// What follows [`LONG_PATH_PREFIX`] in [`UNC_LONG_PATH_PREFIX`].
 const UNC_LONG_PATH_PREFIX_TAIL: &str = r"UNC\";
+
+/// One relative Windows path respelled the way a listing carries it: every
+/// `\` becomes a `/`.
+///
+/// `ginary.stage.json` and `ginary.index.json` are JSON documents read on
+/// every platform, so every path in them is `/`-separated whatever the
+/// machine that wrote it spells paths with — and so is every path a report
+/// quotes back, because a reader matches what a report says against what the
+/// index says. A string built by joining an `OsStr` onto a listing path
+/// carries the platform's own separator into a document that has no room for
+/// it, and the result is the mixed spelling
+/// `lib/crypto-5.9.2\priv\lib\libcrypto_static.a`.
+///
+/// Applied only where a Windows path is being turned back into a listing
+/// path, never to a unix one: `\` is an ordinary character in a unix file
+/// name, and a blanket rewrite would rename a file rather than respell it.
+/// The function itself is available on every platform for the reason
+/// [`long_path_str`] and [`plain_path_str`] are — the rule is Windows path
+/// syntax, so it is a unit test here rather than a claim nobody on this
+/// machine can check.
+///
+/// | input | output |
+/// |---|---|
+/// | `lib\hello\ebin` | `lib/hello/ebin` |
+/// | `lib/crypto-5.9.2\priv\obj` | `lib/crypto-5.9.2/priv/obj` |
+/// | `lib/hello/ebin` | unchanged |
+/// | `` | unchanged |
+pub fn slash_path_str(path: &str) -> String {
+    path.replace(SEPARATOR, "/")
+}

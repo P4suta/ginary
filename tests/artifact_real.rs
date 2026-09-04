@@ -19,6 +19,10 @@
 // module the `cli` feature carries, so a `--no-default-features` build has
 // nothing here to run. See `docs/dev/log/C2.md`.
 #![cfg(feature = "cli")]
+// And a unix file: the artifact is assembled by hand out of this test run's
+// own ELF binary, given mode 0o755 and executed by name. See
+// tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs.
+#![cfg(unix)]
 
 mod common;
 

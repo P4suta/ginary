@@ -27,7 +27,7 @@ use assert_cmd::Command;
 use ginary::target::Target;
 use serde_json::Value;
 
-use crate::common::script::script;
+use crate::common::script::{ShimStep, program};
 
 /// Writes an `erl` that reports a directory that is not an OTP installation,
 /// and returns the `PATH` directory holding it.
@@ -40,10 +40,14 @@ fn stub_erl_on_a_broken_root(dir: &Path) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&root).expect("creates the broken root");
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("creates the stub PATH directory");
-    script(
+    program(
         &bin,
         "erl",
-        &format!("printf '%s\\n29\\n17.0.5\\n' '{}'", root.display()),
+        &[ShimStep::Print(vec![
+            root.display().to_string(),
+            "29".to_owned(),
+            "17.0.5".to_owned(),
+        ])],
     );
     (bin, root)
 }

@@ -13,7 +13,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-use common::payload::{sample_launch, sample_manifest, sha256_hex, staging_tree};
+use common::payload::{recorded_mode, sample_launch, sample_manifest, sha256_hex, staging_tree};
 use ginary::assemble::Category;
 use ginary::manifest::{
     EnvSnapshot, FORMAT_VERSION, INDEX_NAME, Index, IndexError, MANIFEST_NAME, Manifest,
@@ -341,12 +341,20 @@ fn the_index_hashes_every_file_the_listing_names_and_keeps_its_category() {
 
     let boot = &index.files[0];
     assert_eq!(boot.size, 17);
-    assert_eq!(boot.mode, 0o644);
+    assert_eq!(boot.mode, recorded_mode(0o644, false));
     assert_eq!(boot.category, Category::Boot);
     assert_eq!(boot.sha256, sha256_hex(b"boot script bytes"));
 
     let erlexec = &index.files[1];
-    assert_eq!(erlexec.mode, 0o755, "the execute bit is part of the index");
+    // The mode the file actually carries after `set_mode`, which is `0o755`
+    // where the filesystem has permission bits and `platform::modeless_mode`
+    // where it has none. Writing `0o755` down asserted that this platform has
+    // an execute bit, which is not what the index is about.
+    assert_eq!(
+        erlexec.mode,
+        recorded_mode(0o755, false),
+        "the mode the tree carries is the mode the index records"
+    );
     assert_eq!(erlexec.category, Category::ErtsBinary);
     assert_eq!(erlexec.sha256, sha256_hex(b"#!/bin/sh\nexit 0\n"));
 

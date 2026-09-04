@@ -22,7 +22,8 @@ use serde_json::Value;
 
 use crate::common::deps::{Version, rust_version};
 use crate::common::repo::{
-    ToolchainSite, exists, parse_yaml, read, read_opt, read_or_missing, root, rust_toolchain_sites,
+    ToolchainSite, WorkflowStep, exists, parse_yaml, read, read_opt, read_or_missing, root,
+    rust_toolchain_sites, shell_code, shell_scripts_under, workflow_steps,
 };
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
@@ -234,7 +235,10 @@ fn the_macos_job_builds_the_darwin_stub_natively_and_verifies_the_signature() {
     let ci = read(".github/workflows/ci.yml");
     let job = ci.split("macos:").nth(1).expect("a macos job");
     for needle in [
-        "macos-13",
+        // Both architectures, and neither of them a label GitHub has
+        // withdrawn: `tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs`
+        // owns the second half of that claim, and the two move together.
+        "macos-15-intel",
         "macos-14",
         "--no-default-features",
         "codesign",
@@ -262,6 +266,151 @@ fn the_windows_job_asserts_exit_code_propagation() {
     );
 }
 
+/// The Windows job's exit-code probe.
+///
+/// The one step in this repository that checks the Windows exit-code contract
+/// end to end: D2 recorded `halt(N)` propagation as a platform fact needing a
+/// real Windows host, and `launch_windows::run` mirrors what `erl.exe` leaves
+/// behind. Looked up by what it does rather than by its name, so renaming the
+/// step keeps the rules and deleting it fails them.
+///
+/// # Panics
+///
+/// If the windows job no longer probes an exit code at all.
+fn exit_code_probe() -> WorkflowStep {
+    workflow_steps(".github/workflows/ci.yml")
+        .into_iter()
+        .find(|step| step.job == "windows" && step.run.contains("halt(3)"))
+        .expect(
+            "the windows job has to keep a step that runs the runtime and reads the code it left: \
+             it is the only end-to-end check of the Windows exit-code contract there is",
+        )
+}
+
+/// Whether one command line starts an `erl` looked up on `PATH`.
+///
+/// Pure and syntactic: a bare program name is one the step hopes the runner
+/// put somewhere it can see, and the runtime this job installed is at
+/// `%INSTALL_DIR_FOR_OTP%\bin\erl.exe` whatever `PATH` holds.
+fn invokes_a_bare_erl(command: &str) -> bool {
+    let command = command.trim_start_matches(['&', ' ']);
+    command.starts_with("erl ") || command.starts_with("erl.exe ")
+}
+
+/// The variable a script captures `$LASTEXITCODE` into, if it captures it.
+///
+/// `$code = $LASTEXITCODE` and nothing else: a probe that reads the automatic
+/// variable twice reads two different moments, and the second is whatever the
+/// line between them left.
+fn captured_variable(script: &str) -> Option<String> {
+    for line in script.lines() {
+        let line = line.trim();
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if right.trim() != "$LASTEXITCODE" {
+            continue;
+        }
+        let name = left.trim();
+        if let Some(bare) = name.strip_prefix('$')
+            && !bare.is_empty()
+            && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && bare != "LASTEXITCODE"
+        {
+            return Some(name.to_owned());
+        }
+    }
+    None
+}
+
+#[test]
+fn the_windows_exit_code_probe_runs_the_erl_the_job_installed() {
+    assert!(
+        invokes_a_bare_erl("erl -noshell -eval \"halt(3)\""),
+        "the scanner has to see the invocation that ran in run 33864729638 as a bare one"
+    );
+    assert!(
+        !invokes_a_bare_erl("& $erl -noshell -eval \"halt(3)\""),
+        "and it has to leave alone an invocation through a path the step resolved"
+    );
+
+    let probe = exit_code_probe();
+    assert_eq!(
+        probe.shell, "pwsh",
+        "{probe} decides what its last line means by naming its shell"
+    );
+    assert!(
+        probe.run.contains("INSTALL_DIR_FOR_OTP"),
+        "{probe} has to run the runtime `setup-beam` installed — the job's own \
+         `INSTALL_DIR_FOR_OTP`, `D:\\a\\_temp\\.setup-beam\\otp` on the runner — rather than \
+         hoping a bare `erl` resolves in a pwsh step:\n{}",
+        probe.run
+    );
+    let bare: Vec<&str> = probe
+        .run
+        .lines()
+        .map(str::trim)
+        .filter(|line| invokes_a_bare_erl(line))
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "{probe} invokes an `erl` off `PATH`: {bare:?}. A probe that cannot find the runtime must \
+         say which path it looked at, not report whatever number a missing program leaves"
+    );
+}
+
+#[test]
+fn the_windows_exit_code_probe_says_so_when_the_runtime_is_missing() {
+    let probe = exit_code_probe();
+    assert!(
+        probe.run.contains("Test-Path"),
+        "{probe} has to look for the runtime before running it, so that an install that moved \
+         is a sentence and not a number:\n{}",
+        probe.run
+    );
+    assert!(
+        probe.run.contains("::error::"),
+        "{probe} has to name what went wrong in a line GitHub renders as an error, both for a \
+         runtime it could not find and for a code it did not expect:\n{}",
+        probe.run
+    );
+}
+
+#[test]
+fn the_windows_exit_code_probe_records_the_code_it_observed() {
+    assert_eq!(
+        captured_variable("& $erl -noshell -eval \"halt(3)\"\n$code = $LASTEXITCODE\n").as_deref(),
+        Some("$code"),
+        "the scanner has to find the capture a probe makes"
+    );
+    assert_eq!(
+        captured_variable("if ($LASTEXITCODE -ne 3) { throw \"got $LASTEXITCODE\" }"),
+        None,
+        "and it has to see the script that failed run 33864729638 as capturing nothing"
+    );
+
+    let probe = exit_code_probe();
+    let captured = captured_variable(&probe.run).unwrap_or_else(|| {
+        panic!(
+            "{probe} has to capture `$LASTEXITCODE` into a variable on the line after the \
+             invocation: the automatic one is whatever the last command left, and every line \
+             between the runtime and the assertion can change it:\n{}",
+            probe.run
+        )
+    });
+    let printed = probe.run.lines().map(str::trim).any(|line| {
+        (line.contains("Write-Host") || line.contains("Write-Output") || line.contains("echo "))
+            && line.contains(&captured)
+            && !line.contains("::error::")
+    });
+    assert!(
+        printed,
+        "{probe} has to print the code it saw — job 100996872499 failed with no Erlang banner, no \
+         message and no number, and 0.54 s of silence is not a report:\n{}",
+        probe.run
+    );
+}
+
 #[test]
 fn the_smoke_matrix_job_bootstraps_binfmt_and_runs_the_committed_script() {
     let ci = read(".github/workflows/ci.yml");
@@ -273,6 +422,40 @@ fn the_smoke_matrix_job_bootstraps_binfmt_and_runs_the_committed_script() {
         assert!(
             job.contains(needle),
             "the smoke-matrix job is missing `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn the_coverage_job_obtains_the_stubs_its_floor_is_measured_with() {
+    // The floor is 90% and the measurement is 89.92% without the cross stubs:
+    // nine end-to-end tests skip for want of one, and the 54 lines they reach
+    // leave with them. So the job that enforces the floor has to acquire what
+    // the number assumes. The rule behind this — a job promises the stubs
+    // exactly when it obtains them — is asserted over every job of the
+    // workflow in
+    // tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs;
+    // this is the matrix's own record that the `coverage` job is one of them.
+    let ci = read(".github/workflows/ci.yml");
+    let job = job_text(&ci, "coverage").expect("a coverage job");
+    for needle in [
+        "needs: [cross-build]",
+        "download-artifact",
+        "ginary-stub-",
+        "GINARY_STUB_DIR",
+        "GINARY_REQUIRE_STUBS",
+        // Seven of those nine build with `erts = "catalog"`, and only the
+        // catalog is committed; the tarballs it names are gitignored. With the
+        // stubs but no repack they stop skipping and start failing instead.
+        "otp repack",
+        "--out dist/otp",
+        "coverage-gate.sh target/lcov.info 90",
+    ] {
+        assert!(
+            job.contains(needle),
+            "the coverage job is missing `{needle}`: without the cross stubs and the runtimes \
+             they build against, the 90% floor is measured against a tree where nine end-to-end \
+             tests skip or fail:\n{job}"
         );
     }
 }
@@ -650,12 +833,18 @@ fn the_ci_scripts_directory_holds_the_two_gates_ci_runs() {
             path.is_file(),
             "{script} is a gate CI runs; it is not committed"
         );
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111, "{script} has to be executable");
+        // The execute bit is checked where there is one to check. A Windows
+        // checkout has no mode bits at all, and the bit that matters is the
+        // one committed to the index, which the unix run asserts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{script} has to be executable");
+        }
     }
 }
 
@@ -1281,6 +1470,355 @@ fn every_uses_reference_is_pinned_to_a_full_sha_or_marked_todo() {
         offenders.is_empty(),
         "every third-party `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment; \
          these are not:\n{}",
+        offenders.join("\n")
+    );
+}
+
+// -------------------------------------- the privileged-image digest pin --
+
+/// The flag that hands a container the host's own kernel capabilities.
+const PRIVILEGED: &str = "--privileged";
+
+/// The command words that start a container, with the space that ends them.
+const RUNNERS: [&str; 2] = ["docker run ", "podman run "];
+
+/// The container options whose value is the *next* word rather than part of
+/// the same one.
+///
+/// A word that follows one of these is that option's value and is never the
+/// image, so a scan that took the first word not beginning with `-` would read
+/// `linux/arm64` as an unpinned image reference. The `--option=value` spelling
+/// is a single word and needs no entry here: it is skipped along with every
+/// other `-`-prefixed one.
+const VALUE_OPTIONS: [&str; 23] = [
+    "--add-host",
+    "--cap-add",
+    "--cap-drop",
+    "--device",
+    "--entrypoint",
+    "--env",
+    "--label",
+    "--mount",
+    "--name",
+    "--network",
+    "--platform",
+    "--publish",
+    "--security-opt",
+    "--tmpfs",
+    "--user",
+    "--volume",
+    "--workdir",
+    "-e",
+    "-l",
+    "-p",
+    "-u",
+    "-v",
+    "-w",
+];
+
+/// Whether `reference` names an image by immutable manifest digest.
+///
+/// `name@sha256:<64 hex>` and nothing else. A tag — `:latest`, `:v8`, or the
+/// bare name that means `:latest` — names whatever the registry points it at
+/// today, which is the whole of the finding: a tag can be moved upstream
+/// without a commit here.
+fn pinned_by_digest(reference: &str) -> bool {
+    reference.split_once("@sha256:").is_some_and(|(_, digest)| {
+        digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// Every image `text` starts with [`PRIVILEGED`] that is not pinned by digest,
+/// and how many are.
+///
+/// Pure: one file's text in, complaints out, so the rule is calibrated on a
+/// file written by hand before it is turned loose on the tree. It reads
+/// command lines rather than YAML, because the same `docker run` appears in a
+/// workflow's `run:` block, in a committed shell script and in a `mise.toml`
+/// task, and is exactly as privileged in all three. Which files it is asked
+/// about is [`privileged_scan_set`]'s to say, and that function states the
+/// reach.
+///
+/// A backslash continuation carries the rest of a command onto the next line
+/// and either half may hold the image, so the halves are joined — but the
+/// physical line each command *starts* on is kept and is the number reported,
+/// rather than an index into the joined text that every earlier continuation in
+/// the file has already shifted. Everything after an unquoted `#` is a shell
+/// comment the runner never executes and is dropped by
+/// [`crate::common::repo::shell_code`].
+fn unpinned_privileged_images(path: &str, text: &str) -> (usize, Vec<String>) {
+    let mut pinned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    let physical: Vec<&str> = text.lines().collect();
+    let mut index = 0usize;
+    while index < physical.len() {
+        let first = index;
+        let mut joined = String::new();
+        while index < physical.len() {
+            let line = physical[index];
+            index += 1;
+            match line.strip_suffix('\\') {
+                Some(head) => {
+                    joined.push_str(head);
+                    joined.push(' ');
+                }
+                None => {
+                    joined.push_str(line);
+                    break;
+                }
+            }
+        }
+        let code = shell_code(&joined);
+        // Where each container command's arguments begin, and where the next
+        // one starts, so two commands chained on one line are read apart
+        // rather than as one long argument list.
+        let mut starts: Vec<(usize, usize)> = Vec::new();
+        for runner in RUNNERS {
+            for (at, _) in code.match_indices(runner) {
+                starts.push((at, at + runner.len()));
+            }
+        }
+        starts.sort_unstable();
+        for (position, (_, args_from)) in starts.iter().enumerate() {
+            let args_to = starts
+                .get(position + 1)
+                .map_or(code.len(), |(next, _)| *next);
+            let arguments = &code[*args_from..args_to];
+            let mut words = arguments
+                .split_whitespace()
+                .map(|word| word.trim_matches(['"', '\'']));
+            if !arguments
+                .split_whitespace()
+                .any(|word| word.trim_matches(['"', '\'']) == PRIVILEGED)
+            {
+                continue;
+            }
+            let mut image = None;
+            while let Some(word) = words.next() {
+                if word.starts_with('-') {
+                    if VALUE_OPTIONS.contains(&word) {
+                        let _ = words.next();
+                    }
+                    continue;
+                }
+                image = Some(word);
+                break;
+            }
+            let Some(image) = image else {
+                continue;
+            };
+            if pinned_by_digest(image) {
+                pinned += 1;
+            } else {
+                offenders.push(format!(
+                    "{path}:{}: `{image}` is run with {PRIVILEGED} and is named by tag rather \
+                     than by manifest digest",
+                    first + 1
+                ));
+            }
+        }
+    }
+    (pinned, offenders)
+}
+
+/// Every committed file that can start a container, with its text.
+///
+/// **The rule's reach, written down rather than assumed.** Three sets, and the
+/// third is the one a reader would not guess: every workflow and composite
+/// action under `.github/`, every `.sh` under `scripts/` and `.github/`, and
+/// `mise.toml`. The task file is neither YAML nor a `.sh` and it already runs a
+/// container — `check:windows` builds `wincheck.Dockerfile` and runs
+/// `cargo check` inside it — so a rule keyed on the file extension would have
+/// left the one committed file that spawns containers outside it, and a
+/// `--privileged` added to a mise task would have been pinned by nothing. A
+/// file added here later that runs containers belongs in this list; that is
+/// what the list is for.
+fn privileged_scan_set() -> Vec<(String, String)> {
+    let mut set = action_yaml();
+    for script in shell_scripts_under("scripts")
+        .into_iter()
+        .chain(shell_scripts_under(".github"))
+    {
+        let text = read(&script);
+        set.push((script, text));
+    }
+    set.push(("mise.toml".to_owned(), read("mise.toml")));
+    set
+}
+
+/// A workflow holding one unpinned privileged run, one pinned one, one
+/// unprivileged run and one that is commented out.
+const PLANTED_PRIVILEGED: &str = "\
+jobs:
+  bootstrap:
+    steps:
+      - run: docker run --privileged --rm example/binfmt --install arm64
+      - run: docker run --privileged --rm --platform linux/amd64 example/binfmt@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --install arm64
+      - run: docker run --rm alpine:3.20 true
+      # - run: docker run --privileged --rm example/binfmt --install arm64
+";
+
+#[test]
+fn every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest() {
+    // The instrument first, on the four shapes a command line comes in.
+    let (pinned, planted) = unpinned_privileged_images("<planted>", PLANTED_PRIVILEGED);
+    assert_eq!(
+        planted,
+        vec![
+            "<planted>:4: `example/binfmt` is run with --privileged and is named by tag rather \
+             than by manifest digest"
+                .to_owned()
+        ],
+        "the tag-named privileged run is the only offender: the digest-named one is pinned, the \
+         unprivileged one is out of scope, and the commented-out one is never run"
+    );
+    assert_eq!(
+        pinned, 1,
+        "and `--platform` takes its value as the next word, so the image is the word after that \
+         and not `linux/amd64`"
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    for (path, text) in privileged_scan_set() {
+        let (found, complaints) = unpinned_privileged_images(&path, &text);
+        pinned += found;
+        offenders.extend(complaints);
+    }
+
+    assert!(
+        pinned + offenders.len() > 0,
+        "nothing in this repository runs a privileged container any more, so this rule is \
+         measuring nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a `{PRIVILEGED}` container has the host runner's own kernel capabilities, so its image \
+         is code this repository executes with more authority than its own workflows have. Named \
+         by tag, that code can be replaced upstream between two runs with no commit here and no \
+         line in any diff — the exact reason every `uses:` in this tree is pinned to a full \
+         commit SHA. Pin each one to a reviewed manifest digest \
+         (`docker buildx imagetools inspect <image>`):\n{}",
+        offenders.join("\n")
+    );
+}
+
+// ------------------------------------------ what the first live run found --
+
+/// The action most helper binaries in this repository are installed with.
+///
+/// Not the only one: `actionlint` is in none of its manifests and is installed
+/// by `.github/actions/install-actionlint`, which spells its input `tool:` the
+/// same way on purpose. The rule below therefore reads the *key*, not the
+/// action that consumes it — see
+/// `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+const INSTALL_ACTION: &str = "taiki-e/install-action";
+
+/// Every `with.tool` entry in `text` that is not pinned to an exact version.
+///
+/// Pure: YAML in, complaints out, so the rule can be calibrated on a workflow
+/// written by hand before it is turned loose on the tree. Returns the number
+/// of pinned entries alongside, because a scan that found nothing at all
+/// passes for the wrong reason.
+///
+/// Every step carrying a `with.tool` is read, whichever action consumes it. A
+/// filter on `uses:` would leave the next locally written installer outside
+/// the rule, which is exactly where `install-actionlint` sat when it was
+/// introduced.
+fn unpinned_tools(path: &str, text: &str) -> (usize, Vec<String>) {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    let parsed = parse_yaml(text).unwrap_or_else(|e| panic!("{path} is not valid YAML: {e}"));
+    let Some(jobs) = parsed
+        .as_mapping_get("jobs")
+        .and_then(YamlOwned::as_mapping)
+    else {
+        return (pinned, offenders);
+    };
+    for (id, job) in jobs {
+        let job_id = id.as_str().unwrap_or("<a job id that is not a string>");
+        let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
+            continue;
+        };
+        for step in steps {
+            let uses = step
+                .as_mapping_get("uses")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or("<a step with no `uses`>");
+            let Some(tool) = step
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("tool"))
+                .and_then(YamlOwned::as_str)
+            else {
+                continue;
+            };
+            for entry in tool.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                match entry.split_once('@') {
+                    Some((name, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+                        let _ = name;
+                        pinned += 1;
+                    }
+                    _ => offenders.push(format!(
+                        "{path}: job `{job_id}` installs `{entry}` through `{uses}`, which \
+                         resolves to whatever the action calls latest"
+                    )),
+                }
+            }
+        }
+    }
+    (pinned, offenders)
+}
+
+#[test]
+fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
+    // The instrument first, on the two shapes the tree holds: the action most
+    // tools come through, and a locally written one. Both name the tool in the
+    // same key, and the rule reads that key rather than the action beside it.
+    let planted = format!(
+        "jobs:\n  \
+           lint:\n    \
+             steps:\n      \
+               - uses: {INSTALL_ACTION}@0000000000000000000000000000000000000000\n        \
+                 with:\n          \
+                   tool: cargo-deny\n      \
+               - uses: ./.github/actions/install-actionlint\n        \
+                 with:\n          \
+                   tool: actionlint\n      \
+               - uses: ./.github/actions/install-actionlint\n        \
+                 with:\n          \
+                   tool: actionlint@1.7.12\n"
+    );
+    let (pinned, planted_offenders) = unpinned_tools("<planted>", &planted);
+    assert_eq!(
+        planted_offenders.len(),
+        2,
+        "an unpinned tool is unpinned whichever action installs it: a rule that reads `uses:` \
+         first stops at the third-party action and lets every locally written installer past. \
+         It reported {planted_offenders:?}"
+    );
+    assert_eq!(
+        pinned, 1,
+        "and the one entry that is pinned is counted whichever action installs it"
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut pinned = 0usize;
+    for (path, text) in action_yaml() {
+        let (found, complaints) = unpinned_tools(&path, &text);
+        pinned += found;
+        offenders.extend(complaints);
+    }
+    assert!(
+        pinned + offenders.len() > 0,
+        "no workflow installs a tool by name any more, through {INSTALL_ACTION} or otherwise"
+    );
+    assert!(
+        offenders.is_empty(),
+        "an unpinned tool is a build whose result changes without a commit. The first live run \
+         of `lint` installed cargo-deny 0.18.5 — the newest this action's manifest knew — and it \
+         could not parse a CVSS 4.0 advisory that had appeared in the RustSec database, so \
+         `cargo deny check` failed on a tree nothing had changed. Pin each one to the version \
+         the gates were run against:\n{}",
         offenders.join("\n")
     );
 }

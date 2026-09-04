@@ -12,23 +12,38 @@
 mod common;
 
 use std::ffi::OsString;
+// Only `CountingSink` implements it, and that is a `cfg(unix)` fixture.
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use common::artifact::{APP, SyntheticArtifact};
 use common::cachefs::{DAY, HeldLock, plant_entry};
+use common::hostpath::same_path;
 use common::payload::SharedSink;
 use common::tools::require_tools;
 
 use ginary::cache::{
-    self, APP_DIR_MODE, BIN_MODE, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin,
-    PRUNE_DAYS_VAR, PruneOptions, PruneReport,
+    self, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin, PRUNE_DAYS_VAR, PruneOptions,
+    PruneReport,
 };
+// The two modes, and the sink the fallback warning is written to, belong to
+// the `cfg(unix)` tests below and to nothing else.
+#[cfg(unix)]
+use ginary::cache::{APP_DIR_MODE, BIN_MODE};
 use ginary::diag::Diag;
 use ginary::trailer::Trailer;
 
-/// A process id no machine has: `/proc/<pid>` cannot exist for it, so a tree
-/// carrying it is a leftover by definition.
+/// A number outside the positive `i32` a `pid_t` occupies, so no process has
+/// ever carried it and a tree naming it is a leftover by definition.
+///
+/// The sweep answers `dead` for this one before it asks the operating system
+/// anything, which is why it is not the whole story:
+/// [`a_reaped_process_s_temporary_tree_is_removed`] plants an id the process
+/// table really held and really gave up, which is the only input that reaches
+/// the "no such process" answer of the syscall underneath.
+///
+/// [`a_reaped_process_s_temporary_tree_is_removed`]: fn@a_reaped_process_s_temporary_tree_is_removed
 const DEAD_PID: u32 = 4_000_000_000;
 
 fn env(pairs: &[(&str, &str)]) -> Env {
@@ -86,6 +101,9 @@ fn names(dir: &Path) -> Vec<String> {
 
 // -------------------------------------------------------- creating a root --
 
+// `cache::prepare` takes a uid and is `cfg(unix)`; `cache::prepare_windows`
+// takes a user name and is the other one. `tests/windows.rs` holds that half.
+#[cfg(unix)]
 #[test]
 fn prepare_creates_the_resolved_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -107,6 +125,9 @@ fn prepare_creates_the_resolved_root() {
     );
 }
 
+// A directory nobody may write to is a mode bit, and a mode bit is a unix
+// idea: on Windows a read-only directory still accepts a new child.
+#[cfg(unix)]
 #[test]
 fn an_unwritable_root_falls_back_with_exactly_one_warning() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -151,6 +172,7 @@ fn an_unwritable_root_falls_back_with_exactly_one_warning() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("restore");
 }
 
+#[cfg(unix)]
 #[test]
 fn reaching_the_fallback_because_nothing_was_set_is_silent() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -183,7 +205,18 @@ fn a_cold_cache_extracts_into_the_key_directory() {
     let entry = cache::ensure_extracted(&file, &trailer, APP, &dirs(&root), &diag)
         .expect("a cold cache must extract");
 
-    assert_eq!(entry, root.join(APP).join(artifact.key()));
+    // `same_path` and not `==`: `ensure_extracted` answers with the verbatim
+    // `\\?\` spelling on Windows — `ginary::winpath` says why — and the
+    // directory this test built by hand holds the ordinary one. Both name one
+    // directory, and the comparison is about which directory rather than
+    // about which spelling.
+    let expected = root.join(APP).join(artifact.key());
+    assert!(
+        same_path(&entry, &expected),
+        "the entry is the key directory: {} is not {}",
+        entry.display(),
+        expected.display()
+    );
     assert!(
         entry.join("ginary.json").is_file(),
         "the manifest is the completeness marker and must be a regular file"
@@ -272,7 +305,12 @@ fn a_key_directory_without_a_manifest_is_moved_aside_and_extracted_again() {
     let extracted = cache::ensure_extracted(&file, &trailer, APP, &dirs(&root), &diag)
         .expect("an incomplete entry must be replaced");
 
-    assert_eq!(extracted, entry);
+    assert!(
+        same_path(&extracted, &entry),
+        "the incomplete entry is replaced in place: {} is not {}",
+        extracted.display(),
+        entry.display()
+    );
     assert!(entry.join("ginary.json").is_file());
     assert!(
         !entry.join("lib/leftover").exists(),
@@ -285,6 +323,7 @@ fn a_key_directory_without_a_manifest_is_moved_aside_and_extracted_again() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_application_directory_is_private_and_the_bindir_is_executable() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -373,19 +412,85 @@ fn a_dead_process_s_temporary_tree_is_removed() {
     assert_eq!(names(&app_dir), Vec::<String>::new());
 }
 
+/// How many reaped process ids the test below will ask about before it
+/// insists on an answer.
+///
+/// One attempt is enough on any machine that is not handing the id straight
+/// back; see the test's own comment for the window this closes.
+const REAPED_PID_ATTEMPTS: usize = 5;
+
+#[test]
+fn a_reaped_process_s_temporary_tree_is_removed() {
+    // The other half of "dead", and the half `DEAD_PID` cannot state: a
+    // number that is a plausible process id, that the process table held, and
+    // that it no longer holds. That is the input the sweep's liveness rule
+    // answers with a *syscall* rather than with a range check — `ESRCH` from
+    // `kill(pid, 0)` on unix, `ERROR_INVALID_PARAMETER` from `OpenProcess` on
+    // Windows — and without it a rule that read every error as "alive" would
+    // never sweep a real leftover and nothing here would notice.
+    //
+    // The window this cannot close, only shrink: an id becomes eligible for
+    // reuse at the moment the last handle to the process goes, which is the
+    // `drop` below, and Windows hands ids back out of a recycled pool rather
+    // than climbing to a `pid_max` the way Linux does. This suite spawns many
+    // processes and CI runs its targets in parallel, so the id can be another
+    // process's before the sweep asks about it — and then keeping the tree is
+    // the *correct* answer, not a defect. A retry with a fresh reaped id is
+    // therefore a re-run rather than a failure; only the last attempt asserts.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for attempt in 1..=REAPED_PID_ATTEMPTS {
+        let app_dir = dir.path().join(format!("{APP}-{attempt}"));
+        std::fs::create_dir_all(&app_dir).expect("create the application directory");
+
+        let mut child = crate::common::script::live_process(dir.path(), 0);
+        let pid = child.id();
+        child.wait().expect("the planted program runs and exits");
+        // Reaped by the wait on unix; on Windows the id is the process
+        // object's and is not free until the last handle to it is closed,
+        // which is what dropping the child does.
+        drop(child);
+        let tmp = plant(&app_dir, "abc", "tmp", pid);
+
+        let report = cache::sweep(&app_dir, std::process::id(), &Diag::disabled())
+            .expect("the sweep must run");
+
+        if report.removed.is_empty() && attempt < REAPED_PID_ATTEMPTS {
+            // The id was handed out again between the drop and the sweep.
+            continue;
+        }
+
+        assert_eq!(
+            report.removed,
+            vec![tmp],
+            "the launcher that owned this tree has gone, so the tree it was extracting into is \
+             a leftover and the next launcher may have the space back"
+        );
+        assert!(report.kept.is_empty());
+        assert_eq!(names(&app_dir), Vec::<String>::new());
+        return;
+    }
+}
+
+/// How long the planted live process stays alive for.
+///
+/// Thirty seconds, which is what the `/bin/sh -c 'sleep 30'` this replaced
+/// asked for: long enough that the sweep below certainly runs while the
+/// process is up, and finite so a leaked child cannot outlive the suite.
+const LIVE_MILLISECONDS: u64 = 30_000;
+
 #[test]
 fn a_live_process_s_temporary_tree_is_kept() {
     let dir = tempfile::tempdir().expect("tempdir");
     let app_dir = dir.path().join(APP);
     std::fs::create_dir_all(&app_dir).expect("create the application directory");
 
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "sleep 30"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn a live process");
+    // A planted program that sleeps, and not `/bin/sh -c 'sleep 30'`: the
+    // sweep's rule is "a process that is still alive", and a host with no
+    // POSIX shell has no way to make one that way — the spawn failed with
+    // `The system cannot find the path specified.` before the sweep ran at
+    // all. `script::live_process` renders the same behaviour twice, as a
+    // shell script and as the compiled shim.
+    let mut child = crate::common::script::live_process(dir.path(), LIVE_MILLISECONDS);
     let live = plant(&app_dir, "abc", "tmp", child.id());
 
     let report =
@@ -872,12 +977,14 @@ fn cleaning_a_cache_that_was_never_created_is_an_empty_report() {
 /// line buffered when it is a pipe, so the flush is part of the contract
 /// rather than a detail: a warning still sitting in a buffer when `execve`
 /// replaces the process is a warning nobody was given.
+#[cfg(unix)]
 #[derive(Debug, Default)]
 struct CountingSink {
     written: Vec<u8>,
     flushes: usize,
 }
 
+#[cfg(unix)]
 impl Write for CountingSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.written.extend_from_slice(buf);
@@ -890,6 +997,7 @@ impl Write for CountingSink {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_warning_sink_is_written_through_and_flushed() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -928,6 +1036,7 @@ fn a_warning_sink_is_written_through_and_flushed() {
 
 // ------------------------------------------------- trusting the fallback --
 
+#[cfg(unix)]
 #[test]
 fn a_fallback_root_somebody_else_may_write_to_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -960,6 +1069,7 @@ fn a_fallback_root_somebody_else_may_write_to_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_in_the_place_of_the_fallback_root_is_refused() {
     // `create_dir_all` follows a symlink and reports success, so an attacker
@@ -989,6 +1099,7 @@ fn a_symlink_in_the_place_of_the_fallback_root_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_fallback_root_this_process_owns_is_created_private() {
     use std::os::unix::fs::PermissionsExt as _;

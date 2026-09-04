@@ -52,7 +52,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::common::script::script;
+use crate::common::script::{ShimStep, program, shim_file_name, shim_sidecar};
 
 /// The default ERTS version a [`FakeOtp`] uses, matching the host OTP 29.0.5.
 pub const DEFAULT_ERTS_VSN: &str = "17.0.5";
@@ -317,6 +317,7 @@ pub struct FakeOtp {
     apps: Vec<FakeApp>,
     flavor: ErtsFlavor,
     pe_machine: u16,
+    macho_cpu_type: u32,
 }
 
 /// Which shape of `erts-<vsn>/bin` a [`FakeOtp`] writes.
@@ -336,6 +337,15 @@ pub enum ErtsFlavor {
     /// refused as "not a PE image" and no test could reach the resolution it
     /// is about.
     Windows,
+    /// The unix names, with `beam.smp` written as a real thin Mach-O.
+    ///
+    /// A macOS OTP tree has the unix layout — `erlexec` execs `beam.smp`,
+    /// there is no `erl.ini` and no `.dll` — and differs from a Linux one in
+    /// exactly one place a build reads: the emulator is a Mach-O and not an
+    /// ELF. That one byte-level difference is what
+    /// `ginary::erts_source::resolve` has to dispatch on, so it is the one
+    /// thing this flavour changes.
+    Macos,
 }
 
 /// Which stub `bin/erl` a [`FakeOtp`] writes, if any.
@@ -383,6 +393,7 @@ impl FakeOtp {
             erl_script: None,
             flavor: ErtsFlavor::Unix,
             pe_machine: PE_MACHINE_AMD64,
+            macho_cpu_type: crate::common::macho::CPU_TYPE_ARM64,
             apps: vec![
                 FakeApp::new("kernel", DEFAULT_KERNEL_VSN).mod_callback("kernel"),
                 FakeApp::new("stdlib", DEFAULT_STDLIB_VSN).applications(&["kernel"]),
@@ -405,6 +416,31 @@ impl FakeOtp {
     #[must_use]
     pub fn windows(mut self) -> Self {
         self.flavor = ErtsFlavor::Windows;
+        self
+    }
+
+    /// Writes a macOS `erts-<vsn>/bin` instead of a unix one.
+    ///
+    /// [`ErtsFlavor::Macos`]: the same names a unix tree holds, with
+    /// `beam.smp` written as a thin 64-bit Mach-O for
+    /// [`FakeOtp::macho_cpu_type`] rather than as a shell stub. Nothing else
+    /// about the root changes, because nothing else about a macOS runtime
+    /// does.
+    #[must_use]
+    pub fn macos(mut self) -> Self {
+        self.flavor = ErtsFlavor::Macos;
+        self
+    }
+
+    /// The `cputype` the macOS tree's `beam.smp` is built for.
+    ///
+    /// [`crate::common::macho::CPU_TYPE_ARM64`] unless a test asks otherwise.
+    /// The one thing `ginary::erts_source` reads off a macOS runtime is this
+    /// number, so a test about a runtime for the wrong architecture sets it
+    /// and changes nothing else.
+    #[must_use]
+    pub fn macho_cpu_type(mut self, cpu_type: u32) -> Self {
+        self.macho_cpu_type = cpu_type;
         self
     }
 
@@ -561,6 +597,31 @@ impl FakeOtp {
                     );
                 }
             }
+            ErtsFlavor::Macos => {
+                let bins = ginary::otp::REQUIRED_ERTS_BINARIES
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .chain(self.extra_erts_bins.iter().cloned());
+                for name in bins {
+                    if name == ginary::erts_source::EMULATOR {
+                        write_executable(
+                            &erts_bin.join(&name),
+                            &crate::common::macho::thin_header(
+                                self.macho_cpu_type,
+                                crate::common::macho::MH_EXECUTE,
+                            ),
+                        );
+                    } else {
+                        write_executable(
+                            &erts_bin.join(&name),
+                            format!(
+                                "#!/bin/sh\n# fake {name} written by tests/common/fake_otp.rs\nexit 0\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                }
+            }
             ErtsFlavor::Windows => {
                 let bins = ginary::assemble::WINDOWS_REQUIRED_BINS
                     .iter()
@@ -589,37 +650,40 @@ impl FakeOtp {
         create_dir_all(&root.join("bin"));
         write(&root.join("bin/no_dot_erlang.boot"), &self.boot_bytes());
         if let Some(kind) = &self.erl_script {
-            let tail = match kind {
-                ErlScript::Succeeding => "exit 0".to_owned(),
+            // Every stub records its argument vector first; the tail is what
+            // distinguishes the three. Through `script::program` rather than
+            // `write_executable`, because this is the one stub a test actually
+            // execs: that helper waits out the ETXTBSY window a sibling
+            // thread's fork opens, and it plants the *form* the host can start
+            // — a shell script on unix, a compiled program on Windows, where a
+            // shebang is a data file.
+            let mut steps = vec![ShimStep::RecordArgv];
+            match kind {
+                ErlScript::Succeeding => steps.push(ShimStep::Exit(0)),
                 ErlScript::Shrinking => {
-                    write(&root.join("bin/erl.module"), &shrunken_beam());
-                    "for arg in \"$@\"; do\n\
-                     \x20 case \"$arg\" in *.beam) cp \"$0.module\" \"$arg\" ;; esac\n\
-                     done\nexit 0"
-                        .to_owned()
+                    steps.push(ShimStep::ReplaceBeamArguments);
+                    steps.push(ShimStep::Exit(0));
                 }
-                // The term travels in a file rather than in the script's own
+                // The term travels in a file rather than in the stub's own
                 // source: an Erlang term printed with `~p` may hold an
                 // apostrophe, and interpolating one into a single-quoted shell
                 // string writes a stub that fails to parse instead of a stub
                 // that fails on purpose.
-                ErlScript::Failing(stderr) => {
-                    write(&root.join("bin/erl.stderr"), stderr.as_bytes());
-                    "cat \"$0.stderr\" >&2\nprintf '\\n' >&2\nexit 1".to_owned()
+                ErlScript::Failing(_) => {
+                    steps.push(ShimStep::PrintStderrFile);
+                    steps.push(ShimStep::Exit(1));
                 }
-            };
-            // Through `script::script` rather than `write_executable`, because
-            // this is the one stub a test actually execs and that helper is
-            // what waits out the ETXTBSY window a sibling thread's fork opens.
-            script(
-                &root.join("bin"),
-                "erl",
-                &format!(
-                    ": > \"$0.argv\"\n\
-                     for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$0.argv\"; done\n\
-                     {tail}"
-                ),
-            );
+            }
+            let erl = program(&root.join("bin"), "erl", &steps);
+            match kind {
+                ErlScript::Succeeding => {}
+                ErlScript::Shrinking => {
+                    write(&shim_sidecar(&erl, "module"), &shrunken_beam());
+                }
+                ErlScript::Failing(stderr) => {
+                    write(&shim_sidecar(&erl, "stderr"), stderr.as_bytes());
+                }
+            }
         }
 
         let releases = root.join("releases");
@@ -717,9 +781,13 @@ impl FakeOtpRoot {
         std::fs::read(self.boot_file()).expect("the fake boot file should be readable")
     }
 
-    /// `<root>/bin/erl`, whether or not one was installed.
+    /// `<root>/bin/erl`, whether or not one was installed — `bin/erl.exe` on
+    /// Windows, which is the name `src/strip.rs` goes looking for and the only
+    /// one a `Command` there will start.
     pub fn erl(&self) -> PathBuf {
-        self.root.join("bin").join("erl")
+        self.root
+            .join("bin")
+            .join(shim_file_name("erl", ginary::platform::HOST))
     }
 
     /// The argument vector the stub `bin/erl` was last called with.
@@ -732,7 +800,7 @@ impl FakeOtpRoot {
     /// If no stub `erl` was installed, or if it was and the log cannot be read
     /// after it ran.
     pub fn erl_argv(&self) -> Vec<String> {
-        let log = self.root.join("bin").join("erl.argv");
+        let log = shim_sidecar(&self.erl(), "argv");
         assert!(
             self.erl().is_file(),
             "no stub erl was installed; call FakeOtp::with_erl_script"
@@ -947,15 +1015,23 @@ fn write_executable(path: &Path, bytes: &[u8]) {
 /// # Panics
 ///
 /// If the file's permissions cannot be read or written.
-#[cfg(unix)]
 pub fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut permissions = std::fs::metadata(path)
-        .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()))
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions)
-        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    // Portable on purpose: this is a fixture builder that `tests/assemble.rs`
+    // calls while assembling a tree every platform reads, so only the chmod is
+    // gated rather than the function. On Windows there is no execute bit and
+    // nothing to set.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("cannot stat {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Removes the execute bits from a file, so a test can prove they are checked.
@@ -993,3 +1069,63 @@ pub fn read_dir_names(dir: &Path) -> Vec<String> {
     names.sort();
     names
 }
+
+/// Where the `crypto` NIF sits under its application's `priv`, as `os`
+/// spells it.
+///
+/// [`ginary::platform::crypto_nif`] with the `priv/` that
+/// [`FakeApp::priv_file`] supplies itself removed, so that one rule names the
+/// file and the fixture cannot drift from the probe that looks for it.
+///
+/// # Panics
+///
+/// If the platform rule ever stops naming a file under `priv/`, which would
+/// make this a silent mis-plant rather than a failure.
+pub fn crypto_nif_under_priv(os: ginary::target::Os) -> &'static str {
+    ginary::platform::crypto_nif(os)
+        .strip_prefix("priv/")
+        .expect("the crypto NIF is a file under the application's priv")
+}
+
+impl FakeOtp {
+    /// Adds a `crypto` application carrying the NIF an `os` installation
+    /// spells.
+    ///
+    /// The fixture two `tests/doctor.rs` tests wrote by hand, as
+    /// `priv_file("lib/crypto.so", ..)`. That is the unix name on every host,
+    /// and `doctor::crypto_report` asks about [`ginary::platform::HOST`], so
+    /// on a Windows runner the test planted a file the probe never looks for
+    /// and then asserted the probe had found one:
+    ///
+    /// ```text
+    /// ---- crypto_is_reported_exactly_when_the_installation_carries_it ----
+    /// panicked at tests\doctor.rs:511:5: the installation carries a crypto NIF
+    ///
+    /// ---- the_crypto_nif_is_found_and_read ----
+    /// panicked at tests\doctor.rs:532:51: the installation has a crypto NIF
+    /// ```
+    ///
+    /// (`Windows build and exit-code propagation`
+    /// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>.)
+    ///
+    /// `os` is a parameter and not the host for the reason
+    /// `ginary::doctor::crypto_report_for` takes one: both answers are then
+    /// asserted on one machine.
+    #[must_use]
+    pub fn with_crypto_for(self, os: ginary::target::Os, bytes: &[u8]) -> Self {
+        let relative = crypto_nif_under_priv(os).to_owned();
+        let bytes = bytes.to_vec();
+        self.app_with(CRYPTO_APP, CRYPTO_VSN, move |app| {
+            app.priv_file(&relative, &bytes)
+        })
+    }
+}
+
+/// The application the `crypto` NIF belongs to.
+pub const CRYPTO_APP: &str = "crypto";
+
+/// The version [`FakeOtp::with_crypto_for`] gives it.
+///
+/// One number, so that a test naming the directory the NIF landed in composes
+/// it rather than repeating a literal.
+pub const CRYPTO_VSN: &str = "5.9.2";

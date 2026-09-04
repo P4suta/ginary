@@ -33,6 +33,10 @@ use ginary::strip::{self, StripOptions};
 
 use crate::common::tools::require_tools;
 
+/// The root name whose whole point is that it is a `filelib:wildcard` prefix
+/// of its neighbour.
+const STAR_ROOT: &str = "out*";
+
 /// The unstripped module every tree in this file is built from.
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/beam/gleam@list.beam")
@@ -95,14 +99,28 @@ fn a_root_named_with_a_star_leaves_its_neighbours_alone() {
     let Some(_tools) = require_tools(&["erl"]) else {
         return;
     };
+    // `*` is one of the nine characters Windows reserves in a file name, so
+    // the fixture could not be built there at all and the test died in
+    // `create_dir_all` rather than in an assertion. The claim is still made on
+    // such a host by the sibling test above, whose `out[1]` is both a legal
+    // name there and a `filelib:wildcard` pattern just the same. See
+    // `e11_a_fixture_built_a_directory_windows_cannot_name`.
+    if !ginary::platform::is_legal_file_name(ginary::platform::HOST, STAR_ROOT) {
+        eprintln!(
+            "skipping: `{STAR_ROOT}` is not a file name on this platform; \
+             `a_root_named_with_a_bracket_still_has_its_own_modules_stripped` makes the \
+             wildcard claim here"
+        );
+        return;
+    }
     let otp = ginary::otp::discover(None).expect("the host OTP installation");
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let staged = tree(&dir.path().join("out*"));
+    let staged = tree(&dir.path().join(STAR_ROOT));
     let neighbour = tree(&dir.path().join("outer"));
     let neighbour_before = std::fs::read(&neighbour).expect("a readable module");
 
     let report = strip::strip(
-        &dir.path().join("out*"),
+        &dir.path().join(STAR_ROOT),
         &otp,
         &StripOptions {
             elf: false,

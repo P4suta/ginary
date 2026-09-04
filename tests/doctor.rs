@@ -32,12 +32,13 @@ use ginary::doctor::{
 use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use ginary::native::{self, NativeKind, Verdict};
 use ginary::otp::{OtpError, OtpInfo};
-use ginary::target::{Linkage, Target};
+use ginary::platform::{self, HOST};
+use ginary::target::{Libc, Linkage, Target};
 use serde_json::Value;
 
-use crate::common::fake_otp::FakeOtp;
+use crate::common::fake_otp::{CRYPTO_APP, FakeOtp};
 use crate::common::project::TempProject;
-use crate::common::repack::{foreign_machine, patch_elf_machine, test_binary};
+use crate::common::repack::{foreign_machine, native_target, patch_elf_machine, test_binary};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run in `dir`.
@@ -323,6 +324,7 @@ fn a_priv_file_that_is_not_elf_is_not_native_code() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_nif_installed_as_a_symlink_is_still_native_code() {
     // The walk takes `symlink_metadata` so that a directory link cannot make
@@ -346,6 +348,7 @@ fn a_nif_installed_as_a_symlink_is_still_native_code() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_that_points_at_a_directory_is_never_descended_into() {
     let project = TempProject::named("notify");
@@ -470,14 +473,24 @@ fn each_configured_target_gets_a_verdict_for_every_object_under_priv() {
         "one column per target the project resolves, in the order it named them"
     );
     assert_eq!(report.native.len(), 1, "{:?}", report.native);
+    // The planted object is the committed ELF fixture, which is for
+    // `repack::native_target()` whatever host reads it — so the host column is
+    // `Ok` on a machine that target names and `MISMATCH` on any other. Asking
+    // the fixture rather than assuming the host built it is the same wiring
+    // `repack::test_binary` states; see `docs/dev/log/E10.md`.
+    let host_verdict = if Target::host() == native_target() {
+        Verdict::Ok
+    } else {
+        Verdict::Mismatch
+    };
     assert_eq!(
         report.native[0].verdicts,
         BTreeMap::from([
-            (host, Verdict::Ok),
+            (host, host_verdict),
             ("linux-aarch64-musl".to_owned(), Verdict::Override),
         ]),
-        "the object this machine built is fine here, and the cross target has \
-         a `native` entry answering for it"
+        "the object the fixture holds is answered for by the target it is for, and the cross \
+         target has a `native` entry answering for it"
     );
 }
 
@@ -488,17 +501,21 @@ fn crypto_is_reported_exactly_when_the_installation_carries_it() {
     let bare = tempdir();
     let with_crypto = tempdir();
     let plain = FakeOtp::new().build_in(bare.path());
+    // The NIF the *host* probe looks for, composed from the same rule the
+    // probe reads it from: `doctor::crypto_report` asks about
+    // `ginary::platform::HOST`, and a fixture that wrote the unix name down
+    // planted a file no Windows probe would ever look for. See
+    // `tests/regressions/e12_a_crypto_fixture_planted_the_unix_nif_for_a_host_probe.rs`.
     let full = FakeOtp::new()
-        .app_with("crypto", "5.9.2", |app| {
-            app.priv_file("lib/crypto.so", &test_binary())
-        })
+        .with_crypto_for(HOST, &test_binary())
         .build_in(with_crypto.path());
 
     // Both halves in one test: a `crypto_report` that always answered `None`
     // would satisfy the negative on its own.
     assert!(
         doctor::crypto_report(&full.root).is_some(),
-        "the installation carries a crypto NIF"
+        "the installation carries a crypto NIF, spelled `{}`",
+        platform::crypto_nif(HOST)
     );
     assert_eq!(
         doctor::crypto_report(&plain.root),
@@ -511,9 +528,7 @@ fn crypto_is_reported_exactly_when_the_installation_carries_it() {
 fn the_crypto_nif_is_found_and_read() {
     let dir = tempdir();
     let otp = FakeOtp::new()
-        .app_with("crypto", "5.9.2", |app| {
-            app.priv_file("lib/crypto.so", &test_binary())
-        })
+        .with_crypto_for(HOST, &test_binary())
         .build_in(dir.path());
     let host = ginary::elf::inspect_bytes(&test_binary()).expect("the test binary is ELF");
 
@@ -521,7 +536,7 @@ fn the_crypto_nif_is_found_and_read() {
 
     assert_eq!(
         report.path,
-        otp.app_dir("crypto").join("priv/lib/crypto.so")
+        otp.app_dir(CRYPTO_APP).join(platform::crypto_nif(HOST))
     );
     assert_eq!(report.needed, host.needed);
 }
@@ -849,14 +864,25 @@ fn the_host_row_carries_the_two_facts_read_off_its_own_emulator() {
         Some("dynamic"),
         "a distribution's emulator is dynamically linked: {probes:?}"
     );
-    let min = probes[0]
-        .libc_min
-        .as_deref()
-        .expect("a gnu host reports a minimum glibc");
-    assert!(
-        min.split('.').all(|part| part.parse::<u32>().is_ok()),
-        "the minimum is a version and not a sentence: {min}"
-    );
+    // Only a dynamically-linked gnu Linux emulator carries a glibc floor; a
+    // musl, macOS or Windows host reports none, and a test that always expected
+    // one failed on the first Windows runner against a healthy runtime. The
+    // rule is a property of the host's own libc.
+    if Target::host().libc == Libc::Gnu {
+        let min = probes[0]
+            .libc_min
+            .as_deref()
+            .expect("a gnu host reports a minimum glibc");
+        assert!(
+            min.split('.').all(|part| part.parse::<u32>().is_ok()),
+            "the minimum is a version and not a sentence: {min}"
+        );
+    } else {
+        assert_eq!(
+            probes[0].libc_min, None,
+            "a host without gnu libc has no glibc floor to report"
+        );
+    }
 }
 
 #[test]

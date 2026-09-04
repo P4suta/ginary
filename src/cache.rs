@@ -337,6 +337,31 @@ impl std::fmt::Display for AppNameRefusal<'_> {
     }
 }
 
+/// Whether `value` is an absolute path *by the XDG base directory
+/// specification*, which is not the same question as
+/// [`std::path::Path::is_absolute`].
+///
+/// The specification says a relative `XDG_CACHE_HOME` must be ignored, and it
+/// defines absolute the way POSIX does: a leading `/`. `Path::is_absolute`
+/// answers for the platform the code was *compiled* for, so on Windows it
+/// wants a drive letter or a UNC prefix and reports `/xdg` as relative. That
+/// made [`resolve`] — the unix half of the resolver, whose whole subject is
+/// three POSIX environment variables — silently skip its own `XDG_CACHE_HOME`
+/// branch on a Windows host and fall through to `HOME`, which is a rule about
+/// the machine the resolver was built on rather than a rule about the
+/// variable it is reading. The first Windows runner reported it as
+/// `cache::tests::xdg_cache_home_gets_a_ginary_component` resolving
+/// `/home/u\.cache\ginary` where `/xdg/ginary` was asked for.
+///
+/// The answer here is the same on every host, which is the point.
+pub fn xdg_base_is_absolute(value: &std::ffi::OsStr) -> bool {
+    // Bytes rather than a decoded string: an environment variable is not
+    // required to be UTF-8 on unix, and a value that is not would otherwise
+    // answer `false` for the wrong reason. Every encoding an `OsStr` can hold
+    // spells `/` as this one byte, and no multi-byte sequence begins with it.
+    value.as_encoded_bytes().first() == Some(&b'/')
+}
+
 /// Resolves the cache root from an environment snapshot.
 ///
 /// Pure: nothing is created and nothing is probed. An empty value counts as
@@ -353,10 +378,11 @@ pub fn resolve(env: &Env, uid: u32) -> CacheDirs {
     }
 
     if let Some(value) = non_empty(env.get(XDG_CACHE_HOME_VAR)) {
-        let base = Path::new(value);
-        if base.is_absolute() {
+        // The specification's own rule, not the host's: see
+        // `xdg_base_is_absolute`.
+        if xdg_base_is_absolute(value) {
             return CacheDirs {
-                root: base.join(DIR_NAME),
+                root: Path::new(value).join(DIR_NAME),
                 origin: Origin::XdgCacheHome,
                 is_fallback: false,
             };
@@ -754,9 +780,10 @@ fn reported(path: &Path) -> PathBuf {
 /// Removes the temporary and corrupt trees of dead processes from `app_dir`.
 ///
 /// A tree is `.<key>.tmp-<pid>` or `.<key>.corrupt-<pid>`, and it is removed
-/// when `/proc/<pid>` does not exist — or when the pid is this process's own,
-/// because a leftover of a previous run of *this* pid is by definition not in
-/// use. A tree whose process is alive is left alone and reported in
+/// when `is_alive` says no process with that id exists — or when the pid is
+/// this process's own, because a leftover of a previous run of *this* pid is
+/// by definition not in use. A tree whose process is alive is left alone and
+/// reported in
 /// [`SweepReport::kept`]: killing another launcher's extraction is worse than
 /// leaving a directory behind.
 ///
@@ -826,8 +853,47 @@ fn owner_pid(name: &OsStr) -> Option<u32> {
 }
 
 /// Whether a process with this id exists.
+///
+/// The whole of [`sweep`]'s decision, and it was a Linux filesystem lookup:
+/// `Path::new("/proc").join(pid.to_string()).exists()`. That directory is
+/// Linux's alone — Windows has no such namespace and macOS has not carried
+/// one since 10.5 — so on two of the three platforms ginary packages for the
+/// answer was `false` for every process that has ever run, and a launcher
+/// sweeping the cache deleted the tree another launcher was at that moment
+/// extracting into. The Windows runner is where it surfaced; see
+/// `tests/regressions/e12_the_sweep_asked_proc_whether_a_process_was_alive.rs`.
+///
+/// Liveness is a question for the operating system's process table, so it is
+/// asked of the process table: `kill(pid, 0)` on unix, which answers
+/// `ESRCH` for a pid nothing holds and `EPERM` for one this user may not
+/// signal, and `launch_windows::win32::process_is_alive` on Windows,
+/// which opens the process object by id.
+///
+/// Every answer that is uncertain is `true`, in both implementations. The two
+/// mistakes are not symmetric: keeping a tree whose owner has gone costs a
+/// directory until the next sweep that can name it, and removing one whose
+/// owner is alive destroys an extraction in progress. A number that cannot be
+/// a process id at all is not uncertain and is `false`: a unix `pid_t` is a
+/// *positive* `i32`, so neither `0` — which names the caller's process group
+/// to `kill` — nor anything past `i32::MAX` has ever been a process, and a
+/// tree naming one is a leftover like any other.
+#[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    !matches!(rustix::process::test_kill_process(pid), Err(Errno::SRCH))
+}
+
+/// Whether a process with this id exists.
+///
+/// The Windows half of the rule the unix implementation above documents.
+#[cfg(windows)]
+fn is_alive(pid: u32) -> bool {
+    crate::launch_windows::win32::process_is_alive(pid)
 }
 
 /// Extracts the payload into the cache, or proves it is already there.
@@ -1200,7 +1266,8 @@ fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     let synced = syncfs(&handle);
     if !synced {
         for path in files_under(tmp).map_err(|error| LauncherError::cache(tmp, error))? {
-            let file = File::open(&path).map_err(|source| LauncherError::cache(&path, source))?;
+            let file =
+                open_for_flush(&path).map_err(|source| LauncherError::cache(&path, source))?;
             file.sync_all()
                 .map_err(|source| LauncherError::cache(&path, source))?;
         }
@@ -1237,11 +1304,40 @@ fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
 #[cfg(windows)]
 fn sync_tree(tmp: &Path) -> Result<bool, LauncherError> {
     for path in files_under(tmp).map_err(|error| LauncherError::cache(tmp, error))? {
-        let file = File::open(&path).map_err(|source| LauncherError::cache(&path, source))?;
+        let file = open_for_flush(&path).map_err(|source| LauncherError::cache(&path, source))?;
         file.sync_all()
             .map_err(|source| LauncherError::cache(&path, source))?;
     }
     Ok(false)
+}
+
+/// Opens one just-written file for the durability barrier that follows.
+///
+/// Read access is what a flush conceptually needs and it is all a unix flush
+/// asks for: `fsync(2)` says nothing about the descriptor's access mode, and a
+/// staged tree holds files a build has already made read-only, so asking for
+/// write access unconditionally would fail for the opposite reason. Windows'
+/// barrier is `FlushFileBuffers`, which the kernel refuses with
+/// `ERROR_ACCESS_DENIED` on a handle that was not opened for writing — every
+/// cold-cache extraction on the first Windows runner stopped on the first file
+/// because of it. [`crate::platform::flush_needs_write_access`] is the rule,
+/// so there is one function here rather than two `#[cfg]` arms, and the claim
+/// is checkable on a machine with no Windows kernel on it.
+fn open_for_flush(path: &Path) -> std::io::Result<File> {
+    let (read, write) = flush_open_options(crate::platform::HOST);
+    File::options().read(read).write(write).open(path)
+}
+
+/// The `(read, write)` access an extraction opens a file with before it flushes
+/// it to disk on `os`.
+///
+/// Read is always asked for; write only where
+/// [`crate::platform::flush_needs_write_access`] says the durability barrier
+/// needs it. A pure function of `os` so that the *wiring* — that the opener
+/// consults the platform at all — is asserted on a machine with no Windows
+/// kernel on it, not only the rule it consults.
+fn flush_open_options(os: crate::target::Os) -> (bool, bool) {
+    (true, crate::platform::flush_needs_write_access(os))
 }
 
 /// One `syncfs(2)` for the whole filesystem the tree is on.
@@ -1417,6 +1513,64 @@ pub const TRASH_PREFIX: &str = "trash-";
 /// Seconds in a day, for turning [`PruneOptions::days`] into an age.
 const SECONDS_PER_DAY: u64 = 86_400;
 
+/// Renames a locked cache entry aside, giving `lock` up in the order the
+/// platform allows.
+///
+/// The lock proves nobody is using the entry and the rename is the claim, so
+/// making the claim while still holding the proof is the order that leaves no
+/// window for another process to take the entry in between. A platform that
+/// refuses to rename a directory it still holds a handle inside —
+/// [`crate::platform::rename_refuses_open_children`], which is Windows, and
+/// which `FILE_SHARE_DELETE` on `<entry>/.lock` does not buy back — cannot
+/// have both at once, and there the lock is released first: the alternative is
+/// an entry that can never be pruned or uninstalled at all, which is what the
+/// first Windows runner reported for every complete entry it found.
+///
+/// Answers whether the rename happened. `lock` is consumed either way, so a
+/// caller cannot keep holding a lock on a directory that is no longer there.
+fn rename_aside(path: &Path, aside: &Path, lock: crate::cache_lock::ExclusiveLock) -> bool {
+    match rename_aside_order(crate::platform::HOST) {
+        RenameAsideOrder::DropThenRename => {
+            drop(lock);
+            std::fs::rename(path, aside).is_ok()
+        }
+        RenameAsideOrder::RenameThenDrop => {
+            let renamed = std::fs::rename(path, aside).is_ok();
+            drop(lock);
+            renamed
+        }
+    }
+}
+
+/// Whether [`rename_aside`] drops the exclusive lock before or after the
+/// rename on `os`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenameAsideOrder {
+    /// Drop the lock, then rename: the platform refuses to rename a directory
+    /// it still holds an open handle inside, so the proof has to be released
+    /// before the claim is made. This reopens the window between "nobody holds
+    /// this" and "it is gone", which is the accepted price on such a platform.
+    DropThenRename,
+    /// Rename while still holding the lock, then drop it: the order that leaves
+    /// no window, available where a rename does not mind an open child.
+    RenameThenDrop,
+}
+
+/// Which order [`rename_aside`] performs the lock-drop and the rename in on
+/// `os`.
+///
+/// [`crate::platform::rename_refuses_open_children`] is the rule; splitting the
+/// decision out from the `drop`/`rename` calls makes the *wiring* — that the
+/// order is chosen from the platform and not hard-coded — a pure function a
+/// Linux machine can assert both answers of.
+fn rename_aside_order(os: crate::target::Os) -> RenameAsideOrder {
+    if crate::platform::rename_refuses_open_children(os) {
+        RenameAsideOrder::DropThenRename
+    } else {
+        RenameAsideOrder::RenameThenDrop
+    }
+}
+
 /// Prunes the *siblings* of one entry, best effort, never failing.
 ///
 /// `keep` is the entry this process is about to run out of and is never
@@ -1489,14 +1643,13 @@ pub fn prune_app(
         };
 
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
-        if std::fs::rename(&path, &aside).is_err() {
+        if !rename_aside(&path, &aside, lock) {
             // Nobody holds it and it is old enough to go; the file system
             // refused. Reported rather than dropped: a `kept` column that
             // silently omits an entry makes the summary a count of nothing.
             report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
-        drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
             report.removed.push(reported(&path));
         } else {
@@ -1589,13 +1742,12 @@ pub fn uninstall(app_dir: &Path) -> PruneReport {
             continue;
         };
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
-        if std::fs::rename(&path, &aside).is_err() {
+        if !rename_aside(&path, &aside, lock) {
             // Nobody holds it: the file system refused, which is a different
             // thing to tell a user and a different thing to do about it.
             report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
-        drop(lock);
         if std::fs::remove_dir_all(&aside).is_ok() {
             report.removed.push(reported(&path));
         } else {
@@ -1787,6 +1939,36 @@ fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::Os;
+
+    #[test]
+    fn flush_open_options_asks_for_write_only_where_the_barrier_needs_it() {
+        // The wiring, not just the rule: `open_for_flush` consults the
+        // platform, so a Linux machine can assert every answer of it. Windows
+        // needs a writable handle for `FlushFileBuffers`; unix flushes a
+        // read-only one, and must, because a staged tree holds read-only files.
+        assert_eq!(flush_open_options(Os::Linux), (true, false));
+        assert_eq!(flush_open_options(Os::Macos), (true, false));
+        assert_eq!(flush_open_options(Os::Windows), (true, true));
+    }
+
+    #[test]
+    fn rename_aside_drops_the_lock_first_only_where_a_rename_refuses_open_children() {
+        assert_eq!(
+            rename_aside_order(Os::Windows),
+            RenameAsideOrder::DropThenRename,
+            "a Windows rename refuses a directory it holds a handle inside, so the lock is \
+             released first"
+        );
+        assert_eq!(
+            rename_aside_order(Os::Linux),
+            RenameAsideOrder::RenameThenDrop
+        );
+        assert_eq!(
+            rename_aside_order(Os::Macos),
+            RenameAsideOrder::RenameThenDrop
+        );
+    }
 
     fn env(pairs: &[(&str, &str)]) -> Env {
         Env::from_pairs(
@@ -1833,6 +2015,27 @@ mod tests {
         );
         assert_eq!(dirs.root, PathBuf::from("/xdg/ginary"));
         assert_eq!(dirs.origin, Origin::XdgCacheHome);
+    }
+
+    #[test]
+    fn a_windows_shaped_xdg_cache_home_is_ignored_by_the_unix_resolver() {
+        // The other half of the rule, and the half a Windows host got wrong:
+        // `Path::is_absolute` answers for the platform this was compiled for,
+        // so `/xdg` was relative there and `C:\\xdg` would be absolute. Both
+        // questions belong to the specification instead, and both are
+        // therefore the same on every host — which is what makes this
+        // assertion mean anything on a Linux machine. See
+        // `tests/regressions/e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path.rs`.
+        let dirs = resolve(
+            &env(&[("XDG_CACHE_HOME", "C:\\xdg"), ("HOME", "/home/u")]),
+            1000,
+        );
+        assert_eq!(dirs.root, PathBuf::from("/home/u/.cache/ginary"));
+        assert_eq!(
+            dirs.origin,
+            Origin::Home,
+            "a Windows path is not a POSIX absolute path, and this is the POSIX resolver"
+        );
     }
 
     #[test]

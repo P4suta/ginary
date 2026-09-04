@@ -45,11 +45,20 @@ it running unlocked. A write handle is needed on an entry's first lock and never
 
 `try_exclusive` shares one thing, `FILE_SHARE_DELETE`. It is not a weakening of the lock —
 sharing deletion says nothing about read or write access, so the paragraph above is unchanged —
-it is what makes the prune's own next step possible. `cache::prune_app` renames the entry
-directory while still holding `<entry>\.lock` inside it, and Windows refuses to rename a
-directory whose open handles do not permit deletion. Dropping the lock before the rename was the
-alternative, and it reopens the window between "nobody holds this" and "it is gone" that the
-lock exists to close.
+and it is what lets the removal that follows delete `<entry>\.lock` along with the tree it is
+in.
+
+**It does not, however, let the entry be renamed while the lock is held, and this ADR said it
+did.** A real Windows kernel answered that on 2026-09-03: every complete entry the first Windows
+runner found was reported `unremovable`, the rename refused with the lock still open inside the
+directory. `FILE_SHARE_DELETE` permits *that file* to be deleted or renamed; it says nothing
+about an ancestor directory of it. So the lock and the rename happen in that order rather than
+at once — the lock proves nobody is using the entry, it is released, and then the rename makes
+the claim. The window between "nobody holds this" and "it is gone" is real and is the price of
+being able to prune at all; on unix, where `rename(2)` asks nothing about open descriptors, the
+lock is still held across the rename and no window opens.
+`ginary::platform::rename_refuses_open_children` is where that difference is written down, and
+`docs/dev/log/E8.md` records the run.
 
 That is the same correspondence ADR 0010 has, reached by a
 different mechanism, with two differences a reader has to know about:
@@ -83,12 +92,30 @@ neither is worth refusing to run a packaged application over.
 three calls above — `SetConsoleCtrlHandler`, `CreateJobObjectW` with `SetInformationJobObject`,
 and `AssignProcessToJobObject` — are `kernel32` entry points with no safe wrapper in the
 standard library or anywhere else, and `forbid` cannot be lifted for a single module. So
-`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, four
+`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, seven
 `unsafe` blocks, each with a `SAFETY` note, every function total and every failure a `false` or
 a `None`. `deny` keeps every other file exactly as strict as `forbid` was, and the exception is
 one reviewable surface rather than three scattered blocks. The alternative was to ship a Windows
 launcher that orphans its runtime when it is killed and dies under Ctrl-C, which is a worse
 answer than a bounded exception.
+
+**Amendment, E12: a fourth call, and the module becomes `pub(crate)`.** The exception is no
+longer the resident launcher's alone. `cache::sweep` decides whether the launcher that owns a
+`.<key>.tmp-<pid>` tree is still extracting into it, and it decided by looking for `/proc/<pid>`
+— a directory Windows does not have, so every live launcher read as dead and the tree it was
+unpacking into was deleted underneath it. `win32::process_is_alive` is `OpenProcess` with
+`PROCESS_QUERY_LIMITED_INFORMATION`, the narrowest access right there is, and an immediate
+`CloseHandle`; `ERROR_INVALID_PARAMETER` is the only failure read as "no such process", and
+every other answer is "alive", because keeping a tree costs a directory and removing a live
+one destroys an extraction in progress.
+
+It lives in this module rather than in `cache.rs` for the reason the other three live here: a
+second `#[allow(unsafe_code)]` would be a second reviewable surface, and `CLAUDE.md` requires an
+ADR for one. `mod win32` therefore became `pub(crate) mod win32`, which widens what the crate can
+reach, not what the exception covers — the module is not exported and no new dependency or
+`windows-sys` feature was added. The counts this decision states are held to the module by
+`tests/regressions/e12_three_statements_of_the_unsafe_exception_said_three_calls.rs`, because
+they had already drifted twice before anything noticed.
 
 ## Consequences
 
@@ -96,17 +123,48 @@ The Windows launcher is **two processes where unix has one**. A `ps` on Windows 
 artifact and `erl.exe` beneath it; the artifact's own memory is the launcher's, which is small
 and idle for the whole run, and one extra process is the price of there being no `execve`.
 
-Everything above is **compiled and not run**. `mise run build:windows` builds both flavors for
+Most of the above is **compiled and not run**. `mise run build:windows` builds both flavors for
 `x86_64-pc-windows-gnu` and `stubs:build` produces the stub, and the stub *does* start under the
 `cross` image's wine — it prints its payloadless-stub sentence and exits 2, which exercises
 `target::Target::host`, `selfexe::open_self`'s `current_exe` route and `trailer::read_from`'s
-`seek_read` loop. Nothing beyond that has been executed. The spawn, the job object, the console
-handler, the share-mode lock and `erl.exe` itself have never run anywhere, and the pure rules
-underneath them — the cache root, the `\\?\` prefix, the two share modes, the exit-code
-mapping, the launch program and the Windows launch plan — are unit-tested on Linux precisely
-because that is all a Linux machine can honestly check. `docs/dev/log/D2.md` lists what remains,
-and it is a GitHub Actions milestone on a `windows-latest` runner: `halt(N)` propagation to
-`%ERRORLEVEL%`, the `otp_win64_<version>.zip` layout, and the end-to-end run of a real artifact.
+`seek_read` loop. Nothing beyond that runs on a Linux machine.
+
+The `windows` job of `.github/workflows/ci.yml` runs the suite natively, and what that job
+reaches of this decision is **two of its mechanisms and not four**: the share-mode lock, through
+the `cfg(windows)` regression tests that take `SharedLock` twice over one entry, and
+`win32::process_is_alive`, through `cache::sweep`'s. **The spawn, the job object and the console
+handler have still never run**, anywhere: the job builds both flavors, runs `cargo test` and
+probes `erl.exe`, and it starts no packaged artifact, while no test in the tree constructs a
+`LaunchPlan` and calls `launch_windows::run` — the one call site is `launcher::start`, reached by
+a launching artifact and by nothing else. The pure rules underneath all of them — the cache root,
+the `\\?\` prefix, the two share modes, the exit-code mapping, the launch program and the Windows
+launch plan — are unit-tested on Linux precisely because that is all a Linux machine can honestly
+check.
+`tests/regressions/e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran.rs` derives
+both premises from the tree rather than trusting this paragraph.
+
+One of the platform facts `docs/dev/log/D2.md` left to a real Windows host is now **measured**
+rather than assumed — and the measurement is an inference from silence, not a number printed in a
+log, which is the honest way to state it. That job runs `erl -noshell -eval "halt(3)"` against
+the OTP 29.0.5 `setup-beam` installs, on the `windows-2022` image this repository pins rather
+than the `windows-latest` label it deliberately does not take. The step's first execution — run
+[33864729638](https://github.com/P4suta/ginary/actions/runs/33864729638), job
+[100996872499](https://github.com/P4suta/ginary/actions/runs/33864729638/job/100996872499),
+Windows Server 2022 — printed **nothing at all** and reported `Process completed with exit code
+1` in 0.54 s. Only one of the three outcomes is silent: an `erl` that cannot be found prints
+PowerShell's `is not recognized as a name of a cmdlet` block, an `erl` that leaves the wrong
+number prints the thrown `expected ERRORLEVEL 3, got …`, and an `erl` that leaves exactly **3**
+says nothing and is then failed by the `exit $LASTEXITCODE` GitHub appends to every `pwsh` step —
+each of the three reproduced under that wrapper on a real PowerShell, in `docs/dev/log/E15.md`
+§10. So the emulator left 3 behind: `halt(N)` reaches the parent as the process exit code, and
+`run`'s contract — spawn `erl.exe`, wait, mirror the child's code — rests on something a Windows
+host has done. (erts-17.0.5 is what OTP 29.0.5 carries; that log printed no version either.) The
+step now captures the code, prints it and ends on a verdict of its own, so the next run of the
+job records the number directly and this citation is to be replaced by that one.
+`docs/dev/log/E15.md` records the diagnosis, and
+`tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs` holds every `pwsh` step to
+ending on a status of its own. What that milestone still owes is the `otp_win64_<version>.zip`
+layout and the end-to-end run of a real artifact, on the same runner.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows

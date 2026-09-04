@@ -14,15 +14,30 @@
 //! rather than by a user whose loader refuses the artifact. Nothing downstream
 //! trusts a provenance string.
 //!
-//! Which emulator, and which reader, is a property of the tree. A unix root's
-//! `erts-<vsn>/bin/beam.smp` is an ELF program read with [`crate::elf`]; a
-//! Windows root — the contents of `otp_win64_<version>.zip` — has no such file,
-//! and its `beam.smp.dll` is a PE image `erl.exe` loads, read straight from
-//! `object` for the reason `crate::stub` gives: a PE names no interpreter and
-//! the machine field is the whole question. The flavour test is
+//! Which emulator is read is a property of the tree, and which *reader* reads
+//! it is a property of the emulator. A Windows root — the contents of
+//! `otp_win64_<version>.zip` — has no `beam.smp` at all: its `beam.smp.dll` is
+//! a PE image `erl.exe` loads, read straight from `object` for the reason
+//! `crate::stub` gives, because a PE names no interpreter and the machine
+//! field is the whole question. That half is a layout test,
 //! [`crate::assemble::is_windows_erts_bin`], so assembly and this module cannot
 //! disagree about what a tree is, and a Windows tree handed to a Linux build is
 //! a target mismatch rather than a missing `beam.smp`.
+//!
+//! A *unix* tree cannot be told apart by its layout, because macOS lays
+//! `erts-<vsn>/bin` out exactly as Linux does; the only difference a build can
+//! observe is that one `beam.smp` is a Mach-O and the other an ELF. So the
+//! reader is chosen by the emulator's own first bytes — [`emulator_format`] —
+//! and a macOS runtime is read with [`crate::macho`] where a Linux one is read
+//! with [`crate::elf`]. Reading the first with the second is what stopped both
+//! macOS jobs of the first CI run that ever reached `ginary build`; see
+//! `tests/regressions/e7_a_macos_runtime_was_read_as_an_elf.rs`.
+//!
+//! That choice belongs to **every** path that reads an emulator, not only to
+//! the one a `dir:` reaches. A runtime the catalogue served and one a tarball
+//! unpacked go through `read_emulator`, which makes the same choice, so
+//! `catalog` and `tarball:` on a Mac resolve exactly as `dir:` does; see
+//! `tests/regressions/e16_a_cached_macos_runtime_was_read_by_the_elf_reader.rs`.
 //!
 //! Four of the five sources are available. `host` and `dir:PATH` need nothing
 //! but a path and resolve through [`resolve`]; `catalog` and `tarball:PATH`
@@ -58,7 +73,7 @@ use crate::otp::{OtpError, OtpInfo};
 use crate::target::{Libc, Linkage, Target};
 
 /// The emulator a unix ERTS installation holds, and the file that is read.
-pub const EMULATOR: &str = "beam.smp";
+pub const EMULATOR: &str = crate::target::EMULATOR_PROGRAM;
 
 /// The emulator a Windows ERTS installation holds, and the file that is read.
 ///
@@ -345,6 +360,45 @@ pub enum ErtsError {
         /// The machine its header named, as `object` spells it.
         machine: String,
     },
+    /// The macOS emulator is not a Mach-O binary at all.
+    #[error(
+        "the emulator at {path} is not a Mach-O binary ({reason}); a runtime for another \
+         target has to be a real cross-built tree, not a stand-in"
+    )]
+    NotAMachoRuntime {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// What the reader said.
+        reason: String,
+    },
+    /// The macOS emulator is a universal binary, so it is more than one
+    /// runtime and none of them is the one to bundle.
+    ///
+    /// An artifact carries one architecture, so a fat emulator has no
+    /// `cputype` to read the target off and no single set of bytes to ship.
+    /// It is a runtime that has to be thinned before it can be bundled, which
+    /// is a thing the user does to their own tree and not a thing ginary does
+    /// to somebody's installation behind their back.
+    #[error(
+        "the emulator at {path} is a universal binary carrying more than one architecture; \
+         bundle a runtime built for one target, or thin this one with `lipo -thin`"
+    )]
+    UniversalRuntime {
+        /// The emulator that was read.
+        path: PathBuf,
+    },
+    /// The macOS emulator is a Mach-O for a `cputype` ginary has no target
+    /// for.
+    #[error(
+        "the emulator at {path} is a Mach-O for {cputype}, which is not a target ginary \
+         packages for"
+    )]
+    UnknownMacosRuntimeTarget {
+        /// The emulator that was read.
+        path: PathBuf,
+        /// The `cputype` its header named, as [`crate::macho`] spells it.
+        cputype: String,
+    },
     /// The emulator is not an ELF binary at all.
     #[error(
         "the emulator at {path} is not an ELF binary ({reason}); a runtime for another target \
@@ -407,6 +461,95 @@ pub enum ErtsError {
         /// The emulator that was read.
         path: PathBuf,
     },
+}
+
+/// Which object-file reader an emulator's own first bytes call for.
+///
+/// The flavour of an OTP tree is a property of the *tree* — a Windows runtime
+/// spells its emulator `beam.smp.dll` and keeps an `erl.ini` beside it — but
+/// the flavour of a *unix* tree is not: macOS and Linux lay out
+/// `erts-<vsn>/bin` identically, and the only difference a build can see is
+/// that one `beam.smp` is a Mach-O and the other is an ELF. Reading a macOS
+/// runtime with the ELF reader is what killed both macOS jobs of run
+/// <https://github.com/P4suta/ginary/actions/runs/33702776627>:
+///
+/// ```text
+/// error: cannot resolve the runtime to bundle
+///   caused by: the emulator at .../erts-17.0.5/bin/beam.smp is not an ELF
+///   binary (not an ELF file); a runtime for another target has to be a real
+///   cross-built tree, not a stand-in
+/// ```
+///
+/// So the reader is chosen by the emulator's own magic, which is the same
+/// trust anchor the rest of this module already uses: nothing the
+/// configuration spelled is believed about a runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmulatorFormat {
+    /// `\x7fELF`: a Linux runtime, read by [`crate::elf`].
+    Elf,
+    /// A thin or fat Mach-O magic: a macOS runtime, read by [`crate::macho`].
+    MachO,
+    /// `MZ`: a Windows runtime, read straight from `object`.
+    Pe,
+}
+
+/// The format of an emulator, from the bytes at the head of the file.
+///
+/// [`None`] when `head` is shorter than the shortest magic or begins with
+/// none of them — a shell script where the emulator belongs, or a text file
+/// somebody renamed — which every caller reports as the runtime it could not
+/// read rather than guessing at.
+pub fn emulator_format(head: &[u8]) -> Option<EmulatorFormat> {
+    if crate::elf::is_elf(head) {
+        Some(EmulatorFormat::Elf)
+    } else if crate::macho::is_macho(head) {
+        Some(EmulatorFormat::MachO)
+    } else if head.starts_with(PE_MAGIC) {
+        Some(EmulatorFormat::Pe)
+    } else {
+        None
+    }
+}
+
+/// How many bytes of an emulator [`emulator_format`] needs.
+///
+/// Four, the longest magic it knows. A shorter file is read as far as it
+/// goes, and one too short to carry any magic at all classifies as no format
+/// rather than as a guess.
+const EMULATOR_MAGIC_LEN: usize = 4;
+
+/// `MZ`, the two bytes every PE image begins with.
+///
+/// The DOS stub's own magic, which is what a file *starts* with; the `PE\0\0`
+/// signature sits at an offset the stub names, and reading it would be
+/// parsing rather than classifying.
+const PE_MAGIC: &[u8] = b"MZ";
+
+/// The first [`EMULATOR_MAGIC_LEN`] bytes of `path`, or as many as it holds,
+/// or an empty vector when it cannot be opened or read at all.
+///
+/// A file nobody can read classifies as no format at all, which sends
+/// [`resolve_with`] down the arm it has always taken for an unreadable
+/// emulator: the reader itself reports what it could not read, in its own
+/// words, instead of this function inventing a second sentence for the same
+/// failure.
+fn emulator_magic(path: &Path) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let mut head = [0u8; EMULATOR_MAGIC_LEN];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Vec::new(),
+        }
+    }
+    head[..filled].to_vec()
 }
 
 /// Resolves one runtime and checks that it is the one the build asked for.
@@ -486,6 +629,19 @@ pub fn resolve_with(
     // The trust anchor: from here on nothing the configuration said is used,
     // and every fact comes out of the emulator's own header.
     let emulator = emulator_path(&otp);
+
+    // Which reader reads it is the emulator's own to say. The tree cannot:
+    // macOS lays `erts-<vsn>/bin` out exactly as Linux does, so the only
+    // difference a build can observe is that one `beam.smp` is a Mach-O and
+    // the other an ELF, and handing the first to the ELF reader is what
+    // stopped both macOS jobs of the first run that ever reached
+    // `ginary build`. Only a Mach-O is diverted: everything else keeps the
+    // reader it has always had, an unreadable file included, so that
+    // `inspect` stays the one place that says what it could not read.
+    if emulator_format(&emulator_magic(&emulator)) == Some(EmulatorFormat::MachO) {
+        return resolve_macos(spec, requested, otp, emulator);
+    }
+
     let facts = inspect(&emulator).map_err(|error| ErtsError::NotAnElfRuntime {
         path: emulator.clone(),
         reason: error.to_string(),
@@ -540,6 +696,46 @@ pub fn resolve_with(
     })
 }
 
+/// The macOS arm of [`resolve_with`].
+///
+/// The same shape as the Windows one and the same trust anchor: the machine
+/// comes off the emulator's own Mach-O header rather than off the spelling
+/// that named the tree, so an x86-64 runtime in an aarch64 build is
+/// [`ErtsError::TargetMismatch`] here rather than a loader error on somebody
+/// else's machine.
+///
+/// Three facts are not read, because a macOS runtime cannot vary in them. The
+/// emulator resolves `libSystem` at load time, so the linkage is
+/// [`Linkage::Dynamic`] and NIFs load; and macOS has one system C library, so
+/// the target's libc is [`Libc::None`] and there is no symbol-version floor to
+/// record. That is what [`crate::macho::MachoFacts::target`] already
+/// documents: the `cputype` is the whole of the target.
+///
+/// The header is read by [`read_macho_emulator`], which
+/// [`read_emulator`] shares, so a macOS runtime that arrives through the cache
+/// is read exactly as one named by `dir:` is.
+fn resolve_macos(
+    spec: &ErtsSourceSpec,
+    requested: &Target,
+    otp: OtpInfo,
+    emulator: PathBuf,
+) -> Result<ResolvedErts, ErtsError> {
+    let read = read_macho_emulator(emulator)?;
+    if read.target != *requested {
+        return Err(ErtsError::TargetMismatch {
+            path: otp.root.clone(),
+            requested: *requested,
+            actual: read.target,
+        });
+    }
+
+    let provenance = match spec {
+        ErtsSourceSpec::Host => format!("host:{}", otp.root.display()),
+        other => other.label(),
+    };
+    Ok(read.resolved(otp, provenance))
+}
+
 /// The Windows arm of [`resolve_with`].
 ///
 /// The same shape as the unix one and the same trust anchor: the machine comes
@@ -557,28 +753,49 @@ fn resolve_windows(
     requested: &Target,
     otp: OtpInfo,
 ) -> Result<ResolvedErts, ErtsError> {
-    let emulator = windows_emulator_path(&otp);
-    let arch = read_pe_machine(&emulator)?;
-    let target = Target::new(crate::target::Os::Windows, arch, Libc::None);
-    if target != *requested {
+    let read = read_windows_emulator(&otp)?;
+    if read.target != *requested {
         return Err(ErtsError::TargetMismatch {
             path: otp.root.clone(),
             requested: *requested,
-            actual: target,
+            actual: read.target,
         });
     }
 
-    Ok(ResolvedErts {
-        libc_min: None,
-        nif_loading: Linkage::Dynamic.loads_nifs(),
-        provenance: match spec {
-            ErtsSourceSpec::Host => format!("host:{}", otp.root.display()),
-            other => other.label(),
-        },
-        otp,
-        target,
+    let provenance = match spec {
+        ErtsSourceSpec::Host => format!("host:{}", otp.root.display()),
+        other => other.label(),
+    };
+    Ok(read.resolved(otp, provenance))
+}
+
+/// Reads one Windows runtime's emulator, `erts-<vsn>/bin/beam.smp.dll`.
+///
+/// The PE half of the trust anchor, shared by [`resolve_windows`] and
+/// [`read_emulator`] so that a runtime named by `dir:` and the same runtime
+/// served out of the cache are read by one function and cannot disagree — the
+/// arrangement [`read_macho_emulator`] already has for macOS.
+///
+/// Three facts are not read, because a Windows runtime cannot vary in them: it
+/// is a set of DLLs `erl.exe` loads, so the linkage is [`Linkage::Dynamic`];
+/// Windows has one system C runtime, so the C library is `none`; and there are
+/// no symbol versions, so there is no floor to record.
+///
+/// # Errors
+///
+/// [`ErtsError::NotAPeRuntime`] and
+/// [`ErtsError::UnknownWindowsRuntimeTarget`], as [`read_pe_machine`] reports
+/// them.
+fn read_windows_emulator(otp: &OtpInfo) -> Result<EmulatorRead, ErtsError> {
+    let emulator = windows_emulator_path(otp);
+    let arch = read_pe_machine(&emulator)?;
+
+    Ok(EmulatorRead {
+        emulator,
+        target: Target::new(crate::target::Os::Windows, arch, Libc::None),
         linkage: Linkage::Dynamic,
-        warnings: Vec::new(),
+        libc_kind: Some("none"),
+        libc_min: None,
     })
 }
 
@@ -822,6 +1039,11 @@ struct EmulatorRead {
     /// How it is linked.
     linkage: Linkage,
     /// The C library its own interpreter named, absent for a static build.
+    ///
+    /// A macOS emulator reports `Some("none")`: it resolves `libSystem` at
+    /// load time, and macOS has one system C library, so `none` is what a
+    /// catalogue entry for it has to claim. A Windows one reports the same,
+    /// for the same reason about the system C runtime.
     libc_kind: Option<&'static str>,
     /// The lowest glibc it will load against, for a dynamic gnu runtime.
     libc_min: Option<String>,
@@ -847,12 +1069,44 @@ impl EmulatorRead {
 /// The same three steps [`resolve_with`] makes, factored out because the two
 /// sources this milestone adds reach them through a cache rather than through a
 /// configured directory.
+///
+/// **Including the first two of them, in the order [`resolve_with`] makes
+/// them.** Which reader reads a runtime is the tree's and the emulator's own to
+/// say, and it is as much their own to say through a cache as it is through
+/// `dir:`.
+///
+/// The tree decides first. A Windows runtime's emulator is
+/// `erts-<vsn>/bin/beam.smp.dll` and its machine is a PE COFF field, so
+/// [`crate::assemble::is_windows_erts_bin`] — the one flavour test assembly and
+/// this module share — sends it to [`read_windows_emulator`] before the unix
+/// name `beam.smp` is even built. `crate::otp::inspect_root` accepts a Windows
+/// tree, so nothing above here refuses one first: without this arm a Windows
+/// runtime out of a cache asked the ELF seam to read a file that is not there.
+///
+/// The emulator decides second. macOS and Linux lay `erts-<vsn>/bin` out
+/// identically, so a runtime the catalogue served and one a tarball unpacked
+/// differ from a Linux one only in that `beam.smp` is a Mach-O — and handing
+/// that to the ELF seam refuses a healthy macOS runtime as
+/// [`ErtsError::NotAnElfRuntime`], which is what a user with no local OTP saw
+/// from `ginary build --erts catalog` on a Mac. Only a Mach-O is diverted:
+/// every other emulator, an unreadable one included, keeps the reader it has
+/// always had, so `inspect` stays the one place that says what it could not
+/// read.
 fn read_emulator(
     otp: &OtpInfo,
     requested: &Target,
     inspect: &impl Fn(&Path) -> Result<ElfFacts, ElfError>,
 ) -> Result<EmulatorRead, ErtsError> {
+    if crate::assemble::is_windows_erts_bin(&otp.erts_bin) {
+        return read_windows_emulator(otp);
+    }
+
     let emulator = emulator_path(otp);
+
+    if emulator_format(&emulator_magic(&emulator)) == Some(EmulatorFormat::MachO) {
+        return read_macho_emulator(emulator);
+    }
+
     let facts = inspect(&emulator).map_err(|error| ErtsError::NotAnElfRuntime {
         path: emulator.clone(),
         reason: error.to_string(),
@@ -881,5 +1135,45 @@ fn read_emulator(
             (Some(Libc::Gnu), Linkage::Dynamic) => facts.glibc_max.clone(),
             _ => None,
         },
+    })
+}
+
+/// Reads one macOS emulator's own Mach-O header.
+///
+/// The Mach-O half of the trust anchor, shared by [`resolve_macos`] and
+/// [`read_emulator`] so that a runtime named by `dir:` and the same runtime
+/// served out of the cache are read by one function and cannot disagree.
+///
+/// Three facts are not read, because a macOS runtime cannot vary in them: the
+/// emulator resolves `libSystem` at load time, so the linkage is
+/// [`Linkage::Dynamic`]; macOS has one system C library, so the C library is
+/// `none`; and there are no symbol versions, so there is no floor to record.
+/// The `cputype` is the whole of the target, which is what
+/// [`crate::macho::MachoFacts::target`] documents.
+///
+/// A fat binary is refused rather than picked from: which slice a build would
+/// take is a decision the configuration never made. An unrecognised `cputype`
+/// is refused for the same reason a `machine` the ELF reader does not know is.
+fn read_macho_emulator(emulator: PathBuf) -> Result<EmulatorRead, ErtsError> {
+    let facts = crate::macho::inspect(&emulator).map_err(|source| ErtsError::NotAMachoRuntime {
+        path: emulator.clone(),
+        reason: source.to_string(),
+    })?;
+    if facts.is_fat {
+        return Err(ErtsError::UniversalRuntime { path: emulator });
+    }
+    let Some(target) = facts.target else {
+        return Err(ErtsError::UnknownMacosRuntimeTarget {
+            path: emulator,
+            cputype: facts.cputype,
+        });
+    };
+
+    Ok(EmulatorRead {
+        emulator,
+        target,
+        linkage: Linkage::Dynamic,
+        libc_kind: Some("none"),
+        libc_min: None,
     })
 }

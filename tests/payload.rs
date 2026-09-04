@@ -18,9 +18,12 @@ use std::io::Read;
 
 use common::payload::{
     CountingReader, RawEntry, RawTar, TYPE_CHAR_DEVICE, TYPE_DIRECTORY, TYPE_FIFO,
-    TYPE_GNU_LONG_NAME, TYPE_HARDLINK, TYPE_SYMLINK, mode_of, sample_manifest,
+    TYPE_GNU_LONG_NAME, TYPE_HARDLINK, TYPE_SYMLINK, recorded_mode, sample_manifest,
     sample_manifest_json, sha256, staging_tree, tree_listing, zstd_bytes,
 };
+// A mode is a unix idea, and so is the one assertion that reads one.
+#[cfg(unix)]
+use common::payload::mode_of;
 use ginary::manifest::{INDEX_NAME, Index, MANIFEST_NAME};
 use ginary::payload::{
     MAX_FRONT_ENTRY_BYTES, PayloadError, pack, read_index, read_manifest, unpack,
@@ -265,15 +268,15 @@ fn the_packed_headers_keep_the_mode_the_file_has_on_disk() {
             .iter()
             .find(|(path, _)| path == "erts-17.0.5/bin/erlexec")
             .map(|(_, mode)| *mode),
-        Some(0o755),
-        "the execute bit survives packing: {modes:?}"
+        Some(recorded_mode(0o755, false)),
+        "the execute bit survives packing where the filesystem has one: {modes:?}"
     );
     assert_eq!(
         modes
             .iter()
             .find(|(path, _)| path == "lib/hello/priv/greeting.txt")
             .map(|(_, mode)| *mode),
-        Some(0o644),
+        Some(recorded_mode(0o644, false)),
         "and a plain file does not gain one: {modes:?}"
     );
 }
@@ -372,6 +375,7 @@ fn a_packed_tree_unpacks_to_the_same_bytes_and_the_same_modes() {
             "{} does not hold the bytes it was packed from",
             file.path
         );
+        #[cfg(unix)]
         assert_eq!(
             mode_of(&extracted),
             file.mode,

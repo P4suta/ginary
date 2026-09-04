@@ -24,7 +24,7 @@ use std::path::Path;
 use assert_cmd::Command;
 use serde_json::Value;
 
-use crate::common::script::script;
+use crate::common::script::{ShimStep, program};
 
 /// A `Command` for the `ginary` binary whose `PATH` holds only `dir`.
 fn ginary_with_path(dir: &Path) -> Command {
@@ -42,10 +42,14 @@ fn ginary_with_path(dir: &Path) -> Command {
 fn stub_erl_reporting(dir: &Path, root: &Path) -> std::path::PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("creates the stub PATH directory");
-    script(
+    program(
         &bin,
         "erl",
-        &format!("printf '%s\\n29\\n17.0.5\\n' '{}'", root.display()),
+        &[ShimStep::Print(vec![
+            root.display().to_string(),
+            "29".to_owned(),
+            "17.0.5".to_owned(),
+        ])],
     );
     bin
 }

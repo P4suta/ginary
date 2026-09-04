@@ -160,6 +160,25 @@ pub fn musl_interp(machine: u16) -> String {
     format!("/lib/ld-musl-{arch}.so.1")
 }
 
+/// The target an object built with [`host_machine`] and [`host_interp`]
+/// describes.
+///
+/// Not [`ginary::target::Target::host`]: the fixtures here are ELF files with
+/// a glibc or musl `PT_INTERP`, which is a *Linux* object whatever machine
+/// wrote them. On a Linux host the two are the same value, which is why the
+/// difference went unnoticed until a Windows runner read
+/// `target: Some(Target { os: Linux, .. })` out of a fixture the test claimed
+/// was the host's — see `docs/dev/log/E8.md` section 14. The libc follows the
+/// host's, because [`host_interp`] names musl's loader on a musl machine.
+pub fn host_object_target() -> ginary::target::Target {
+    use ginary::target::{Libc, Os, Target};
+    let libc = match Target::host().libc {
+        Libc::Musl => Libc::Musl,
+        _ => Libc::Gnu,
+    };
+    Target::new(Os::Linux, Target::host().arch, libc)
+}
+
 /// The loader an object built on *this* machine would name.
 pub fn host_interp() -> String {
     match ginary::target::Target::host().libc {
@@ -187,6 +206,155 @@ pub fn pe_bytes(machine: u16, dll: bool) -> Vec<u8> {
     }
     bytes
 }
+
+/// A minimal PE32+ library for `machine` whose import directory names
+/// `libraries`.
+///
+/// The shape no fixture in this suite had and two rules are decided by: what
+/// `src/native.rs` reads out of a PE is its *import list*, and every PE
+/// fixture here carried an empty one, so every assertion about a Windows
+/// object's `needed` was made against a list nothing had put anything into.
+/// [`verify::needed_is_allowed`] can be asked directly because it takes a
+/// name; `doctor::crypto_report_for` cannot — it reads a file — so the rule
+/// it applies to each import was reachable only through an object that really
+/// imports something.
+///
+/// Built on [`pe_bytes`], for the reason that one is built on
+/// [`crate::common::stubfile::pe_bytes`]: the headers are already the
+/// smallest `object` will parse, and what is written here is the one
+/// structure they leave empty. The section this claims is the `.text` section
+/// that helper already declares, which is why every offset it depends on is
+/// asserted before it is overwritten rather than assumed.
+///
+/// Each library is imported by *ordinal*, one symbol each. An import table
+/// names its library once per imported symbol and `object` reports the
+/// library on each of them, so one symbol is the whole list; an ordinal is
+/// the form that needs no `IMAGE_IMPORT_BY_NAME` beside it, and which symbol
+/// was imported is a thing no rule in this crate reads.
+///
+/// [`verify::needed_is_allowed`]: ginary::verify::needed_is_allowed
+///
+/// # Panics
+///
+/// If the fixture's layout has moved, or if the import structures do not fit
+/// in the one section the helper declares.
+pub fn pe_with_imports(machine: u16, libraries: &[&str]) -> Vec<u8> {
+    let mut bytes = pe_bytes(machine, true);
+
+    assert_eq!(
+        &bytes[PE_SECTION_HEADER_OFFSET..PE_SECTION_HEADER_OFFSET + 8],
+        b".text\0\0\0",
+        "the PE helper's one section header has moved"
+    );
+    for (field, at, expected) in [
+        (
+            "virtual address",
+            PE_SECTION_HEADER_OFFSET + 12,
+            PE_SECTION_RVA,
+        ),
+        (
+            "size of raw data",
+            PE_SECTION_HEADER_OFFSET + 16,
+            u32::try_from(PE_SECTION_LEN).expect("the section length is a u32"),
+        ),
+        (
+            "pointer to raw data",
+            PE_SECTION_HEADER_OFFSET + 20,
+            u32::try_from(PE_SECTION_FILE_OFFSET).expect("the file offset is a u32"),
+        ),
+        ("data directory count", PE_DATA_DIRECTORY_OFFSET - 4, 16),
+    ] {
+        assert_eq!(
+            u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")),
+            expected,
+            "the PE helper's {field} has moved"
+        );
+    }
+
+    let descriptors_len = (libraries.len() + 1) * PE_IMPORT_DESCRIPTOR_LEN;
+    let thunks_at = descriptors_len;
+    let names_at = thunks_at + libraries.len() * PE_THUNK_LIST_LEN;
+    let rva = |offset: usize| {
+        PE_SECTION_RVA + u32::try_from(offset).expect("an offset inside one 512-byte section")
+    };
+
+    let mut content = vec![0u8; names_at];
+    let mut name_rvas: Vec<u32> = Vec::with_capacity(libraries.len());
+    for library in libraries {
+        name_rvas.push(rva(content.len()));
+        content.extend_from_slice(library.as_bytes());
+        content.push(0);
+    }
+    for (index, name_rva) in name_rvas.iter().enumerate() {
+        let thunk_rva = rva(thunks_at + index * PE_THUNK_LIST_LEN);
+        let descriptor = index * PE_IMPORT_DESCRIPTOR_LEN;
+        content[descriptor..descriptor + 4].copy_from_slice(&thunk_rva.to_le_bytes());
+        content[descriptor + 12..descriptor + 16].copy_from_slice(&name_rva.to_le_bytes());
+        content[descriptor + 16..descriptor + 20].copy_from_slice(&thunk_rva.to_le_bytes());
+
+        // One thunk and the null that ends the list; the descriptor array
+        // ends with twenty zero bytes of its own, which are already there.
+        let thunk = thunks_at + index * PE_THUNK_LIST_LEN;
+        content[thunk..thunk + 8].copy_from_slice(&(PE_ORDINAL_FLAG | 1).to_le_bytes());
+    }
+    assert!(
+        content.len() <= PE_SECTION_LEN,
+        "{} libraries do not fit in the fixture's one section",
+        libraries.len()
+    );
+
+    bytes[PE_SECTION_FILE_OFFSET..PE_SECTION_FILE_OFFSET + content.len()].copy_from_slice(&content);
+    // The readable size of a section is the smaller of its two lengths, and
+    // the helper declares sixteen virtual bytes: without this the import
+    // directory is off the end of the section it lives in.
+    bytes[PE_SECTION_HEADER_OFFSET + 8..PE_SECTION_HEADER_OFFSET + 12].copy_from_slice(
+        &u32::try_from(PE_SECTION_LEN)
+            .expect("the section length is a u32")
+            .to_le_bytes(),
+    );
+    let directory = PE_DATA_DIRECTORY_OFFSET + PE_IMPORT_DIRECTORY * 8;
+    bytes[directory..directory + 4].copy_from_slice(&PE_SECTION_RVA.to_le_bytes());
+    bytes[directory + 4..directory + 8].copy_from_slice(
+        &u32::try_from(descriptors_len)
+            .expect("the descriptor array is a u32")
+            .to_le_bytes(),
+    );
+    bytes
+}
+
+/// Where the PE32+ optional header begins in [`pe_bytes`]'s output: the DOS
+/// stub, the `PE\0\0` signature and the twenty-byte COFF header.
+const PE_OPTIONAL_HEADER_OFFSET: usize = 0x40 + 4 + 20;
+
+/// Where the sixteen data directories begin: 112 bytes of PE32+ optional
+/// header fields precede them.
+const PE_DATA_DIRECTORY_OFFSET: usize = PE_OPTIONAL_HEADER_OFFSET + 112;
+
+/// Where the one section header begins: the optional header is 240 bytes.
+const PE_SECTION_HEADER_OFFSET: usize = PE_OPTIONAL_HEADER_OFFSET + 240;
+
+/// The virtual address [`pe_bytes`] gives that section.
+const PE_SECTION_RVA: u32 = 0x1000;
+
+/// Where that section's bytes begin in the file.
+const PE_SECTION_FILE_OFFSET: usize = 0x200;
+
+/// How many bytes of it there are.
+const PE_SECTION_LEN: usize = 0x200;
+
+/// `IMAGE_DIRECTORY_ENTRY_IMPORT`, the data directory that points at the
+/// import descriptor array.
+const PE_IMPORT_DIRECTORY: usize = 1;
+
+/// The length of one `IMAGE_IMPORT_DESCRIPTOR`.
+const PE_IMPORT_DESCRIPTOR_LEN: usize = 20;
+
+/// The length of one library's thunk list: one PE32+ thunk and the null that
+/// ends it.
+const PE_THUNK_LIST_LEN: usize = 16;
+
+/// `IMAGE_ORDINAL_FLAG64`, the bit that makes a thunk an import by ordinal.
+const PE_ORDINAL_FLAG: u64 = 0x8000_0000_0000_0000;
 
 /// A 64-bit Mach-O header, and nothing after it.
 ///
@@ -275,4 +443,149 @@ pub fn plant_executable(root: &Path, relative: &str, bytes: &[u8]) -> PathBuf {
             .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
     }
     path
+}
+
+// ------------------------------------------------------- the real ELF --
+
+/// The committed real ELF fixture: `erts-17.0.5/bin/inet_gethost` from the
+/// Erlang/OTP 29.0.5 toolchain, stripped — a genuine `x86_64` Linux ELF a
+/// linker wrote, with a real `PT_INTERP`, real `DT_NEEDED` (`libm.so.6`,
+/// `libc.so.6`, both on `verify`'s allowlist) and `e_machine` `EM_X86_64`.
+///
+/// This is the file the "plant a real ELF in the payload" tests are meant to
+/// carry, in place of this test run's own binary: a PE on Windows, an ELF on
+/// Linux, and so a native object whose machine depends on the host rather than
+/// on the file. See `tests/fixtures/elf/README.md` and `docs/dev/log/E9.md`.
+pub fn real_elf_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/elf/inet_gethost-x86_64-linux-gnu")
+}
+
+/// The bytes of [`real_elf_path`].
+///
+/// # Panics
+///
+/// If the fixture cannot be read, which would mean the repository itself is
+/// incomplete rather than that a test input was malformed.
+pub fn real_elf_bytes() -> Vec<u8> {
+    std::fs::read(real_elf_path()).expect("tests/fixtures/elf/ is committed to the repository")
+}
+
+/// Whether this host's own executables and shared libraries are ELF files.
+///
+/// The question five fixtures asked without asking it. Each plants "a real,
+/// unstripped, dynamically linked ELF" and reaches for
+/// [`std::env::current_exe`] to get one, which is an ELF on Linux, a Mach-O on
+/// macOS and a PE on Windows:
+///
+/// ```text
+/// ---- a_native_binary_in_the_staged_tree_is_stripped_and_stays_the_same_machine ----
+/// the copy is an ELF file: NotElf
+///
+/// ---- a_tree_whose_natives_are_all_for_another_machine_is_a_reported_skip ----
+/// a tree `strip` here cannot read is a reported skip, not NothingToStrip
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// Where the claim is about a *real* object this machine wrote — one a linker
+/// produced, with a machine field, a `PT_INTERP` and symbols to remove — the
+/// running executable is still the right fixture and the test is the one that
+/// has to stand aside. [`object_for`] and [`host_native_object`] are for the
+/// other case, where a header is all the claim needs.
+pub fn host_writes_elf() -> bool {
+    ginary::platform::object_format(ginary::platform::HOST) == ginary::platform::ObjectFormat::Elf
+}
+
+/// A shared object for `target`, in the container format that target's
+/// operating system uses.
+///
+/// The rule two tests and one whole build had no name for. Both
+/// `tests/e2e_native.rs` and
+/// `tests/regressions/c4_a_position_independent_program_was_a_shared_object.rs`
+/// plant "the host's own native code" in a shipment and then build for
+/// [`ginary::target::Target::host`]; both planted an ELF, because the fixture
+/// they reached for is one, and on a Windows host the build refused its own
+/// machine's shipment:
+///
+/// ```text
+/// error: cannot ship the native code this shipment carries
+///   caused by: native code in the shipment does not match target windows-x86_64
+/// package    artifact                   object
+/// hello_ffi  hello_ffi/priv/lib/nif.so  ELF x86_64 glibc (linux-x86_64-gnu)
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>.)
+///
+/// The refusal is correct — an ELF really cannot travel to a Windows target —
+/// so what has to change is the fixture. The format is chosen by
+/// [`ginary::platform::object_format`], so a test asserts all three answers on
+/// one machine rather than only the one it is running on.
+///
+/// # Panics
+///
+/// If `target` names an architecture no fixture builder here has a machine
+/// number for.
+pub fn object_for(target: &ginary::target::Target) -> Vec<u8> {
+    use ginary::platform::ObjectFormat;
+    use ginary::target::Arch;
+
+    match ginary::platform::object_format(target.os) {
+        ObjectFormat::Elf => {
+            let machine = match target.arch {
+                Arch::X86_64 => EM_X86_64,
+                Arch::Aarch64 => EM_AARCH64,
+            };
+            let interp = if target.libc == ginary::target::Libc::Musl {
+                musl_interp(machine)
+            } else {
+                gnu_interp(machine)
+            };
+            shared_object(machine, Some(&interp))
+        }
+        ObjectFormat::Pe => {
+            let machine = match target.arch {
+                Arch::X86_64 => crate::common::stubfile::PE_MACHINE_AMD64,
+                Arch::Aarch64 => crate::common::stubfile::PE_MACHINE_ARM64,
+            };
+            pe_bytes(machine, true)
+        }
+        ObjectFormat::MachO => {
+            let cpu = match target.arch {
+                Arch::X86_64 => MACHO_CPU_X86_64,
+                Arch::Aarch64 => MACHO_CPU_ARM64,
+            };
+            macho_bytes(cpu, MACHO_TYPE_DYLIB)
+        }
+    }
+}
+
+/// The bytes a test plants where the host's own native code goes.
+///
+/// [`object_for`] asked about [`ginary::target::Target::host`], except on the
+/// one host the committed fixture is really for: an x86-64 glibc Linux
+/// machine gets `tests/fixtures/elf/inet_gethost-x86_64-linux-gnu`, a file a
+/// real linker wrote, which is what every ELF-host assertion in the suite has
+/// been made against and what a `strip` run over the staged tree can actually
+/// work on.
+///
+/// The fixture is *not* returned on every ELF host, which is what this helper
+/// first did. `crate::common::repack::native_arch` is always `x86_64` and the
+/// bytes always name glibc's loader, so on a linux-aarch64 host the caller
+/// planted an object for another machine and the build refused its own
+/// shipment — the same machine mismatch, one platform over, that this
+/// milestone exists to remove. A fabricated header is the honest second best
+/// everywhere else.
+pub fn host_native_object() -> Vec<u8> {
+    let host = ginary::target::Target::host();
+    let fixture_is_for_this_host = ginary::platform::object_format(host.os)
+        == ginary::platform::ObjectFormat::Elf
+        && crate::common::repack::native_arch() == host.arch
+        && host.libc == ginary::target::Libc::Gnu;
+    if fixture_is_for_this_host {
+        crate::common::repack::test_binary()
+    } else {
+        object_for(&host)
+    }
 }

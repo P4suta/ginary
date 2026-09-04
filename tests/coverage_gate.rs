@@ -15,6 +15,12 @@
 //! The script does not exist yet; every test here fails at the assertion that
 //! looks for it.
 
+// A unix file: every test here spawns `scripts/ci/coverage-gate.sh` directly,
+// which needs a shell that reads a `#!` line, and asserts the execute bit the
+// index carries. Both are unix facts, and the job that runs this gate is an
+// ubuntu one.
+#![cfg(unix)]
+
 mod common;
 
 use std::path::PathBuf;

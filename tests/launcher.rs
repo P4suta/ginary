@@ -12,6 +12,14 @@
 //! The environment of every run is cleared first. A launcher test that read
 //! the developer's `HOME` or their real cache would pass on one machine.
 
+// A unix file. Every test here starts a real process out of a hand-assembled
+// artifact whose `erlexec` is a `#!/bin/sh` script, and asserts what `execve`
+// did with it: none of that exists on Windows, where the launcher spawns and
+// waits instead. `tests/windows.rs` is the other half, and holds every rule of
+// the Windows launcher a Linux machine can honestly check. See
+// tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs.
+#![cfg(unix)]
+
 mod common;
 
 use std::path::{Path, PathBuf};

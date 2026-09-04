@@ -243,13 +243,32 @@ mod tests {
         std::io::Error::from_raw_os_error(code)
     }
 
+    /// What the operating system says about `code`, in its own words.
+    ///
+    /// The text after ginary's colon is not ginary's to spell: it comes from
+    /// `io::Error`'s own `Display`, which every C library renders in its own
+    /// words and some render in the user's language. glibc says `No such file
+    /// or directory (os error 2)`; the Windows CRT says `The system cannot
+    /// find the file specified. (os error 2)`, which is how three of these
+    /// assertions failed on the first Windows runner. An expectation built
+    /// from the same value is exact on every host, and it still pins what
+    /// ginary owns — the prefix, the path, and that the cause is appended
+    /// after a colon. See
+    /// `tests/regressions/e7_the_unit_tests_asked_the_host_what_platform_it_was.rs`.
+    fn os_words(code: i32) -> String {
+        io(code).to_string()
+    }
+
     #[test]
     fn opening_the_running_executable_is_121() {
         let error = LauncherError::SelfExe(io(2));
         assert_eq!(error.exit_code(), 121);
         assert_eq!(
             error.to_string(),
-            "ginary: cannot open the running executable: No such file or directory (os error 2)"
+            format!(
+                "ginary: cannot open the running executable: {}",
+                os_words(2)
+            )
         );
     }
 
@@ -298,8 +317,10 @@ mod tests {
         assert_eq!(error.exit_code(), 124);
         assert_eq!(
             error.to_string(),
-            "ginary: the runtime cache at /var/cache/ginary/hello is unusable: Permission denied \
-             (os error 13)"
+            format!(
+                "ginary: the runtime cache at /var/cache/ginary/hello is unusable: {}",
+                os_words(13)
+            )
         );
     }
 
@@ -313,8 +334,10 @@ mod tests {
         assert_eq!(error.exit_code(), 125);
         assert_eq!(
             error.to_string(),
-            "ginary: cannot start /c/hello/k/erts-17.0.5/bin/erlexec: No such file or directory \
-             (os error 2)"
+            format!(
+                "ginary: cannot start /c/hello/k/erts-17.0.5/bin/erlexec: {}",
+                os_words(2)
+            )
         );
     }
 

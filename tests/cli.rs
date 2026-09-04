@@ -21,6 +21,7 @@ use assert_cmd::Command;
 use serde_json::Value;
 
 use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
+use crate::common::hostpath::{is_absolute_for, joined};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
@@ -215,8 +216,14 @@ fn doctor_text_names_the_otp_root_and_version() {
         !stdout.contains("otp: not found"),
         "`erl` is on PATH, so doctor must report the installation:\n{stdout}"
     );
+    // Absolute as *this* platform spells it: the Windows runtime prints
+    // `otp root: d:/a/_temp/.setup-beam/otp`, which is absolute and does not
+    // begin with a slash. See
+    // `tests/regressions/e10_a_test_asked_posix_whether_a_windows_path_was_absolute.rs`.
     assert!(
-        stdout.lines().any(|line| line.starts_with("otp root: /")),
+        stdout.lines().any(|line| line
+            .strip_prefix("otp root: ")
+            .is_some_and(|root| is_absolute_for(ginary::platform::HOST, root))),
         "no absolute `otp root:` line in:\n{stdout}"
     );
     assert!(
@@ -782,13 +789,14 @@ fn stage_trees_with(erl: fn(FakeOtp) -> FakeOtp) -> (tempfile::TempDir, PathBuf,
     (dir, shipment_root, otp_root, out)
 }
 
-/// The argument vector the stub `bin/erl` under `otp` was called with.
+/// The argument vector the stub `erl` under `otp` was called with.
+///
+/// `script::recorded_argv` and not `<otp>/bin/erl.argv` by name: the program
+/// the fake runtime plants is `erl.exe` where the platform spells it that
+/// way, so its log is `erl.exe.argv`, and reading the unix name answered
+/// `NotFound` and made three tests report that stripping had never started.
 fn erl_argv(otp: &Path) -> Vec<String> {
-    match std::fs::read_to_string(otp.join("bin/erl.argv")) {
-        Ok(text) => text.lines().map(str::to_owned).collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("cannot read the argv log: {error}"),
-    }
+    crate::common::script::recorded_argv(&otp.join("bin"), "erl")
 }
 
 /// Every `.beam` under `root`, as absolute paths, in staged-tree path order.
@@ -819,9 +827,13 @@ fn staged_modules(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     collect(root, root, &mut found);
     found.sort();
+    // `hostpath::joined` and not `Path::join`: the walk above respells every
+    // separator as `/`, and joining that back on with `Path::join` leaves the
+    // relative half as it was written, producing a mixed spelling nothing on
+    // that platform writes.
     found
         .iter()
-        .map(|relative| root.join(relative).display().to_string())
+        .map(|relative| joined(root, relative))
         .collect()
 }
 
@@ -909,6 +921,24 @@ fn beam_chunks_without_a_path_is_a_usage_error() {
     ginary().args(["beam", "chunks"]).assert().code(2);
 }
 
+// `ginary elf deps` reads an ELF, and the only file a test can point it at
+// without a toolchain or a checked-in blob is the binary this run built. That
+// is an ELF on Linux, a Mach-O on macOS and a PE on Windows, so the three
+// claims about what it *contains* — its `libc.so.6`, its glibc floor, its
+// `ET_DYN` — are claims only a host whose linker writes ELF can be asked. The
+// format-blind half of the command, `elf_deps_reports_a_file_that_is_not_an_elf_
+// and_exits_one`, is ungated and runs everywhere. This is the same scoping
+// `tests/elf.rs` applies to `current_exe` and E8's Fix round 1 applied to
+// `tests/erts_source.rs`; see `docs/dev/log/E8.md` section 14.
+//
+// The C library is named in the gate as well as the operating system, because
+// `target_os = "linux"` is true on musl Linux too and the claims below are
+// glibc's own: `libc.so.6` is glibc's `SONAME`, and a static musl test binary
+// needs no shared library at all and names no interpreter. Two of the seven
+// targets this project distributes are musl. See
+// `tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`,
+// which holds the rule over the whole test tree.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn elf_deps_prints_what_the_binary_needs() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
@@ -937,6 +967,8 @@ fn elf_deps_prints_what_the_binary_needs() {
     assert!(stdout.contains("libc.so.6"), "{stdout}");
 }
 
+// A host whose linker writes ELF, for the reason above.
+#[cfg(target_os = "linux")]
 #[test]
 fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
     // Two files, so the text form's per-file separator and its whole
@@ -968,6 +1000,9 @@ fn elf_deps_text_lists_each_named_binary_under_its_own_path() {
     );
 }
 
+// A host whose linker writes ELF and whose C library is glibc, for the two
+// reasons above.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn elf_deps_json_carries_the_documented_keys() {
     let binary = assert_cmd::cargo::cargo_bin("ginary");
@@ -1023,9 +1058,13 @@ fn elf_deps_json_carries_the_documented_keys() {
 
 /// The same ELF with `e_type` set to `ET_EXEC`.
 ///
+/// Reachable only from `elf_deps_json_carries_the_documented_keys`, which is
+/// gated on a host whose linker writes ELF, so this is too.
+///
 /// `e_type` is the two bytes at offset 16 of the header, in the file's own
 /// byte order; every target ginary builds for is little-endian, and the
 /// assertion below says so rather than assuming it.
+#[cfg(target_os = "linux")]
 fn et_exec(elf: &[u8]) -> Vec<u8> {
     const ELFDATA2LSB: u8 = 1;
     const ET_EXEC: u16 = 2;
@@ -1085,7 +1124,9 @@ fn stage_runs_the_otp_roots_own_erl_with_the_beam_lib_one_liner() {
         "-noshell".to_owned(),
         "-env".to_owned(),
         "ERL_CRASH_DUMP".to_owned(),
-        "/dev/null".to_owned(),
+        // The bit bucket this platform has: `nul` on Windows, where
+        // `/dev/null` is a relative path naming a directory that is not there.
+        ginary::process::null_device_here().to_owned(),
         "-eval".to_owned(),
         "Files=init:get_plain_arguments(), case beam_lib:strip_files(Files) of {ok,_} -> \
          halt(0); Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end."
@@ -1107,10 +1148,18 @@ fn stage_skips_the_beam_step_when_the_otp_root_holds_no_erl() {
     let assert = stage_command(&shipment, &otp, &out).assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
 
+    // `platform::erl_program` and not `erl`: the runtime ginary looks for on
+    // Windows is `bin\erl.exe`, which is the name the skip prints.
+    let looked_for = joined(
+        &otp,
+        &format!(
+            "bin/{}",
+            ginary::platform::erl_program(ginary::platform::HOST)
+        ),
+    );
     assert!(
-        stdout.contains("beams: skipped:")
-            && stdout.contains(&otp.join("bin/erl").display().to_string()),
-        "the skip names the `erl` that was looked for:\n{stdout}"
+        stdout.contains("beams: skipped:") && stdout.contains(&looked_for),
+        "the skip names the `{looked_for}` that was looked for:\n{stdout}"
     );
     assert!(
         out.join("ginary.stage.json").is_file(),
@@ -1390,18 +1439,23 @@ fn cache_dir_json_carries_the_provenance_and_the_fallback_flag() {
 #[test]
 fn cache_dir_reports_the_temporary_fallback_when_nothing_is_set() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // The variable *this* platform's resolver reads, and the origin word it
+    // puts in the JSON: `TMPDIR` on unix and `TEMP` on Windows. Written down,
+    // the test set a variable Windows ignores and then asked for an origin no
+    // Windows run reports.
+    let variable = ginary::platform::temp_dir_var(ginary::platform::HOST);
     let mut command = ginary();
-    command.env_clear().env("TMPDIR", dir.path());
+    command.env_clear().env(variable, dir.path());
     crate::common::coverage::preserve_coverage_env_assert(&mut command);
     let assert = command.args(["cache", "dir", "--json"]).assert().success();
     let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
-    assert_eq!(value["origin"], Value::from("TMPDIR fallback"));
+    assert_eq!(value["origin"], Value::from(format!("{variable} fallback")));
     assert_eq!(value["is_fallback"], Value::from(true));
     assert!(
         value["path"]
             .as_str()
             .is_some_and(|path| path.starts_with(&dir.path().display().to_string())),
-        "the fallback must live under TMPDIR, and it is {:?}",
+        "the fallback must live under {variable}, and it is {:?}",
         value["path"]
     );
 }

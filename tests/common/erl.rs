@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+use ginary::target::Target;
+
 use crate::common::bounded::run_bounded;
 
 /// How long a staged `hello_ffi` gets to start, run and halt.
@@ -91,7 +93,12 @@ pub fn run_staged(root: &Path, app: &str, args: &[&str], home: &Path) -> Output 
             .unwrap_or_else(|error| panic!("cannot create {}: {error}", dir.display()));
     }
 
-    let mut command = Command::new(erts_bin.join("erlexec"));
+    // `erlexec` on unix and `erl.exe` on Windows, which has no `erlexec` at
+    // all: the six `tests/stage_run.rs` failures that reported
+    // `cannot run the staged `hello_ffi` under <root>\\erts-17.0.5\\bin:
+    // The system cannot find the file specified. (os error 2)` were this
+    // helper looking for a program the staged tree does not carry there.
+    let mut command = Command::new(erts_bin.join(Target::host().launch_program()));
     command
         .env_clear()
         .env("ROOTDIR", root)

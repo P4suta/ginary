@@ -33,12 +33,21 @@ use ginary::native::{self, HookCtx};
 use ginary::target::{Arch, Libc, Os, Target};
 
 use crate::common::fake_otp::{DEFAULT_ERTS_VSN, DEFAULT_OTP_VERSION, FakeOtp};
+use crate::common::tools::require_posix_shell;
 
 /// The project directory name that broke the hook.
 const AWKWARD: &str = "my project";
 
 #[test]
 fn a_hook_is_handed_its_output_directory_as_one_word() {
+    // The hook is run through `native::HOOK_SHELL`, so a machine with no such
+    // shell cannot answer this at all: on the Windows runner `run_hook` failed
+    // at the spawn with `The system cannot find the path specified.` and the
+    // claim was never reached. See
+    // `e11_a_shell_script_test_ran_on_a_host_with_no_posix_shell`.
+    let Some(_shell) = require_posix_shell() else {
+        return;
+    };
     let dir = tempfile::tempdir().expect("a temporary directory");
     let project = dir.path().join(AWKWARD);
     std::fs::create_dir_all(&project).expect("the project directory");

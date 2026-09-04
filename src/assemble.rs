@@ -34,8 +34,8 @@
 //! `ebin` or `priv` by way of a symlink, whether the link is inside them or is
 //! one of them. A Windows runtime's `bin` is read by [`windows_required_bins`]
 //! instead — the three names in [`WINDOWS_REQUIRED_BINS`] and every DLL beside
-//! them — and which of the two lists applies is read off the tree rather than
-//! off the target that was asked for.
+//! them but [`WINDOWS_DEBUG_EMULATOR_DLL`] — and which of the two lists applies
+//! is read off the tree rather than off the target that was asked for.
 //!
 //! **The boot file is checked against the tree.** `no_dot_erlang.boot` names
 //! the `kernel` and `stdlib` versions it was built against, as literal
@@ -546,6 +546,24 @@ pub enum AssembleError {
         /// The path that was looked at.
         searched: PathBuf,
     },
+    /// One of [`WINDOWS_REQUIRED_BINS`] is in the runtime under a spelling
+    /// that differs from it only in case.
+    ///
+    /// Its own answer rather than a longer [`Self::MissingErtsBinary`]: a
+    /// tree that never had the file and a tree that has it under another name
+    /// are two problems, and only one of them is fixed by renaming. See
+    /// [`windows_required_bins`] for why the three names are matched exactly.
+    #[error(
+        "the ERTS binary `{name}` is not in the runtime under that name; the tree spells it `{found}`, and ginary names this file exactly — the flavour test, the launcher's preflight and the artifact index all spell it `{name}` — so rename it in the tree, or use a runtime that spells it that way; looked for it at `{searched}`"
+    )]
+    ErtsBinaryNamedInAnotherCase {
+        /// The name ginary needs, exactly.
+        name: String,
+        /// The name the tree really spells it with.
+        found: String,
+        /// The path that was looked at.
+        searched: PathBuf,
+    },
     /// A binary named in [`StageOptions::extra_bins`] is not in the runtime.
     #[error(
         "the extra ERTS binary `{name}` is not in the runtime's `bin` directory; drop it from --extra-bin or use a runtime that has it"
@@ -706,6 +724,14 @@ fn or_nothing(names: &[String]) -> String {
 /// one of them is disagreeing with the decision rather than with an accident.
 #[cfg(feature = "cli")]
 pub fn excluded_reason(name: &str) -> &'static str {
+    // The Windows name first, and case-insensitively, for the reason
+    // [`is_windows_library`] compares its suffix that way: a Windows
+    // filesystem does not distinguish the spellings and the zip this tree came
+    // out of is under no obligation to pick one. The unix names below are
+    // compared exactly, because there the two spellings are two files.
+    if name.eq_ignore_ascii_case(WINDOWS_DEBUG_EMULATOR_DLL) {
+        return DEBUG_EMULATOR_REASON;
+    }
     match name {
         "erl" => "the shell wrapper; the launcher execs erlexec directly",
         "erlc" | "escript" | "dialyzer" | "typer" | "ct_run" | "yielding_c_fun" => {
@@ -720,9 +746,21 @@ pub fn excluded_reason(name: &str) -> &'static str {
         "dyn_erl" | "erl.src" | "start.src" | "start_erl.src" => {
             "an installation-time template, not a program"
         }
+        "beam.debug.smp" => DEBUG_EMULATOR_REASON,
         _ => "not on the launcher's allowlist",
     }
 }
+
+/// Why [`WINDOWS_DEBUG_EMULATOR_DLL`] and its unix counterpart are left
+/// behind.
+///
+/// One sentence, named, because the decline and the reason are one policy
+/// read from two places and a spelling that reached one of them and not the
+/// other reported the file as "not on the launcher's allowlist" when the
+/// answer is that nothing on a user's machine could load it.
+#[cfg(feature = "cli")]
+const DEBUG_EMULATOR_REASON: &str =
+    "the debug emulator; nothing loads it and it needs a C runtime no user's machine has";
 
 /// Builds the staging root at `out` from a closure and a runtime.
 ///
@@ -936,7 +974,14 @@ fn build(
         // Relative to the staged root, which is what every other entry in the
         // account is: an absolute path here would name the temporary directory
         // this build happened to use.
-        junk_removed.push((relative(root, &staged_bin.join(WINDOWS_ERL_INI)), size));
+        junk_removed.push((
+            listed_relative(
+                root,
+                &staged_bin.join(WINDOWS_ERL_INI),
+                crate::platform::HOST,
+            ),
+            size,
+        ));
         junk_removed.sort();
     }
 
@@ -1017,6 +1062,25 @@ pub const WINDOWS_REQUIRED_BINS: [&str; 3] = [
     WINDOWS_RESOLVER_PROGRAM,
 ];
 
+/// The debug build of the emulator, which ships beside the real one and never
+/// travels.
+///
+/// A unix `erts-<vsn>/bin` holds `beam.debug.smp` beside `beam.smp` and
+/// [`crate::otp::REQUIRED_ERTS_BINARIES`] leaves it behind by not naming it.
+/// The Windows rule cannot be a fixed list — see [`windows_required_bins`] —
+/// so the debug emulator is left behind by name instead, for two reasons that
+/// are each sufficient. Nothing in a packaged artifact loads it: `erl.exe`
+/// loads [`WINDOWS_EMULATOR_DLL`] unless it is asked for the debug emulator,
+/// which a packaged application never is. And it could not be loaded if
+/// something tried: it needs the *debug* C runtime — `MSVCP140D.dll`,
+/// `VCRUNTIME140D.dll`, `VCRUNTIME140_1D.dll` and `ucrtbased.dll` — which is
+/// not redistributable and exists only where Visual Studio is installed, so
+/// `ginary verify` reported four findings against every Windows artifact for
+/// a file that was dead weight in all of them. See
+/// `tests/regressions/e12_a_windows_artifact_carried_the_debug_emulator.rs`.
+#[cfg(feature = "cli")]
+pub const WINDOWS_DEBUG_EMULATOR_DLL: &str = "beam.debug.smp.dll";
+
 /// The names a Windows `erts-<vsn>/bin` contributes to the artifact.
 ///
 /// Data-driven rather than a fixed list, because a Windows ERTS tree is a zip
@@ -1027,12 +1091,40 @@ pub const WINDOWS_REQUIRED_BINS: [&str; 3] = [
 /// the unix tree's spare programs behind. The answer is sorted, so a staged
 /// tree does not depend on the order a directory was read back in.
 ///
+/// [`WINDOWS_DEBUG_EMULATOR_DLL`] is the one DLL the rule declines, and it is
+/// declined *after* the required names are checked: a tree whose only
+/// emulator is the debug build is not a runtime, and refusing it by the name
+/// that is missing is a better answer than staging it and finding out on
+/// somebody else's machine. The name is compared the way the `.dll` rule
+/// beside it compares its suffix — case-insensitively — because a zip
+/// spelling it `BEAM.DEBUG.SMP.DLL` would otherwise pass the decline and be
+/// admitted as a library by the rule on the next line.
+///
+/// The three required names are the other way round, and deliberately: they
+/// are matched *exactly*, because every other gate that names these files
+/// names them literally. [`is_windows_erts_bin`] decides a tree's flavour by
+/// joining [`WINDOWS_LAUNCH_BINARY`] onto it,
+/// [`crate::launch::WINDOWS_REQUIRED_BINARIES`] checks the extracted tree by
+/// name, and the index a Linux host verifies a Windows artifact against
+/// carries the name the tree was staged under. A tree admitted here under
+/// another spelling would satisfy this one rule and fail those on any
+/// case-sensitive host, so it is refused instead — but it is refused by
+/// [`AssembleError::ErtsBinaryNamedInAnotherCase`], which names the spelling
+/// the tree really uses, rather than by a message telling a user a file they
+/// can see is not there.
+///
+/// What is declined here is reported: it
+/// is not in the answer, so [`StagedRoot::excluded_erts_bins`] carries it with
+/// the reason [`excluded_reason`] gives it.
+///
 /// # Errors
 ///
 /// [`AssembleError::MissingErtsBinary`] naming the first of
 /// [`WINDOWS_REQUIRED_BINS`] that is not there: a tree missing any of them is
 /// not a runtime, and finding that out at extraction time on somebody else's
 /// machine is exactly what this check exists to prevent.
+/// [`AssembleError::ErtsBinaryNamedInAnotherCase`] when that name is in the
+/// tree and differs from the one ginary needs only in case.
 /// [`AssembleError::Io`] when the directory cannot be listed.
 #[cfg(feature = "cli")]
 pub fn windows_required_bins(erts_bin: &Path) -> Result<Vec<String>, AssembleError> {
@@ -1051,18 +1143,33 @@ pub fn windows_required_bins(erts_bin: &Path) -> Result<Vec<String>, AssembleErr
 
     // All three by name, and all three before anything is collected: a tree
     // missing any of them is not a runtime, and a staged tree that is missing
-    // one is found out at extraction time on somebody else's machine.
+    // one is found out at extraction time on somebody else's machine. The
+    // comparison is exact, for the reason this function's documentation
+    // gives; a tree that holds the file under another case is told so rather
+    // than told the file is not there.
     for required in WINDOWS_REQUIRED_BINS {
-        if !present.contains(required) {
-            return Err(AssembleError::MissingErtsBinary {
+        if present.contains(required) {
+            continue;
+        }
+        let found = present
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(required));
+        return Err(match found {
+            Some(found) => AssembleError::ErtsBinaryNamedInAnotherCase {
+                name: required.to_owned(),
+                found: found.clone(),
+                searched: erts_bin.join(required),
+            },
+            None => AssembleError::MissingErtsBinary {
                 name: required.to_owned(),
                 searched: erts_bin.join(required),
-            });
-        }
+            },
+        });
     }
 
     Ok(present
         .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case(WINDOWS_DEBUG_EMULATOR_DLL))
         .filter(|name| WINDOWS_REQUIRED_BINS.contains(&name.as_str()) || is_windows_library(name))
         .collect())
 }
@@ -1509,7 +1616,7 @@ fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, A
         if obj.is_dir() {
             let bytes = tree_bytes(&obj)?;
             remove_dir(&obj)?;
-            removed.push((relative(root, &obj), bytes));
+            removed.push((listed_relative(root, &obj, crate::platform::HOST), bytes));
         }
 
         let lib = priv_dir.join("lib");
@@ -1524,7 +1631,7 @@ fn remove_junk(root: &Path, apps: &[StagedApp]) -> Result<Vec<(PathBuf, u64)>, A
                     path: path.clone(),
                     source,
                 })?;
-                removed.push((relative(root, &path), bytes));
+                removed.push((listed_relative(root, &path, crate::platform::HOST), bytes));
             }
         }
     }
@@ -1682,19 +1789,31 @@ fn size_of(path: &Path) -> Result<u64, AssembleError> {
         })
 }
 
-/// The permission bits of a file, or zero on a platform without them.
+/// The permission bits of a file, as the listing records them.
+///
+/// `st_mode & 0o7777` where the filesystem has a mode word, and
+/// [`crate::platform::modeless_mode`] where it has none. Zero was the old
+/// answer on such a platform and it was wrong twice over: it is not a mode any
+/// file has, and it disagreed with the two other producers of the same column
+/// — [`crate::manifest::Index::from_staged`] and the payload's `tar` header —
+/// so `ginary verify` reported a mismatch nobody had introduced. One rule, one
+/// answer; `docs/dev/log/E8.md` records the run that found it.
 #[cfg(feature = "cli")]
 fn mode_of(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
-    {
+    let raw_mode = {
         use std::os::unix::fs::PermissionsExt as _;
         metadata.permissions().mode() & 0o7777
-    }
+    };
+    // A modeless filesystem has no `st_mode` to read; `recorded_mode` discards
+    // this value there, so `0` stands for "unread".
     #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        0
-    }
+    let raw_mode = 0u32;
+    crate::platform::recorded_mode(
+        crate::platform::has_unix_modes(crate::platform::HOST),
+        raw_mode,
+        metadata.is_dir(),
+    )
 }
 
 /// A path relative to the staged root, or the path itself if it is not under
@@ -1702,6 +1821,32 @@ fn mode_of(metadata: &std::fs::Metadata) -> u32 {
 #[cfg(feature = "cli")]
 fn relative(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+/// A path relative to the staged root, spelled the way the listing carries it.
+///
+/// The junk table is read against `ginary.stage.json`, and that document is
+/// `/`-separated on every platform. A path joined out of an application's own
+/// `/`-separated directory and a walked `OsStr` carries the platform's
+/// separator into the middle of it — the first Windows runner produced
+/// `lib/crypto-5.9.2\priv\obj` — so the report is respelled once, here,
+/// rather than at each of the three places that push a row.
+///
+/// [`crate::winpath::slash_path_str`] is the rule, and it is applied to a
+/// Windows path only: `\` is an ordinary character in a unix file name, and
+/// rewriting one would name a different file rather than respell this one.
+#[cfg(feature = "cli")]
+fn listed_relative(root: &Path, path: &Path, os: crate::target::Os) -> PathBuf {
+    let relative = relative(root, path);
+    if !crate::platform::separates_paths_with_backslash(os) {
+        return relative;
+    }
+    match relative.to_str() {
+        Some(text) => PathBuf::from(crate::winpath::slash_path_str(text)),
+        // Not text, so there is no listing path to respell it into: the caller
+        // is given the walked spelling rather than a guess.
+        None => relative,
+    }
 }
 
 /// A relative path as the listing writes it: `/`-separated, whatever the
@@ -1827,4 +1972,37 @@ fn canonical(path: &Path) -> Result<PathBuf, AssembleError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::{listed_relative, relative};
+    use crate::target::Os;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn listed_relative_respells_a_windows_row_and_leaves_a_unix_backslash_name_alone() {
+        // `strip_prefix` fails for a path that is not under `root`, so
+        // `relative` hands the path straight through and only the respelling
+        // is under test.
+        let root = Path::new("/staged/root");
+
+        let windows_row = Path::new(r"lib/crypto-5.9.2\priv\lib\libcrypto_static.a");
+        assert_eq!(
+            listed_relative(root, windows_row, Os::Windows),
+            PathBuf::from("lib/crypto-5.9.2/priv/lib/libcrypto_static.a"),
+            "a Windows-spelled row is respelled the way ginary.stage.json carries it"
+        );
+
+        let unix_name = Path::new(r"lib/odd\name/thing.beam");
+        assert_eq!(
+            listed_relative(root, unix_name, Os::Linux),
+            PathBuf::from(r"lib/odd\name/thing.beam"),
+            "a backslash is an ordinary character in a unix file name; respelling it would name \
+             a different file"
+        );
+
+        // `relative` itself is spelling-blind: it only strips the root.
+        assert_eq!(relative(root, windows_row), windows_row.to_path_buf());
+    }
 }

@@ -20,22 +20,27 @@
 //! spells differently is `launch.program`, which is `erl.exe`. See
 //! `docs/adr/0015-windows-launcher-stays-resident.md`.
 //!
-//! ## The three Win32 calls, and the `unsafe` they cost
+//! ## The Win32 calls, and the `unsafe` they cost
 //!
-//! Everything above the [`win32`] module is safe Rust. The three calls the
+//! Everything above the `win32` module is safe Rust. The three calls the
 //! last two bullets need — `SetConsoleCtrlHandler`, `CreateJobObjectW` with
 //! `SetInformationJobObject`, and `AssignProcessToJobObject` — have no safe
-//! counterpart in the standard library or anywhere else, so [`win32`] is the
+//! counterpart in the standard library or anywhere else, so `win32` is the
 //! one place in this crate that carries `#[allow(unsafe_code)]`. It is a
-//! module rather than three scattered blocks so that the exception is one
+//! module rather than scattered blocks so that the exception is one
 //! reviewable surface, and every function in it is total: each answers
 //! `false` on failure and none of them can make the launcher fail to start a
 //! runtime it would otherwise have started.
 //!
-//! **None of it has ever run.** It is compiled for
-//! `x86_64-pc-windows-gnu` and nothing more; there is no Windows machine and
-//! no `erl.exe` in this milestone, and `docs/dev/log/D2.md` says exactly which
-//! claims that leaves untested.
+//! A fourth call joined them in E12 and it is not the launcher's:
+//! `cache::sweep` decides whether the launcher that owns a
+//! `.<key>.tmp-<pid>` tree is still extracting into it, and it decided by
+//! looking for `/proc/<pid>` — a directory Windows does not have, so every
+//! live launcher read as dead and its tree was deleted underneath it.
+//! `win32::process_is_alive` is `OpenProcess` with the narrowest access
+//! right there is, and it lives here rather than in `cache.rs` so that the
+//! exception stays one surface. See
+//! `tests/regressions/e12_the_sweep_asked_proc_whether_a_process_was_alive.rs`.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -169,23 +174,71 @@ const fn bool_str(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
-/// The three Win32 calls the Windows launcher cannot be written without.
+/// The Win32 calls the Windows launcher cannot be written without.
 ///
 /// Every one of them is a `kernel32` entry point with no safe wrapper
 /// anywhere, which is why this module — and only this module — carries
 /// `#[allow(unsafe_code)]`. Each function is total: a failure is `false` or
 /// [`None`] and never a panic, because this is the launcher path.
+///
+/// Three of them are the resident launcher's own, argued in
+/// `docs/adr/0015-windows-launcher-stays-resident.md`:
+/// `SetConsoleCtrlHandler`, `CreateJobObjectW` with `SetInformationJobObject`,
+/// and `AssignProcessToJobObject`. The fourth, [`process_is_alive`], belongs
+/// to [`crate::cache::sweep`] and is here rather than in `cache.rs` for
+/// exactly the reason the other three are here: the exception to
+/// `#![deny(unsafe_code)]` stays one reviewable surface, and a second
+/// `#[allow(unsafe_code)]` elsewhere in the crate would need an ADR of its
+/// own.
 #[allow(unsafe_code)]
-mod win32 {
+pub(crate) mod win32 {
     use std::os::windows::io::AsRawHandle as _;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, TRUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, TRUE};
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    /// Whether a process with this id exists.
+    ///
+    /// The Windows half of `cache::is_alive`, which decides whether a
+    /// `.<key>.tmp-<pid>` tree belongs to a launcher still extracting into
+    /// it. Windows has no `/proc` and no `kill(pid, 0)`; the process table is
+    /// reached by opening the process object by id.
+    ///
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` is the narrowest right there is —
+    /// it grants no read of the process's memory and no control over it — and
+    /// the handle is closed again immediately, because the question is
+    /// whether the object exists rather than anything about it.
+    ///
+    /// `ERROR_INVALID_PARAMETER` is the one failure that means "no such
+    /// process", and it is the only one read as dead — the counterpart of
+    /// `ESRCH` in `cache::is_alive`'s unix arm. `ERROR_ACCESS_DENIED` means a
+    /// process with that id exists and belongs to somebody this user may not
+    /// query, which is alive, and any other failure is a question that could
+    /// not be asked: a tree kept costs a directory until the next sweep that
+    /// can name it, and a tree removed destroys an extraction in progress.
+    pub fn process_is_alive(pid: u32) -> bool {
+        // SAFETY: `OpenProcess` takes no pointer, and the handle it answers
+        // with is checked for null before it is used and closed exactly once.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return !matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(code) if u32::try_from(code) == Ok(ERROR_INVALID_PARAMETER)
+            );
+        }
+        // SAFETY: `handle` is the live, non-null handle `OpenProcess` just
+        // answered with, and nothing uses it afterwards.
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        true
+    }
 
     /// Makes this process ignore `Ctrl-C`, `Ctrl-Break` and the close event.
     ///

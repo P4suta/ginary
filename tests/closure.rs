@@ -27,19 +27,9 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 
 use crate::common::fake_otp::{FakeOtp, FakeOtpRoot, FakeShipment, FakeShipmentRoot};
+use crate::common::shipment::{SHIPMENT_VAR, ShipmentChoice, choose_shipment};
 use crate::common::snapshot::scrub;
 use crate::common::tools::{REQUIRE_VAR, require_tools};
-
-/// The real shipment the gated test runs over unless [`SHIPMENT_VAR`] names
-/// another one.
-const DEFAULT_REAL_SHIPMENT: &str = "/home/yasunobu/projects/gleam/notify/build/erlang-shipment";
-
-/// The variable that points the gated test at a shipment of the caller's.
-///
-/// The default is one developer's machine, so on any other the test would have
-/// nothing to run over. It is an override rather than a requirement, and it is
-/// escalated exactly as `require_tools` escalates a missing program.
-const SHIPMENT_VAR: &str = "GINARY_TEST_SHIPMENT";
 
 /// A shipment and an OTP installation side by side in one temporary directory.
 ///
@@ -818,26 +808,28 @@ fn small_dag() -> impl Strategy<Value = SmallDag> {
 
 /// The real shipment to close over, or a reported skip.
 ///
-/// Missing it is treated exactly as a missing program is: a loud skip, unless
-/// `GINARY_REQUIRE_TOOLCHAIN=1` says the environment is supposed to have it,
-/// in which case skipping is a failure. Without that, this test would
-/// evaporate silently on every machine but one.
+/// There is no default. A shipment is not a program on `PATH`: it is a
+/// directory somebody produced with `gleam export erlang-shipment`, and a path
+/// that exists on one machine is not a fallback for the others. So an unset
+/// [`SHIPMENT_VAR`] is a loud skip however `GINARY_REQUIRE_TOOLCHAIN` is set,
+/// and a value that is not a directory is a failure however it is set — the
+/// caller asked for a run and mistyped the path. The rule itself lives in
+/// [`crate::common::shipment`], where it can be asserted without a filesystem;
+/// see `tests/regressions/e5_a_gated_test_defaulted_to_one_developers_machine.rs`.
 fn real_shipment() -> Option<PathBuf> {
-    let path = std::env::var_os(SHIPMENT_VAR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_REAL_SHIPMENT));
-    if path.is_dir() {
-        return Some(path);
-    }
     let required = std::env::var_os(REQUIRE_VAR).is_some_and(|value| value == "1");
-    assert!(
-        !required,
-        "`{}` is not a directory and {REQUIRE_VAR}=1 forbids skipping; \
-         set {SHIPMENT_VAR} to a `gleam export erlang-shipment` output",
-        path.display()
-    );
-    eprintln!("skipping: {} does not exist", path.display());
-    None
+    match choose_shipment(
+        std::env::var_os(SHIPMENT_VAR).as_deref(),
+        required,
+        &|path| path.is_dir(),
+    ) {
+        ShipmentChoice::Run(path) => Some(path),
+        ShipmentChoice::Skip(reason) => {
+            eprintln!("skipping: {reason}");
+            None
+        }
+        ShipmentChoice::Fail(message) => panic!("{message}"),
+    }
 }
 
 #[test]

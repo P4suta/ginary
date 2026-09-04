@@ -336,7 +336,13 @@ fn a_file_in_the_listing_that_is_not_in_the_tree_is_a_warning_and_not_a_failure(
     );
 }
 
-#[cfg(target_os = "linux")]
+// gnu Linux, not Linux. The test binary this stages as a runtime is asserted
+// to need `libc.so.6` and to carry a glibc floor, and both are glibc's own: a
+// static musl build of the same binary needs nothing and has no symbol
+// versions, so the assertions would fail against a healthy host. The rule is
+// held over the tree by
+// `tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn every_elf_file_in_the_tree_is_listed_with_what_it_needs() {
     let staged = Staged::new();

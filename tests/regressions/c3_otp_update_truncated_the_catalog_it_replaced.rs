@@ -114,7 +114,20 @@ fn a_path_that_holds_a_double_slash_is_a_path_and_not_a_url() {
     // `contains("://")` says this is remote; `has_scheme` says the scheme
     // would have to start with a letter, and `/tmp/.../x` does not.
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let odd = dir.path().join("x:");
+    // A directory whose name ends in a colon is what puts `//` after a `:` in
+    // the rendered path, and `:` is one of the nine characters Windows
+    // reserves in a file name — the fixture could not be built there and the
+    // test died before the claim. See
+    // `e11_a_fixture_built_a_directory_windows_cannot_name`.
+    const ODD: &str = "x:";
+    if !ginary::platform::is_legal_file_name(ginary::platform::HOST, ODD) {
+        eprintln!(
+            "skipping: `{ODD}` is not a file name on this platform, and a path that holds \
+             `://` needs one"
+        );
+        return;
+    }
+    let odd = dir.path().join(ODD);
     std::fs::create_dir_all(&odd).expect("a directory whose name ends in a colon");
     let source = odd.join("catalog.json");
     std::fs::write(

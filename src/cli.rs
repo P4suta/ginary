@@ -2074,7 +2074,7 @@ struct OtpEnv {
 /// resolves it, so `ginary otp path` answers about the same directory a build
 /// fills.
 fn otp_env(explicit: Option<&Path>) -> anyhow::Result<OtpEnv> {
-    let dirs = cache_dir::resolve(&cache_dir::EnvSnapshot::from_env())
+    let dirs = cache_dir::resolve(&cache_dir::EnvSnapshot::from_env(), crate::platform::HOST)
         .context("cannot decide where the OTP cache is")?;
     let cache_root = catalog::cache_root(&dirs.path);
     let explicit = explicit.map(Path::to_path_buf).or_else(|| {

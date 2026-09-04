@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# macos-13 is a real GitHub-hosted runner label (the last x86_64 macOS image),
-# but this actionlint build's baked-in label list predates it and reports it as
-# unknown. Teaching actionlint the label here keeps the lint clean without
-# weakening the macos matrix, which needs both an x86_64 (macos-13) and an
-# arm64 (macos-14) runner.
+# macos-15-intel is the GitHub-hosted x86_64 macOS runner label, but this
+# actionlint build's baked-in label list predates it and reports it as unknown.
+# Teaching actionlint the label here keeps the lint clean without weakening the
+# macos matrix, which needs both an x86_64 (macos-15-intel) and an arm64
+# (macos-14) runner.
+#
+# It replaces macos-13, which GitHub has withdrawn: a label the scheduler no
+# longer recognises leaves its job queued for ever and the whole run with it.
+# See tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
 self-hosted-runner:
   labels:
-    - macos-13
+    - macos-15-intel

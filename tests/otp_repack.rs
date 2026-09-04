@@ -279,6 +279,9 @@ fn a_prune_reports_every_path_it_removed_and_what_they_cost() {
 
 // ---------------------------------------------------- the dereference --
 
+// The four link tests need a link, and `std::os::unix::fs::symlink` is the
+// only way to plant one without a privilege Windows asks for.
+#[cfg(unix)]
 #[test]
 fn every_symlink_is_replaced_by_a_copy_of_what_it_points_at() {
     let upstream = FakeUpstream::build("erlang-29.0.5", &["lib/stdlib-8.0.3/priv/real.txt"]);
@@ -310,6 +313,7 @@ fn every_symlink_is_replaced_by_a_copy_of_what_it_points_at() {
     assert_eq!(catalog::assert_no_symlinks(&root), Ok(()));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_to_nothing_is_refused_rather_than_quietly_dropped() {
     let upstream = FakeUpstream::build("erlang-29.0.5", &[]);
@@ -328,6 +332,7 @@ fn a_symlink_to_nothing_is_refused_rather_than_quietly_dropped() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_out_of_the_runtime_root_is_refused() {
     let upstream = FakeUpstream::build("erlang-29.0.5", &[]);
@@ -348,6 +353,7 @@ fn a_symlink_out_of_the_runtime_root_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_link_left_behind_fails_the_assertion_that_guards_the_strict_extractor() {
     let upstream = FakeUpstream::build("erlang-29.0.5", &[]);

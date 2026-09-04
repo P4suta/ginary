@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use ginary::strip::{self, ElfOutcome, StripOptions};
 
 use crate::common::fake_otp::FakeOtp;
+use crate::common::native::host_writes_elf;
 use crate::common::repack::{foreign_machine, patch_elf_machine};
 
 /// The ERTS version the fixture runtime carries.
@@ -69,6 +70,20 @@ fn strip_elf_only(root: &Path) -> strip::StripReport {
 
 #[test]
 fn a_tree_whose_natives_are_all_for_another_machine_is_a_reported_skip() {
+    // The fixture is the running test binary, patched: a real ELF a linker
+    // wrote, which is what `strip` and `elf::inspect` are being held to here.
+    // It is an ELF only where the host writes one, and on a Windows runner
+    // the tree it built held two PE files, which `strip_elf` reports as a
+    // container it cannot read rather than as another machine — a different
+    // rule, pinned by
+    // `e11_a_tree_of_objects_the_stripper_cannot_read_was_silent`.
+    if !host_writes_elf() {
+        eprintln!(
+            "skipping: this host's own objects are not ELF, so a tree built from its own \
+             binary cannot exercise the cross-machine branch of the ELF stripper"
+        );
+        return;
+    }
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = runtime_with(
         dir.path(),
@@ -106,6 +121,20 @@ fn a_tree_whose_natives_are_all_for_another_machine_is_a_reported_skip() {
 
 #[test]
 fn a_tree_with_some_foreign_natives_warns_and_still_strips_the_hosts_own() {
+    // The fixture is the running test binary, patched: a real ELF a linker
+    // wrote, which is what `strip` and `elf::inspect` are being held to here.
+    // It is an ELF only where the host writes one, and on a Windows runner
+    // the tree it built held two PE files, which `strip_elf` reports as a
+    // container it cannot read rather than as another machine — a different
+    // rule, pinned by
+    // `e11_a_tree_of_objects_the_stripper_cannot_read_was_silent`.
+    if !host_writes_elf() {
+        eprintln!(
+            "skipping: this host's own objects are not ELF, so a tree built from its own \
+             binary cannot exercise the cross-machine branch of the ELF stripper"
+        );
+        return;
+    }
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = runtime_with(
         dir.path(),

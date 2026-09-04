@@ -42,9 +42,9 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       # A missed or timed-out mutant fails the shard: the caught-percentage gate
       # is "every mutant this module produces is caught".
       - run: cargo mutants --file "src/${{ matrix.module }}.rs" --features fault-injection
@@ -66,9 +66,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
       # 30 seconds per target, seeded from the committed corpus; a crash is a
       # failed job with the reproducer in the log.
       - run: |
@@ -95,14 +95,22 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
+      # Pinned to a manifest digest, as in ci.yml's `smoke-matrix` job and for
+      # the same reason: `--privileged` gives the container this runner's own
+      # kernel capabilities, and a tag can be moved upstream with no commit
+      # here. The digest names the multi-platform index, which is
+      # `tonistiigi/binfmt:qemu-v10.2.3` as of 2026-09-04.
       - name: Bootstrap binfmt for arm64
-        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
+      # One target directory per triple: a `cross` target directory belongs to
+      # one container image, and a host build script cached in the musl image
+      # does not start in the deliberately ancient gnu one. The same fix as
+      # ci.yml's `smoke-matrix`, which is where the failure was read; see
+      # tests/regressions/e5_one_cross_target_directory_was_shared_between_images.rs.
       - name: Build the cross stubs and repack the catalog
-        env:
-          CARGO_TARGET_DIR: target/cross
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           mkdir -p target/stubs
@@ -111,8 +119,10 @@ jobs:
             linux-x86_64-gnu:x86_64-unknown-linux-gnu \
             linux-aarch64-musl:aarch64-unknown-linux-musl; do
             name=${entry%%:*}; triple=${entry##*:}
-            cross build --release --locked --no-default-features --target "$triple"
-            cp "target/cross/$triple/release/ginary" "target/stubs/ginary-stub-$version-$name"
+            ( export CARGO_TARGET_DIR="target/cross/$triple"
+              cross build --release --locked --no-default-features --target "$triple"
+              cp "$CARGO_TARGET_DIR/$triple/release/ginary" \
+                 "target/stubs/ginary-stub-$version-$name" )
           done
           cargo run --quiet --locked -- otp repack \
             --upstream-tag OTP-29.0.5 \

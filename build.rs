@@ -22,13 +22,25 @@
 
 use std::env;
 
-/// The seven Rust triples ginary builds for, and the names it calls them.
+/// Every Rust triple ginary can be built from, and the names it calls them.
 ///
-/// The same mapping as `Target::rust_triple`, read the other way round. It is
-/// duplicated here rather than shared because a build script cannot use the
-/// crate it is building, and `tests/target.rs` holds the mapping this table is
-/// the inverse of.
-const TARGETS: [(&str, &str); 7] = [
+/// Mostly `Target::rust_triple` read the other way round. It is duplicated here
+/// rather than shared because a build script cannot use the crate it is
+/// building, and `tests/target.rs` holds the mapping this table is the inverse
+/// of.
+///
+/// The mapping is deliberately not one-to-one, and Windows is why. The marker
+/// names the *platform* an artifact runs on, not the ABI it was linked with,
+/// and Windows has two ABIs for one platform: releases are cross-compiled from
+/// Linux as `x86_64-pc-windows-gnu`, while the default host triple on a Windows
+/// machine — and on the `windows-2022` runner — is `x86_64-pc-windows-msvc`.
+/// Both are `windows-x86_64`. Leaving the MSVC triple out meant `cargo build`
+/// could not run on Windows at all; see
+/// `tests/regressions/e5_the_build_script_had_no_name_for_the_msvc_triple.rs`.
+/// `Target::rust_triple` keeps naming the `-gnu` triple as the one releases are
+/// built with: that direction stays single-valued, because a release has to be
+/// reproducible from one triple.
+const TARGETS: [(&str, &str); 8] = [
     ("x86_64-unknown-linux-gnu", "linux-x86_64-gnu"),
     ("x86_64-unknown-linux-musl", "linux-x86_64-musl"),
     ("aarch64-unknown-linux-gnu", "linux-aarch64-gnu"),
@@ -36,6 +48,7 @@ const TARGETS: [(&str, &str); 7] = [
     ("x86_64-apple-darwin", "macos-x86_64"),
     ("aarch64-apple-darwin", "macos-aarch64"),
     ("x86_64-pc-windows-gnu", "windows-x86_64"),
+    ("x86_64-pc-windows-msvc", "windows-x86_64"),
 ];
 
 fn main() {

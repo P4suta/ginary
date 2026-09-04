@@ -37,7 +37,9 @@ use sha2::{Digest, Sha256};
 ///
 /// Three: one attempt plus two retries. A transport error and a 5xx are
 /// retried, a 4xx is not — a body that is not there will not be there on the
-/// third ask, and retrying it only slows the error down.
+/// third ask, and retrying it only slows the error down. An answer over
+/// [`MAX_TEXT_BYTES`], and one whose bytes are not text, are refused on the
+/// same rule and for the same reason.
 pub const MAX_ATTEMPTS: u32 = 3;
 
 /// The first backoff, doubled at each further attempt by [`backoff`].
@@ -270,6 +272,34 @@ pub enum DownloadError {
         /// The length the body actually has.
         actual: u64,
     },
+    /// The answer is larger than the bound the caller reads it within.
+    ///
+    /// Not a retry, for the reason a 4xx is not one: a document that is over
+    /// the bound is over it on the third ask too, and asking again only
+    /// transfers the same oversized body twice more before refusing it.
+    #[error(
+        "{url} answered more than the {limit} bytes a document is read within; point \
+         `--catalog` at a local copy, which is read without that bound"
+    )]
+    TooLarge {
+        /// The URL that was asked for.
+        url: String,
+        /// The bound its answer crossed, in bytes.
+        limit: u64,
+    },
+    /// The answer is not text, so there is nothing to read it as.
+    ///
+    /// Not a retry, on the same rule as [`DownloadError::TooLarge`]: bytes that
+    /// are not text are not text on the third ask either. The offset is where
+    /// the text stopped being text, because a reader told only that a document
+    /// is not UTF-8 has nowhere to look in it.
+    #[error("{url} answered bytes that are not text: byte {offset} is not valid UTF-8")]
+    NotText {
+        /// The URL that was asked for.
+        url: String,
+        /// How many bytes were text before the one that is not.
+        offset: usize,
+    },
     /// The part file, or the rename onto the destination, failed.
     #[error("cannot write {path}: {message}")]
     Io {
@@ -354,9 +384,16 @@ pub fn fetch(url: &str, dest: &Path, expect: &Expect, net: &Net) -> Result<(), D
 /// megabyte of JSON is already a release nobody expected. A body is *not*
 /// streamed to a file, so nothing here can leave a part behind.
 ///
+/// An answer over [`MAX_TEXT_BYTES`] is [`DownloadError::TooLarge`] after one
+/// request, and one that is not UTF-8 is [`DownloadError::NotText`] after one,
+/// on the rule that keeps a 4xx from being asked again: what the answer *is* is
+/// settled by the first ask, and two more only transfer the same unreadable
+/// body again.
+///
 /// # Errors
 ///
-/// [`DownloadError`], as [`fetch`].
+/// [`DownloadError`], as [`fetch`], plus [`DownloadError::TooLarge`] and
+/// [`DownloadError::NotText`].
 pub fn get_text(url: &str, net: &Net) -> Result<String, DownloadError> {
     let url = net.rewrite(url);
     if net.offline {
@@ -388,7 +425,46 @@ pub fn get_text(url: &str, net: &Net) -> Result<String, DownloadError> {
 }
 
 /// How large an answer [`get_text`] will read.
+///
+/// Inclusive: a document of exactly this many bytes is read whole, and one
+/// byte more is refused. Crossing it is [`DownloadError::TooLarge`] and not a
+/// retry: see [`get_text`]. The bytes read within it are then decoded as text,
+/// and failing that is [`DownloadError::NotText`], which is not a retry either.
+///
+/// It bounds the *document*: the bytes that land in memory, counted after any
+/// `Content-Encoding` the answer arrived in has been undone. A bound counted on
+/// the wire instead is no bound on memory at all — deflate reaches about
+/// 1032:1 — and this build asks for `gzip` on every request, so the two counts
+/// are routinely different. The transfer is bounded too, but by a number of its
+/// own and for a different reason; see `READ_LIMIT` and `TRANSFER_LIMIT`.
 pub const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The bound the document itself is read within.
+///
+/// One byte more than [`MAX_TEXT_BYTES`], because a read that stopped *at* the
+/// bound could not tell a document of exactly the bound from a longer one: a
+/// read of one more byte than may be kept is what makes a full buffer the proof
+/// that there was more, and makes [`MAX_TEXT_BYTES`] itself the largest
+/// document that is read, which is what every message about it says.
+///
+/// It is handed to [`std::io::Read::take`] on the *decoded* stream, which is
+/// where the document is: `ureq` puts its own limit innermost, under the
+/// decoder (`ureq-3.4.0/src/body/mod.rs:735`), so that limit counts what
+/// arrives and never what is read.
+const READ_LIMIT: u64 = MAX_TEXT_BYTES + 1;
+
+/// The bound the transfer is read within.
+///
+/// Twice [`READ_LIMIT`], and deliberately not the document's own number. It
+/// exists for one case that the document bound cannot answer: an encoding that
+/// consumes bytes without producing any, which `take` on the decoded stream
+/// would wait on for ever. What it must not do is refuse a document the
+/// document bound admits — and an encoding is allowed to make a body *larger*
+/// than what it encodes, since deflate's stored block adds five bytes for each
+/// 65535 and gzip eighteen more for the member, which is what a server that
+/// compresses everything sends for a body that will not compress. Twice is far
+/// past every such expansion and still a bound.
+const TRANSFER_LIMIT: u64 = 2 * READ_LIMIT;
 
 /// One request for a small document.
 fn text_once(agent: &ureq::Agent, url: &str) -> Result<String, Attempt> {
@@ -408,12 +484,57 @@ fn text_once(agent: &ureq::Agent, url: &str) -> Result<String, Attempt> {
             })
         });
     }
+    // The bytes rather than a string, so that the two things that can be wrong
+    // with them are two answers rather than one: `read_to_string` decodes as it
+    // reads and reports a byte that is not text as an `io::Error`, which is
+    // indistinguishable here from the connection dying mid-read.
+    //
+    // The reader's own limit counts what arrives on the wire, which is not what
+    // this bound is about: `ureq` inflates a `Content-Encoding: gzip` answer
+    // *after* that limit, and this build asks every server for gzip. So the
+    // document is counted where it is produced, with `take` on the decoded
+    // stream, and the transfer is bounded separately by `TRANSFER_LIMIT`, which
+    // is what a body that consumes bytes without producing any runs into.
+    let mut bytes = Vec::new();
     response
         .into_body()
         .into_with_config()
-        .limit(MAX_TEXT_BYTES)
-        .read_to_string()
-        .map_err(|error| Attempt::Retryable(error.to_string()))
+        .limit(TRANSFER_LIMIT)
+        .reader()
+        .take(READ_LIMIT)
+        .read_to_end(&mut bytes)
+        .map_err(|error| match ureq::Error::from(error) {
+            // The bound is an answer about the document rather than a failure
+            // of the transport: an answer over it is over it on the third ask
+            // too, so retrying only transfers the same oversized body twice
+            // more before refusing the first of them. What is reported is this
+            // module's bound rather than `TRANSFER_LIMIT`, which is a bound on
+            // the transfer and which nothing documents. Every other failure
+            // of this read is the transport's — a body that stopped short, a
+            // connection that died — and stays retryable.
+            ureq::Error::BodyExceedsLimit(_) => Attempt::Fatal(DownloadError::TooLarge {
+                url: url.to_owned(),
+                limit: MAX_TEXT_BYTES,
+            }),
+            other => Attempt::Retryable(other.to_string()),
+        })?;
+    // A full buffer is the proof that there was more: `take` stops one byte
+    // over the bound rather than reporting anything, so the length is the only
+    // place the answer is.
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
+        return Err(Attempt::Fatal(DownloadError::TooLarge {
+            url: url.to_owned(),
+            limit: MAX_TEXT_BYTES,
+        }));
+    }
+    // And the decoding is the other answer about the document: bytes that are
+    // not text are not text on the third ask either.
+    String::from_utf8(bytes).map_err(|error| {
+        Attempt::Fatal(DownloadError::NotText {
+            url: url.to_owned(),
+            offset: error.utf8_error().valid_up_to(),
+        })
+    })
 }
 
 /// How one attempt ended, when it did not end with a verified part file.

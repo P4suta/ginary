@@ -346,6 +346,28 @@ description = "Cross-Linux smoke matrix: build for three targets and run each in
 # runs a `--privileged` container to install one.
 run = "scripts/smoke-matrix.sh"
 
+[tasks."check:windows"]
+description = "Type-check the whole tree, tests included, for Windows (needs docker)"
+# The check `tests/common/portability.rs` cannot perform. That scan reads one
+# file's text and finds an ungated mention of `std::os::unix`; it cannot find
+# an ungated *call* of something already `#[cfg(unix)]`, because such a call
+# mentions no `os::unix`. Two of those were fatal on the first Windows job and
+# invisible to every Linux gate. A real compile finds both, and `mingw-w64` is
+# all a Linux host needs for one — the `x86_64-pc-windows-gnu` triple, not the
+# msvc one, because `zstd-sys` compiles C.
+#
+# A container, because installing a Windows cross toolchain into a developer's
+# machine to run one check is not a thing to ask. A target directory of its
+# own inside the container, because the objects a foreign libc produces do not
+# belong in `target/`. Roughly forty-five seconds warm, a few minutes cold.
+run = """
+set -eu
+root="${MISE_PROJECT_ROOT:-$PWD}"
+docker build -t ginary-wincheck:1 -f "$root/scripts/ci/wincheck.Dockerfile" "$root"
+docker run --rm -v "$root":/w -w /w -e CARGO_TARGET_DIR=/tmp/t ginary-wincheck:1 \
+  cargo check --all-targets --locked --keep-going --target x86_64-pc-windows-gnu
+"""
+
 [tasks.check]
 description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc and deny"
 run = [

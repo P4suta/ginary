@@ -39,13 +39,26 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 const DRAIN_CHUNK: usize = 8 * 1024;
 
 /// The platform's bit bucket, used to keep child processes from writing files.
-#[cfg(windows)]
+///
+/// One `#[cfg]` pair became one rule: [`crate::platform::null_device`] states
+/// which name each operating system has for it, so an expectation in a test
+/// can compose the same answer rather than pinning one host's, and both
+/// answers are asserted on whichever machine the suite runs on.
 #[cfg(feature = "cli")]
-pub(crate) const NULL_DEVICE: &str = "nul";
-/// The platform's bit bucket, used to keep child processes from writing files.
-#[cfg(not(windows))]
+pub(crate) const NULL_DEVICE: &str = crate::platform::null_device(crate::platform::HOST);
+
+/// The bit bucket this build sends a child's crash dump to, readable from a
+/// test.
+///
+/// The constant itself is `pub(crate)` because nothing outside the crate has
+/// a use for it; this accessor exists so that
+/// `tests/regressions/e11_the_beam_argv_named_the_unix_bit_bucket.rs` can hold
+/// the production value and the rule against each other, which is the only
+/// thing that keeps them from drifting apart.
 #[cfg(feature = "cli")]
-pub(crate) const NULL_DEVICE: &str = "/dev/null";
+pub const fn null_device_here() -> &'static str {
+    NULL_DEVICE
+}
 
 /// What a bounded child process produced.
 #[derive(Clone, Debug, PartialEq, Eq)]

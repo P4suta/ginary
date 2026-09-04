@@ -472,7 +472,20 @@ fn discover_finds_the_erl_on_the_path() {
             .join(format!("erts-{}", info.erts_vsn))
             .join("bin")
     );
-    for name in REQUIRED_ERTS_BINARIES {
+    // Which programs a runtime tree must hold is a property of the *tree*, not
+    // of the machine asking: `otp::check_erts_binaries` reads the flavour off
+    // the directory with `assemble::is_windows_erts_bin` and measures a
+    // Windows tree against `assemble::WINDOWS_REQUIRED_BINS` instead. This
+    // assertion asked the unix question of every host and so failed on a
+    // Windows runner against a healthy installation — `beam.smp is missing
+    // from d:/a/_temp/.setup-beam/otp\erts-17.0.5\bin` — so it now asks the
+    // same question the product does. On Linux the list is unchanged.
+    let required: Vec<&str> = if ginary::assemble::is_windows_erts_bin(&info.erts_bin) {
+        ginary::assemble::WINDOWS_REQUIRED_BINS.to_vec()
+    } else {
+        REQUIRED_ERTS_BINARIES.to_vec()
+    };
+    for name in required {
         assert!(
             info.erts_bin.join(name).is_file(),
             "{name} is missing from {}",

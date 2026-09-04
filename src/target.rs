@@ -230,6 +230,13 @@ pub const LAUNCH_PROGRAM: &str = "erlexec";
 /// is the build side's name for it.
 pub const WINDOWS_LAUNCH_PROGRAM: &str = "erl.exe";
 
+/// The emulator a unix runtime carries, `beam.smp`.
+///
+/// A program `erlexec` execs. [`crate::erts_source::EMULATOR`] is the build
+/// side's name for it; this one is here because [`Target::emulator_program`]
+/// is on the launcher path, where the build side does not exist.
+pub const EMULATOR_PROGRAM: &str = "beam.smp";
+
 /// The emulator a Windows `erl.exe` loads into its own process.
 ///
 /// The unix tree's `beam.smp` is a program `erlexec` execs; the Windows tree's
@@ -306,6 +313,27 @@ impl Target {
         match self.os {
             Os::Windows => WINDOWS_LAUNCH_PROGRAM,
             Os::Linux | Os::Macos => LAUNCH_PROGRAM,
+        }
+    }
+
+    /// Returns the file name of the emulator the runtime loads or execs.
+    ///
+    /// `beam.smp` everywhere but Windows, where it is `beam.smp.dll`. The
+    /// difference is the same one [`Self::launch_program`] carries: on unix
+    /// the emulator is a *program* `erlexec` execs, and on Windows it is a
+    /// library `erl.exe` loads into its own process. A test that measures the
+    /// emulator, or that proves the trimmed tree still holds one, has to name
+    /// the file this target actually ships.
+    ///
+    /// [`crate::erts_source::EMULATOR`] and
+    /// [`crate::erts_source::WINDOWS_EMULATOR`] are the build side's two
+    /// constants; this is the rule that chooses between them, and it is here
+    /// rather than there because `erts_source` is a `cli` module and the
+    /// launcher-side suite asks the same question.
+    pub const fn emulator_program(self) -> &'static str {
+        match self.os {
+            Os::Windows => WINDOWS_EMULATOR_DLL,
+            Os::Linux | Os::Macos => EMULATOR_PROGRAM,
         }
     }
 

@@ -308,8 +308,44 @@ pub fn plant_cached_otp(
     variant: &str,
     entry: &Variant,
 ) -> (PathBuf, FakeOtpRoot) {
+    plant_cached_otp_of(
+        cache_root,
+        dir_name,
+        version,
+        target,
+        variant,
+        entry,
+        FakeOtp::new(),
+    )
+}
+
+/// [`plant_cached_otp`], over a runtime flavour the caller chose.
+///
+/// The cache holds whatever the catalogue served, and what it served is not
+/// always a unix tree: a macOS entry extracts a Mach-O emulator and a Windows
+/// entry extracts `beam.smp.dll` beside `erl.exe`. The builder is taken rather
+/// than derived from the target name, because the target a *catalogue entry*
+/// claims and the flavour of the tree that came out of it are the two sides
+/// `resolve_catalog` exists to compare — see
+/// `tests/regressions/e16_a_cached_windows_runtime_was_read_by_the_elf_reader.rs`.
+///
+/// The version, release and ERTS version are set here, after the caller's
+/// builder, so a planted entry always agrees with the marker written beside it.
+///
+/// # Panics
+///
+/// If the tree or the marker cannot be written.
+pub fn plant_cached_otp_of(
+    cache_root: &Path,
+    dir_name: &str,
+    version: &str,
+    target: &str,
+    variant: &str,
+    entry: &Variant,
+    builder: FakeOtp,
+) -> (PathBuf, FakeOtpRoot) {
     let dir = cache_root.join(dir_name);
-    let otp = FakeOtp::new()
+    let otp = builder
         .erts_vsn(ERTS_VSN)
         .release(RELEASE)
         .otp_version(version)

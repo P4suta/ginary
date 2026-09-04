@@ -82,27 +82,13 @@ pub const HOOK_ENV: [&str; 6] = [
 ];
 
 /// The object file format a native artifact is in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObjectFormat {
-    /// An ELF object, the Linux shape.
-    Elf,
-    /// A PE object, the Windows shape.
-    Pe,
-    /// A Mach-O object, the macOS shape.
-    MachO,
-}
-
-impl ObjectFormat {
-    /// The word this format prints as in a table and in a manifest.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Elf => "elf",
-            Self::Pe => "pe",
-            Self::MachO => "macho",
-        }
-    }
-}
+///
+/// Defined by [`crate::platform`] and re-exported here, where the scanner
+/// that names one lives: the container format is a fact about an operating
+/// system — [`crate::platform::object_format`] — before it is a fact about a
+/// file, and the launcher-side half of the suite has to be able to ask
+/// without the `cli` feature's scanner in scope.
+pub use crate::platform::ObjectFormat;
 
 /// What kind of native artifact a file is.
 ///
@@ -665,26 +651,11 @@ pub const MAX_PRIV_DEPTH: usize = 32;
 /// learn that it is not.
 const MAGIC_BYTES: usize = 64;
 
-/// The two bytes a PE file begins with, its DOS header's signature.
-const DOS_MAGIC: &[u8; 2] = b"MZ";
-
 /// The signature at a PE file's `e_lfanew` offset.
 const PE_MAGIC: &[u8; 4] = b"PE\0\0";
 
 /// Where a DOS header records the offset of [`PE_MAGIC`].
 const E_LFANEW_OFFSET: usize = 0x3c;
-
-/// The four magics a Mach-O file can begin with.
-///
-/// 32- and 64-bit, each in the byte order it was written in and in the one it
-/// was not: a file produced on a big-endian machine is still a Mach-O and
-/// still says which machine it is for.
-const MACHO_MAGICS: [[u8; 4]; 4] = [
-    0xfeed_face_u32.to_le_bytes(),
-    0xfeed_facf_u32.to_le_bytes(),
-    0xfeed_face_u32.to_be_bytes(),
-    0xfeed_facf_u32.to_be_bytes(),
-];
 
 /// The shell a build hook is run through, on every host.
 ///
@@ -764,12 +735,7 @@ pub fn describe_object(path: &Path) -> Result<Option<ObjectDescription>, NativeE
         // so this is the same answer a damaged ELF gets, a listed row saying
         // nobody could read it, rather than a file that quietly leaves the
         // scan.
-        return Ok(Some(unreadable(
-            format,
-            "it begins with the DOS magic `MZ` and carries no `PE\\0\\0` signature \
-             behind it, so it is not a PE object"
-                .to_owned(),
-        )));
+        return Ok(Some(unreadable(format, NOT_A_PE_OBJECT.to_owned())));
     }
     Ok(Some(match format {
         ObjectFormat::Elf => describe_elf(&bytes),
@@ -864,6 +830,168 @@ fn describe_with_object_crate(format: ObjectFormat, bytes: &[u8]) -> ObjectDescr
     }
 }
 
+/// What one object needs from the machine that runs it, whatever container
+/// format it is in.
+///
+/// The shape [`crate::elf::ElfInfo`] already had, widened to the two formats
+/// this crate reads through the `object` crate. It exists because three
+/// readers of an artifact's native code — [`crate::verify`]'s deep check,
+/// [`crate::report`]'s `needs:` line and `doctor`'s crypto report — each
+/// asked "what does this file load" and each asked it of an ELF only, so on a
+/// platform whose objects are PE all three reported the *absence* of native
+/// code rather than the absence of a reader for it.
+///
+/// [`Self::interp`] and [`Self::glibc_max`] are ELF facts and are [`None`]
+/// for the other two formats: neither a PE nor a Mach-O names a program
+/// interpreter, and neither carries a glibc symbol-version table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectNeeds {
+    /// The container format the file's magic named.
+    pub format: ObjectFormat,
+    /// The word size, `32` or `64`.
+    pub class: u8,
+    /// What kind of object the file is.
+    ///
+    /// [`crate::elf::ElfKind`] is the shared vocabulary rather than an ELF
+    /// detail leaking out: its four named variants are exactly the four kinds
+    /// the `object` crate reports for every format it reads, so a PE shared
+    /// library and an ELF one describe as the same kind and a caller that
+    /// prints the word needs no second table.
+    pub kind: crate::elf::ElfKind,
+    /// The machine, spelled the way [`crate::target::Arch`] spells it.
+    pub machine: String,
+    /// The program interpreter, for a format that names one.
+    pub interp: Option<String>,
+    /// The shared libraries the file loads at start-up, in header order and
+    /// without repeats.
+    ///
+    /// An ELF's `DT_NEEDED` table, a PE's import directory, a Mach-O's
+    /// `LC_LOAD_DYLIB` commands. The three are the same question asked of
+    /// three headers.
+    pub needed: Vec<String>,
+    /// The highest `GLIBC_x.y` the file requires, without the prefix.
+    pub glibc_max: Option<String>,
+}
+
+/// Why an object's header could not be read.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ObjectError {
+    /// The bytes begin like no container format this build reads.
+    #[error("the bytes begin like no object this build reads")]
+    NotAnObject,
+    /// The bytes begin like an object and are not a whole one.
+    #[error("{message}")]
+    Unreadable {
+        /// What the reader said, as one sentence and with no path in it.
+        message: String,
+    },
+}
+
+/// Reads what the object in `bytes` loads, whatever container format it is in.
+///
+/// The format is [`crate::platform::object_format_of`]'s answer and never the
+/// file name. An ELF goes through [`crate::elf`], because a Linux object's
+/// target is its `PT_INTERP` and only that reader carries it; a PE and a
+/// Mach-O go through the `object` crate, which names the same four kinds and
+/// the same import lists.
+///
+/// # Errors
+///
+/// [`ObjectError::NotAnObject`] when the bytes begin like none of the three,
+/// and [`ObjectError::Unreadable`] when they begin like one and will not
+/// parse — including a file that begins `MZ` and carries no `PE\0\0`
+/// signature behind it, which is a DOS program rather than a PE.
+pub fn inspect_object_bytes(bytes: &[u8]) -> Result<ObjectNeeds, ObjectError> {
+    let Some(format) = crate::platform::object_format_of(bytes) else {
+        return Err(ObjectError::NotAnObject);
+    };
+    if format == ObjectFormat::Elf {
+        let info = crate::elf::inspect_bytes(bytes).map_err(|source| ObjectError::Unreadable {
+            message: source.to_string(),
+        })?;
+        return Ok(ObjectNeeds {
+            format,
+            class: info.class,
+            kind: info.kind,
+            machine: info.machine,
+            interp: info.interp,
+            needed: info.needed,
+            glibc_max: info.glibc_max,
+        });
+    }
+    if format == ObjectFormat::Pe && !has_pe_signature(bytes) {
+        return Err(ObjectError::Unreadable {
+            message: NOT_A_PE_OBJECT.to_owned(),
+        });
+    }
+    read_with_object_crate(format, bytes)
+}
+
+/// What a file that begins `MZ` and carries no PE signature is told it is.
+///
+/// One sentence for one condition, because both readers reach it:
+/// [`describe_object`] over a path and [`inspect_object_bytes`] over bytes.
+/// Written once because it was written twice and the two spellings drifted —
+/// one escaped the backslashes of the signature and the other put two literal
+/// NUL bytes into a sentence that reaches a terminal and a JSON document. See
+/// `tests/regressions/e11_a_pe_sentence_carried_two_raw_nul_bytes.rs`.
+const NOT_A_PE_OBJECT: &str = "it begins with the DOS magic `MZ` and carries no `PE\\0\\0` \
+                               signature behind it, so it is not a PE object";
+
+/// [`inspect_object_bytes`] for the two formats the `object` crate reads.
+fn read_with_object_crate(format: ObjectFormat, bytes: &[u8]) -> Result<ObjectNeeds, ObjectError> {
+    use object::Object as _;
+
+    let file = object::read::File::parse(bytes).map_err(|source| ObjectError::Unreadable {
+        message: source.to_string(),
+    })?;
+    let machine = arch_of(file.architecture()).map_or_else(
+        || format!("{:?}", file.architecture()).to_lowercase(),
+        |arch| arch.as_str().to_owned(),
+    );
+    let mut needed: Vec<String> = Vec::new();
+    // An import list names its library once per imported symbol, and the
+    // question is which libraries the machine has to have rather than how
+    // many symbols were asked of each.
+    // A reader that could not follow the import directory has not learned
+    // that the object imports nothing: it has learned nothing. Reported as
+    // unreadable, the way a header that will not parse is, because the
+    // alternative is a `needs: (none)` line about a file nobody read.
+    let imports = file.imports().map_err(|source| ObjectError::Unreadable {
+        message: source.to_string(),
+    })?;
+    for import in imports.into_iter().flatten() {
+        let name = String::from_utf8_lossy(import.library()).into_owned();
+        if !name.is_empty() && !needed.contains(&name) {
+            needed.push(name);
+        }
+    }
+    Ok(ObjectNeeds {
+        format,
+        class: if file.is_64() { 64 } else { 32 },
+        kind: kind_of_object(file.kind()),
+        machine,
+        interp: None,
+        needed,
+        glibc_max: None,
+    })
+}
+
+/// The [`crate::elf::ElfKind`] one `object` crate value names.
+///
+/// [`crate::elf::ElfKind::Other`] carries the number an ELF header held, and
+/// a format with no such number is described with `0`: it is the value no
+/// `e_type` has, so a reader cannot mistake it for one a header stated.
+const fn kind_of_object(kind: object::ObjectKind) -> crate::elf::ElfKind {
+    match kind {
+        object::ObjectKind::Dynamic => crate::elf::ElfKind::SharedObject,
+        object::ObjectKind::Executable => crate::elf::ElfKind::Executable,
+        object::ObjectKind::Relocatable => crate::elf::ElfKind::Relocatable,
+        object::ObjectKind::Core => crate::elf::ElfKind::Core,
+        _ => crate::elf::ElfKind::Other(0),
+    }
+}
+
 /// One [`ObjectDescription`] for a file that begins like an object and is not
 /// a whole one.
 fn unreadable(format: ObjectFormat, reason: String) -> ObjectDescription {
@@ -896,20 +1024,17 @@ const fn os_of(format: ObjectFormat) -> crate::target::Os {
 
 /// The format `head` begins like, or [`None`] when it begins like no object.
 ///
+/// [`crate::platform::object_format_of`] holds the rule, because three other
+/// call sites — [`crate::verify`], [`crate::strip`] and [`crate::report`] —
+/// used to spell it for themselves and each of them spelled only its ELF
+/// half. This one was the only complete spelling; it is now the only
+/// spelling.
+///
 /// The PE answer is provisional: a DOS header is two bytes, and only the
 /// `PE\0\0` signature it points at makes the file a PE. [`describe_object`]
 /// confirms it once the bytes are in hand.
 fn magic_of(head: &[u8]) -> Option<ObjectFormat> {
-    if crate::elf::is_elf(head) {
-        return Some(ObjectFormat::Elf);
-    }
-    if MACHO_MAGICS.iter().any(|magic| head.starts_with(magic)) {
-        return Some(ObjectFormat::MachO);
-    }
-    if head.starts_with(DOS_MAGIC) {
-        return Some(ObjectFormat::Pe);
-    }
-    None
+    crate::platform::object_format_of(head)
 }
 
 /// Whether `bytes` carries [`PE_MAGIC`] where its DOS header points.

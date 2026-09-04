@@ -366,7 +366,7 @@ pub fn staging_tree(root: &Path) -> StagingTree {
         files.push(StagedFile {
             path: path.to_owned(),
             size: data.len() as u64,
-            mode,
+            mode: recorded_mode(mode, false),
             category,
         });
     }
@@ -400,13 +400,42 @@ pub fn staging_tree(root: &Path) -> StagingTree {
     }
 }
 
-/// Sets a file's permission bits.
+/// The mode a file written with [`set_mode`] actually carries afterwards.
+///
+/// `requested` where the filesystem has permission bits, and
+/// [`ginary::platform::modeless_mode`] where it has none — which is what
+/// `ginary.index.json` records there and what `HeaderMode::Deterministic`
+/// writes into the payload header. A staging listing that claims `0o755` on a
+/// platform whose [`set_mode`] is a no-op is a listing that disagrees with the
+/// tree it describes, and `ginary verify` reported exactly that against a
+/// healthy artifact on the first Windows runner; see `docs/dev/log/E8.md`.
+pub fn recorded_mode(requested: u32, is_dir: bool) -> u32 {
+    if ginary::platform::has_unix_modes(ginary::platform::HOST) {
+        requested
+    } else {
+        ginary::platform::modeless_mode(is_dir)
+    }
+}
+
+/// Sets a file's permission bits, where the platform has any.
+///
+/// The function is portable and only the chmod is gated: the staging-tree
+/// builder above calls it for every file it writes, and a Windows compile of
+/// that builder must not have to know why.
 pub fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set mode");
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 /// A file's permission bits, `st_mode & 0o7777`.
+///
+/// Unix only: there are no such bits to read on Windows.
+#[cfg(unix)]
 pub fn mode_of(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::symlink_metadata(path)

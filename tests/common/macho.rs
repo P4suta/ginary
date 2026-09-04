@@ -267,3 +267,396 @@ pub fn real_fixture_bytes() -> Vec<u8> {
     std::fs::read(real_fixture_path())
         .expect("tests/fixtures/macho/ is committed to the repository")
 }
+
+// -------------------------------------------- reading a finished Mach-O --
+//
+// The entry-point reader below reads a *whole, finished* thin 64-bit Mach-O —
+// the output of `sign_macos::inject_and_sign` — so a Linux test can hold that
+// output to an invariant a runnable artifact has to satisfy but `codesign`
+// cannot see: that the entry point still runs the stub's own instructions.
+// Segment, signature and `CodeDirectory` reading is `tests/common/codesign.rs`
+// already, so only `LC_MAIN` is parsed here. It parses by hand, like the
+// writers above, and never panics: a malformed input yields `None`, so a test
+// says what it expected with its own `expect`.
+
+/// `LC_SEGMENT_64`.
+const READ_LC_SEGMENT_64: u32 = 0x19;
+/// `LC_MAIN`, the load command naming a modern Mach-O's entry point as a file
+/// offset into `__TEXT`.
+const READ_LC_MAIN: u32 = 0x8000_0028;
+
+/// The little-endian `u32` at `at`, or `None` past the end.
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at.checked_add(4)?)?;
+    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// The little-endian `u64` at `at`, or `None` past the end.
+fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    let slice = bytes.get(at..at.checked_add(8)?)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(slice);
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Calls `visit` with `(cmd, offset)` for each load command of a thin 64-bit
+/// Mach-O, stopping the moment a command runs past the buffer. `None` only when
+/// the header itself cannot be read.
+fn each_load_command(bytes: &[u8], mut visit: impl FnMut(u32, usize)) -> Option<()> {
+    let ncmds = read_u32(bytes, 16)?;
+    let mut offset = HEADER_LEN as usize;
+    for _ in 0..ncmds {
+        let cmd = read_u32(bytes, offset)?;
+        let cmdsize = read_u32(bytes, offset + 4)? as usize;
+        if cmdsize < 8 || offset.checked_add(cmdsize)? > bytes.len() {
+            return Some(());
+        }
+        visit(cmd, offset);
+        offset = offset.checked_add(cmdsize)?;
+    }
+    Some(())
+}
+
+/// The `fileoff` of the segment named `name`, or `None`.
+fn segment_fileoff(bytes: &[u8], name: &str) -> Option<u64> {
+    let mut found = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd != READ_LC_SEGMENT_64 {
+            return;
+        }
+        let seg = bytes.get(at + 8..at + 24).unwrap_or(&[]);
+        let end = seg.iter().position(|&b| b == 0).unwrap_or(seg.len());
+        if String::from_utf8_lossy(&seg[..end]) == name {
+            found = read_u64(bytes, at + 40);
+        }
+    });
+    found
+}
+
+/// The absolute file offset the entry point resolves to, and `take` bytes of
+/// the machine code that sits there, read from a finished thin 64-bit Mach-O.
+pub struct EntryPoint {
+    /// The absolute file offset the entry point resolves to.
+    pub file_offset: u64,
+    /// The bytes found there.
+    pub bytes: Vec<u8>,
+}
+
+/// Reads the entry point of a finished thin 64-bit Mach-O, taking `take` bytes
+/// of code, or `None` when the file carries no `LC_MAIN` or no `__TEXT`.
+///
+/// The entry point is `LC_MAIN`'s `entryoff`, a file offset into `__TEXT`
+/// (`fileoff` `0` in an executable), so the absolute offset is
+/// `__TEXT.fileoff + entryoff`. The instrument reads the *bytes at the mapped
+/// entry*, not the `entryoff` field: an artifact runs its stub's first
+/// instructions iff those bytes survive the rewrite wherever the entry lands —
+/// whether a writer moved `__TEXT` and shifted `entryoff` to match, or left
+/// both untouched. See `docs/dev/log/E9.md`.
+pub fn entry_point(bytes: &[u8], take: usize) -> Option<EntryPoint> {
+    let text_fileoff = segment_fileoff(bytes, "__TEXT")?;
+    let mut entryoff = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd == READ_LC_MAIN {
+            entryoff = read_u64(bytes, at + 8);
+        }
+    });
+    let file_offset = text_fileoff.checked_add(entryoff?)?;
+    let start = usize::try_from(file_offset).ok()?;
+    let slice = bytes.get(start..start.checked_add(take)?)?;
+    Some(EntryPoint {
+        file_offset,
+        bytes: slice.to_vec(),
+    })
+}
+
+// ------------------------------------- a stub shaped like a linker's own --
+//
+// `with_section` above is a one-segment file: enough for a section lookup, and
+// not enough for the writer in `src/sign_macos.rs`, which reads `__TEXT`,
+// `__LINKEDIT`, `LC_MAIN` and the slack a linker leaves between the last load
+// command and the first section. `stub_like` builds that shape, with the two
+// knobs the missing-`LC_CODE_SIGNATURE` case turns on: whether the file
+// carries one at all, and how many spare bytes sit before the first section.
+
+/// `LC_MAIN`.
+const LC_MAIN: u32 = 0x8000_0028;
+/// The length of an `entry_point_command`.
+const MAIN_CMD_LEN: u64 = 24;
+/// The `vmaddr` `__TEXT` is given, as a real `MH_EXECUTE` carries.
+const TEXT_VMADDR: u64 = 0x1_0000_0000;
+
+/// How [`stub_like`] lays a stub out.
+pub struct StubSpec<'a> {
+    /// The `cputype` the header names.
+    pub cpu_type: u32,
+    /// Whether the file carries an `LC_CODE_SIGNATURE` over a small blob at
+    /// the end of `__LINKEDIT`, as the linker leaves on every arm64 image.
+    pub code_signature: bool,
+    /// How many spare bytes lie between the end of the load commands and the
+    /// first section's file offset. A real arm64 stub has forty.
+    pub slack: u64,
+    /// `__TEXT`'s one section: the bytes the entry point names.
+    pub text: &'a [u8],
+    /// `__LINKEDIT`'s content, before any signature.
+    pub linkedit: &'a [u8],
+}
+
+/// What [`stub_like`] built, with every offset a test would otherwise have to
+/// re-derive from the bytes.
+pub struct BuiltStub {
+    /// The whole file.
+    pub bytes: Vec<u8>,
+    /// How many load commands the header names.
+    pub ncmds: u32,
+    /// The header's `sizeofcmds`.
+    pub sizeofcmds: u32,
+    /// Where the load commands end: `32 + sizeofcmds`.
+    pub commands_end: u64,
+    /// The first section's file offset, which is where content begins.
+    pub first_content_offset: u64,
+    /// The spare bytes between the two, as [`StubSpec::slack`] asked for.
+    pub slack: u64,
+    /// `__LINKEDIT`'s `fileoff`.
+    pub linkedit_fileoff: u64,
+    /// The `LC_CODE_SIGNATURE` blob's offset and size, when one was asked for.
+    pub codesig: Option<(u64, u64)>,
+}
+
+/// A thin, 64-bit `MH_EXECUTE` for `cpu_type` with `__TEXT`, `__LINKEDIT`,
+/// `LC_MAIN` and — per [`StubSpec::code_signature`] — an `LC_CODE_SIGNATURE`,
+/// laid out the way a linker lays one out: the commands first, then
+/// [`StubSpec::slack`] spare bytes, then the first section, then
+/// `__LINKEDIT`, then the signature blob if there is one.
+///
+/// # Panics
+///
+/// If the spec's sizes do not fit in the header fields they are written into,
+/// which would mean the fixture itself is malformed rather than the code under
+/// test.
+pub fn stub_like(spec: &StubSpec<'_>) -> BuiltStub {
+    let codesig_blob: &[u8] = b"a linker's own ad-hoc signature blob, stood in for";
+    let ncmds: u32 = if spec.code_signature { 4 } else { 3 };
+    let sizeofcmds = SEGMENT_CMD_LEN
+        + SECTION_LEN
+        + SEGMENT_CMD_LEN
+        + MAIN_CMD_LEN
+        + if spec.code_signature {
+            CODESIG_CMD_LEN
+        } else {
+            0
+        };
+    let commands_end = HEADER_LEN + sizeofcmds;
+    let text_offset = commands_end + spec.slack;
+    let text_end = text_offset + spec.text.len() as u64;
+    let linkedit_fileoff = text_end;
+    let linkedit_len = spec.linkedit.len() as u64;
+    let codesig_offset = linkedit_fileoff + linkedit_len;
+    let codesig_size = codesig_blob.len() as u64;
+    let linkedit_filesize = linkedit_len + if spec.code_signature { codesig_size } else { 0 };
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
+    bytes.extend_from_slice(&spec.cpu_type.to_le_bytes());
+    bytes.extend_from_slice(&0i32.to_le_bytes()); // cpusubtype
+    bytes.extend_from_slice(&MH_EXECUTE.to_le_bytes());
+    bytes.extend_from_slice(&ncmds.to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(sizeofcmds).expect("fits").to_le_bytes());
+    bytes.extend_from_slice(&0x0020_0085u32.to_le_bytes()); // flags: PIE, TWOLEVEL, DYLDLINK
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    assert_eq!(bytes.len() as u64, HEADER_LEN, "the header is 32 bytes");
+
+    // __TEXT, mapping the header and the commands as a real one does, with one
+    // section whose file offset is where the slack ends.
+    segment_command(&mut bytes, "__TEXT", TEXT_VMADDR, text_end, 0, text_end, 1);
+    bytes.extend_from_slice(&name16("__text"));
+    bytes.extend_from_slice(&name16("__TEXT"));
+    bytes.extend_from_slice(&(TEXT_VMADDR + text_offset).to_le_bytes()); // addr
+    bytes.extend_from_slice(&(spec.text.len() as u64).to_le_bytes()); // size
+    bytes.extend_from_slice(&u32::try_from(text_offset).expect("fits").to_le_bytes());
+    bytes.extend_from_slice(&4u32.to_le_bytes()); // align
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reloff
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // nreloc
+    bytes.extend_from_slice(&0x8000_0400u32.to_le_bytes()); // PURE_INSTRUCTIONS
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reserved1
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reserved2
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reserved3
+
+    segment_command(
+        &mut bytes,
+        "__LINKEDIT",
+        TEXT_VMADDR + text_end,
+        linkedit_filesize,
+        linkedit_fileoff,
+        linkedit_filesize,
+        0,
+    );
+
+    // LC_MAIN: the entry point is a file offset into __TEXT.
+    bytes.extend_from_slice(&LC_MAIN.to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(MAIN_CMD_LEN).expect("fits").to_le_bytes());
+    bytes.extend_from_slice(&text_offset.to_le_bytes()); // entryoff
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // stacksize
+
+    if spec.code_signature {
+        bytes.extend_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(CODESIG_CMD_LEN).expect("fits").to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(codesig_offset).expect("fits").to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(codesig_size).expect("fits").to_le_bytes());
+    }
+
+    assert_eq!(
+        bytes.len() as u64,
+        commands_end,
+        "the load commands must end exactly `sizeofcmds` after the header"
+    );
+    bytes.extend(std::iter::repeat_n(
+        0u8,
+        usize::try_from(spec.slack).expect("fits"),
+    ));
+    bytes.extend_from_slice(spec.text);
+    bytes.extend_from_slice(spec.linkedit);
+    let codesig = if spec.code_signature {
+        bytes.extend_from_slice(codesig_blob);
+        Some((codesig_offset, codesig_size))
+    } else {
+        None
+    };
+
+    BuiltStub {
+        bytes,
+        ncmds,
+        sizeofcmds: u32::try_from(sizeofcmds).expect("fits"),
+        commands_end,
+        first_content_offset: text_offset,
+        slack: spec.slack,
+        linkedit_fileoff,
+        codesig,
+    }
+}
+
+/// Writes one `segment_command_64` header, without its sections.
+fn segment_command(
+    bytes: &mut Vec<u8>,
+    name: &str,
+    vmaddr: u64,
+    vmsize: u64,
+    fileoff: u64,
+    filesize: u64,
+    nsects: u32,
+) {
+    let cmdsize = SEGMENT_CMD_LEN + SECTION_LEN * u64::from(nsects);
+    bytes.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(cmdsize).expect("fits").to_le_bytes());
+    bytes.extend_from_slice(&name16(name));
+    bytes.extend_from_slice(&vmaddr.to_le_bytes());
+    bytes.extend_from_slice(&vmsize.to_le_bytes());
+    bytes.extend_from_slice(&fileoff.to_le_bytes());
+    bytes.extend_from_slice(&filesize.to_le_bytes());
+    bytes.extend_from_slice(&7i32.to_le_bytes()); // maxprot
+    bytes.extend_from_slice(&5i32.to_le_bytes()); // initprot
+    bytes.extend_from_slice(&nsects.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+}
+
+/// The same Mach-O with its `LC_CODE_SIGNATURE` taken away: the command
+/// dropped, `ncmds` and `sizeofcmds` reduced by its sixteen bytes, the bytes
+/// it occupied zeroed so they become slack, `__LINKEDIT` shrunk back to what
+/// it held before the signature, and the file truncated at `dataoff`.
+///
+/// This is what a linker that never signed its output would have left, and it
+/// is derived from a real Mach-O rather than fabricated: an x86_64 darwin stub
+/// cannot be built on this machine, and the one property that matters here —
+/// a whole, ordinary image with no signature command in it — survives the
+/// removal exactly.
+///
+/// # Panics
+///
+/// If `bytes` is not a thin 64-bit Mach-O whose *last* load command is an
+/// `LC_CODE_SIGNATURE` covering the tail of the file.
+pub fn without_code_signature(bytes: &[u8]) -> Vec<u8> {
+    let ncmds = read_u32(bytes, 16).expect("a Mach-O header");
+    let sizeofcmds = read_u32(bytes, 20).expect("a Mach-O header");
+    let commands_end = HEADER_LEN as usize + sizeofcmds as usize;
+    let command_at = commands_end - CODESIG_CMD_LEN as usize;
+    assert_eq!(
+        read_u32(bytes, command_at),
+        Some(LC_CODE_SIGNATURE),
+        "the last load command must be the LC_CODE_SIGNATURE this removes"
+    );
+    let dataoff = u64::from(read_u32(bytes, command_at + 8).expect("dataoff"));
+    let datasize = u64::from(read_u32(bytes, command_at + 12).expect("datasize"));
+    assert_eq!(
+        dataoff + datasize,
+        bytes.len() as u64,
+        "the signature must be the last thing in the file"
+    );
+
+    let mut out = bytes[..usize::try_from(dataoff).expect("fits")].to_vec();
+    out[16..20].copy_from_slice(&(ncmds - 1).to_le_bytes());
+    out[20..24].copy_from_slice(&(sizeofcmds - CODESIG_CMD_LEN as u32).to_le_bytes());
+    out[command_at..commands_end].fill(0);
+
+    let linkedit_at = segment_command_offset(&out, "__LINKEDIT").expect("__LINKEDIT is there");
+    let linkedit_fileoff = read_u64(&out, linkedit_at + 40).expect("fileoff");
+    let filesize = dataoff - linkedit_fileoff;
+    out[linkedit_at + 48..linkedit_at + 56].copy_from_slice(&filesize.to_le_bytes());
+    out
+}
+
+/// The file offset of the `LC_SEGMENT_64` load command naming `name`.
+pub fn segment_command_offset(bytes: &[u8], name: &str) -> Option<usize> {
+    let mut found = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd != READ_LC_SEGMENT_64 {
+            return;
+        }
+        let seg = bytes.get(at + 8..at + 24).unwrap_or(&[]);
+        let end = seg.iter().position(|&b| b == 0).unwrap_or(seg.len());
+        if String::from_utf8_lossy(&seg[..end]) == name {
+            found = Some(at);
+        }
+    });
+    found
+}
+
+/// Every load command of a thin 64-bit Mach-O, as `(cmd, offset, cmdsize)`.
+pub fn load_commands(bytes: &[u8]) -> Vec<(u32, usize, usize)> {
+    let mut out = Vec::new();
+    let _ = each_load_command(bytes, |cmd, at| {
+        let size = read_u32(bytes, at + 4).unwrap_or(0) as usize;
+        out.push((cmd, at, size));
+    });
+    out
+}
+
+/// The header's `ncmds` and `sizeofcmds`.
+///
+/// # Panics
+///
+/// If `bytes` is shorter than a Mach-O header.
+pub fn command_counts(bytes: &[u8]) -> (u32, u32) {
+    (
+        read_u32(bytes, 16).expect("a Mach-O header"),
+        read_u32(bytes, 20).expect("a Mach-O header"),
+    )
+}
+
+/// The lowest file offset any section in any segment begins at, ignoring the
+/// zero offset a `__bss`-style section carries.
+pub fn first_section_offset(bytes: &[u8]) -> Option<u64> {
+    let mut lowest: Option<u64> = None;
+    let _ = each_load_command(bytes, |cmd, at| {
+        if cmd != READ_LC_SEGMENT_64 {
+            return;
+        }
+        let nsects = read_u32(bytes, at + 64).unwrap_or(0);
+        for index in 0..nsects as usize {
+            let section = at + SEGMENT_CMD_LEN as usize + index * SECTION_LEN as usize;
+            let offset = u64::from(read_u32(bytes, section + 48).unwrap_or(0));
+            if offset > 0 {
+                lowest = Some(lowest.map_or(offset, |current: u64| current.min(offset)));
+            }
+        }
+    });
+    lowest
+}

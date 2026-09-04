@@ -16,20 +16,41 @@
 //! the file's headers describes the bytes past the last section, which is the
 //! same property `payload.rs` relies on.
 //!
-//! The needle is assembled here from its two halves for the same reason
-//! `stubid::scan` assembles its own: a helper that held `GINARY-STUB-ID\0`
-//! contiguously would put a second marker into every test binary that links
-//! it, and `tests/stubid.rs` would then be scanning itself.
+//! The needle is masked here for the same reason `stubid` masks its own: a
+//! helper that held `GINARY-STUB-ID\0` contiguously would put a second marker
+//! into every test binary that links it, and `tests/stubid.rs` would then be
+//! scanning itself. Splitting it in two halves is not enough — a linker may
+//! lay two constants out side by side, which is exactly what a Windows
+//! `ginary.exe` was found doing — so one masked image is stored and unmasked
+//! at run time. See `ginary::stubid::needle_fragments`.
 
 use std::path::{Path, PathBuf};
 
-use ginary::target::Target;
+use ginary::target::{ALL, Arch, Target};
 
-/// The first half of the needle.
-pub const HEAD: &[u8] = b"GINARY-STUB";
+/// The byte [`IMAGE`] is masked with, the same one `ginary::stubid` uses.
+const MASK: u8 = 0x5a;
 
-/// The second half, ending in the NUL that closes the name.
-pub const TAIL: &[u8] = b"-ID\0";
+/// The one image of the needle this test suite stores: the fifteen bytes of
+/// the record's name, each exclusive-ored with [`MASK`], so the helper spells
+/// the needle in no arrangement a linker can produce.
+pub const IMAGE: [u8; 15] = [
+    b'G' ^ MASK,
+    b'I' ^ MASK,
+    b'N' ^ MASK,
+    b'A' ^ MASK,
+    b'R' ^ MASK,
+    b'Y' ^ MASK,
+    b'-' ^ MASK,
+    b'S' ^ MASK,
+    b'T' ^ MASK,
+    b'U' ^ MASK,
+    b'B' ^ MASK,
+    b'-' ^ MASK,
+    b'I' ^ MASK,
+    b'D' ^ MASK,
+    MASK,
+];
 
 /// The length of a whole marker, name and padding included.
 pub const MARKER_LEN: usize = 128;
@@ -40,10 +61,36 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The payload format version this ginary writes.
 pub const FORMAT_VERSION: u32 = ginary::manifest::FORMAT_VERSION;
 
-/// The needle, assembled rather than stored.
+/// The needle, unmasked rather than stored.
+///
+/// The mask is read through [`std::hint::black_box`] so the optimiser may not
+/// fold the loop into a plain constant, which would put the needle back into
+/// every test binary that links this helper.
 pub fn needle() -> Vec<u8> {
-    let mut bytes = HEAD.to_vec();
-    bytes.extend_from_slice(TAIL);
+    let mask = std::hint::black_box(MASK);
+    IMAGE.iter().map(|byte| byte ^ mask).collect()
+}
+
+/// The images this test suite stores the needle's halves in, in the order
+/// [`needle`] joins them.
+///
+/// Exposed for the same reason [`ginary::stubid::needle_fragments`] is: a
+/// linker is free to lay two constants out side by side, and if these two ever
+/// are, every binary that links this helper carries the needle contiguously
+/// and `tests/stubid.rs` finds a second identity in a file that has one.
+pub fn fragments() -> Vec<&'static [u8]> {
+    vec![&IMAGE]
+}
+
+/// The bytes a linker leaves behind when it does lay the two halves side by
+/// side: the fifteen bytes of the name, and then whatever constant came next
+/// in the section — which is never a marker body.
+///
+/// This is the shape a Windows `ginary.exe` was found carrying beside its real
+/// marker. A scan has to see it for what it is: not an identity.
+pub fn stray_needle() -> Vec<u8> {
+    let mut bytes = needle();
+    bytes.extend_from_slice(b"\0the next constant in the read-only section\0");
     bytes
 }
 
@@ -254,15 +301,25 @@ pub fn write_executable(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// Gives a file mode 0o755.
+/// Gives a file mode 0o755, where the platform has modes.
+///
+/// Portable on purpose: [`write_executable`] calls it for every fixture it
+/// writes and those fixtures are read on all three operating systems, so only
+/// the chmod is gated. On Windows an executable is decided by its extension
+/// and there is nothing here to do.
 ///
 /// # Panics
 ///
 /// If the mode cannot be set.
 pub fn set_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("the fixture is executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fixture is executable");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The name `mise run stubs:build` writes for `target`.
@@ -287,18 +344,124 @@ pub fn cache_stub_path(cache_dir: &Path, version: &str, target: &Target) -> Path
         .join(format!("{}{}", target.name(), target.exe_suffix()))
 }
 
+/// The variable that says the cross-built stubs are supposed to be on this
+/// machine, so a missing one is a failure rather than a skip.
+///
+/// It is deliberately *not* [`crate::common::tools::REQUIRE_VAR`].
+/// `GINARY_REQUIRE_TOOLCHAIN` is a claim about programs the machine installs —
+/// `erl`, `gleam`, `strip`, `docker` — and a cross-built stub is none of
+/// those: it is a file `mise run stubs:build` produces after minutes of
+/// `cross` in a docker container, and a job that never ran that command has
+/// not got one however complete its toolchain is. Conflating the two is what
+/// failed the `test` and `coverage` jobs of the first pull-request run; see
+/// `tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs`.
+#[cfg(feature = "cli")]
+pub const REQUIRE_STUBS_VAR: &str = "GINARY_REQUIRE_STUBS";
+
+/// What a stub-gated test should do, given what the environment says.
+#[cfg(feature = "cli")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StubChoice {
+    /// Run against this file.
+    Run(PathBuf),
+    /// Do not run, and print this reason on standard error.
+    Skip(String),
+    /// Fail, with this message: the caller promised the stubs were here.
+    Fail(String),
+}
+
+/// Decides between running, skipping and failing, without touching `PATH` or
+/// the environment.
+///
+/// `dirs` are the directories searched, in order; `is_file` answers whether a
+/// candidate exists, passed in so the rule can be asserted without a
+/// filesystem. `required_toolchain` is whether `GINARY_REQUIRE_TOOLCHAIN` is
+/// `1` and `required_stubs` is whether [`REQUIRE_STUBS_VAR`] is: the first
+/// changes nothing here, and that is the whole rule.
+///
+/// Three answers, in the order the questions are asked:
+///
+/// 1. the first directory that holds the file wins, whatever either flag
+///    says — a stub that is present is never skipped and never a failure;
+/// 2. otherwise, `required_stubs` makes it a failure, because a job that
+///    obtained the stubs — `smoke-matrix` cross-builds them, `coverage`
+///    downloads them — and then cannot find one has a broken step, not a
+///    machine without a toolchain;
+/// 3. otherwise it is a skip that names the command which would fix it.
+///
+/// # Panics
+///
+/// Never.
+#[cfg(feature = "cli")]
+pub fn choose_cross_stub(
+    name: &str,
+    dirs: &[PathBuf],
+    required_toolchain: bool,
+    required_stubs: bool,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> StubChoice {
+    // Taken and deliberately not read. Dropping the parameter would leave the
+    // rule invisible at the call site, and the whole defect this function
+    // exists for was `GINARY_REQUIRE_TOOLCHAIN` being consulted here.
+    let _ = required_toolchain;
+
+    for dir in dirs {
+        let candidate = dir.join(name);
+        if is_file(&candidate) {
+            return StubChoice::Run(candidate);
+        }
+    }
+    if required_stubs {
+        return StubChoice::Fail(format!(
+            "no {name} in any of {dirs:?}: {REQUIRE_STUBS_VAR}=1 says this job obtained the \
+             stubs, so the step that built or downloaded them produced nothing for this target \
+             — check the step that fills target/stubs in this job"
+        ));
+    }
+    StubChoice::Skip(format!(
+        "no {name} in any of {dirs:?}: run `mise run stubs:build` or set {}",
+        ginary::stub::STUB_DIR_VAR
+    ))
+}
+
+/// Which of the two requirement variables the environment sets, as
+/// `(required_toolchain, required_stubs)`.
+///
+/// The seam between [`cross_stub`] and [`choose_cross_stub`], and the half of
+/// this module that the first pull-request run actually got wrong: the rule
+/// was never in doubt, the *wiring* read `GINARY_REQUIRE_TOOLCHAIN` where it
+/// meant [`REQUIRE_STUBS_VAR`]. `lookup` is passed in rather than read from
+/// the process so that swapping the two names back is a test failure and not
+/// a green suite; a test that mutated the real environment would race every
+/// other test in the binary.
+///
+/// Only the exact value `1` counts, for either: an empty variable is how a
+/// shell spells "unset" and `GINARY_REQUIRE_STUBS=0` is a contributor saying
+/// no.
+#[cfg(feature = "cli")]
+pub fn stub_requirement(lookup: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> (bool, bool) {
+    let set = |name: &str| lookup(name).is_some_and(|value| value == "1");
+    (
+        set(crate::common::tools::REQUIRE_VAR),
+        set(REQUIRE_STUBS_VAR),
+    )
+}
+
 /// A prebuilt cross stub for `target`, or a printed skip.
 ///
 /// `GINARY_STUB_DIR` first, then `target/stubs` in the repository, which is
 /// where `mise run stubs:build` puts them. A test that needs a real
 /// cross-built ELF cannot build one itself — `cross` needs a docker daemon and
-/// minutes — so it follows the same rule as a test that needs `erl`: it says
-/// what it skipped and why, unless `GINARY_REQUIRE_TOOLCHAIN=1` says the file
-/// was supposed to be there.
+/// minutes — so a machine without one skips, loudly, naming the command that
+/// would produce it.
+///
+/// The switch that forbids the skip is [`REQUIRE_STUBS_VAR`] and not
+/// `GINARY_REQUIRE_TOOLCHAIN`: see [`choose_cross_stub`] for why the two are
+/// different questions.
 ///
 /// # Panics
 ///
-/// If the stub is missing and `GINARY_REQUIRE_TOOLCHAIN=1`.
+/// If the stub is missing and `GINARY_REQUIRE_STUBS=1`.
 #[cfg(feature = "cli")]
 pub fn cross_stub(target: &Target) -> Option<PathBuf> {
     let name = stub_file_name(VERSION, target);
@@ -308,24 +471,23 @@ pub fn cross_stub(target: &Target) -> Option<PathBuf> {
     }
     dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/stubs"));
 
-    for dir in &dirs {
-        let candidate = dir.join(&name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
+    let (required_toolchain, required_stubs) =
+        stub_requirement(&|name: &str| std::env::var_os(name));
 
-    let required = std::env::var_os(crate::common::tools::REQUIRE_VAR).is_some_and(|v| v == "1");
-    assert!(
-        !required,
-        "no {name} in any of {dirs:?} and {}=1 forbids skipping",
-        crate::common::tools::REQUIRE_VAR
-    );
-    eprintln!(
-        "skipping: no {name}; run `mise run stubs:build` or set {}",
-        ginary::stub::STUB_DIR_VAR
-    );
-    None
+    match choose_cross_stub(
+        &name,
+        &dirs,
+        required_toolchain,
+        required_stubs,
+        &|path: &Path| path.is_file(),
+    ) {
+        StubChoice::Run(path) => Some(path),
+        StubChoice::Skip(reason) => {
+            eprintln!("skipping: {reason}");
+            None
+        }
+        StubChoice::Fail(reason) => panic!("{reason}"),
+    }
 }
 
 /// The `IMAGE_FILE_MACHINE_AMD64` a 64-bit x86 PE names in its COFF header.
@@ -425,4 +587,279 @@ pub fn pe_bytes(machine: u16, marker: &[u8; MARKER_LEN]) -> Vec<u8> {
 /// If the file cannot be written.
 pub fn pe_with_marker(dir: &Path, name: &str, machine: u16, marker: &[u8; MARKER_LEN]) -> PathBuf {
     write_executable(dir, name, &pe_bytes(machine, marker))
+}
+
+/// A target `host` is not, whichever machine `host` is.
+///
+/// `tests/stub.rs` needs one for every claim about a *search*: the running
+/// executable is a candidate only for the host's own target, so a search that
+/// must find nothing has to be asked about a target this binary is not for.
+/// The file picked `windows-x86_64` and said why — "it is not the host on any
+/// machine this suite runs on" — which stopped being true:
+///
+/// ```text
+/// ---- nothing_found_names_every_path_that_was_searched ----
+/// the directories are empty:
+///   ("D:\\a\\ginary\\ginary\\target\\debug\\deps\\stub-7dd5c00ea0f19c37.exe", SelfExe)
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33751715516/job/100636537290>,
+/// `tests/stub.rs:325`.) The search worked perfectly: on that machine the
+/// target asked about *was* the host, so the running executable answered.
+///
+/// The architecture is what is flipped, because it is the one field the
+/// running binary can never disagree with the host on. Flipping it is not
+/// always enough on its own: `windows-aarch64` is not a row of
+/// [`ginary::target::ALL`], and a `--target` naming it is refused by the
+/// parser before the claim under test is reached, so a host whose flip has
+/// no name falls back to the first supported target whose architecture is
+/// not the host's. See
+/// `tests/regressions/e12_the_cross_target_a_stub_test_used_had_no_name.rs`.
+///
+/// # Panics
+///
+/// If [`ginary::target::ALL`] holds no target of another architecture at
+/// all, which would leave the claim this exists for unaskable.
+pub fn foreign_target_for(host: Target) -> Target {
+    let flipped = Target::new(host.os, other_arch(host.arch), host.libc);
+    if is_supported(flipped) {
+        return flipped;
+    }
+    ALL.into_iter()
+        .find(|candidate| candidate.arch != host.arch)
+        .expect("`ginary::target::ALL` carries more than one architecture")
+}
+
+/// Whether `target` is one this ginary has a name for.
+///
+/// Asked of the parser rather than of [`ginary::target::ALL`] directly,
+/// because the parser is what refuses a marker and a `--target`, and it is
+/// the refusal these helpers exist to stay on the right side of.
+fn is_supported(target: Target) -> bool {
+    target.name().parse::<Target>() == Ok(target)
+}
+
+/// A supported target that is not `host`.
+///
+/// What `stub::verify`'s *target* gate is tested with: a marker naming
+/// somebody else's target is refused before the object header is read at all,
+/// so the container format is irrelevant here and the only thing that matters
+/// is that the name is one this ginary can read back.
+///
+/// It used to be "the host's own object format and another architecture",
+/// written for the header gate, which the four `tests/stub.rs` failures of
+/// E12 showed has no answer on a single-architecture platform:
+///
+/// ```text
+/// ---- a_stub_whose_marker_names_another_target_is_refused ----
+/// expected StubError::TargetMismatch, got Marker { path: "...\\cross", source:
+///   UnknownTarget { name: "windows-aarch64",
+///                   source: Unsupported("windows-aarch64") } }
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>,
+/// `tests/stub.rs:467`.) The header gate is no longer asked for a second
+/// *target* at all — it is asked for a second *machine*, which is
+/// [`for_other_machine`].
+///
+/// The architecture is flipped where that names a supported target, so the
+/// answer on Linux and macOS is what it has always been; a host whose flip
+/// has no name takes the first supported target that is not itself.
+///
+/// # Panics
+///
+/// If [`ginary::target::ALL`] holds only one target.
+pub fn other_supported_target(host: Target) -> Target {
+    let flipped = Target::new(host.os, other_arch(host.arch), host.libc);
+    if is_supported(flipped) {
+        return flipped;
+    }
+    ALL.into_iter()
+        .find(|candidate| *candidate != host)
+        .expect("`ginary::target::ALL` carries more than one target")
+}
+
+/// The architecture that is not `arch`.
+///
+/// The one field the running executable can never disagree with the host on,
+/// which is what makes it the field both rules above flip and the field
+/// [`for_other_machine`] rewrites.
+pub const fn other_arch(arch: Arch) -> Arch {
+    match arch {
+        Arch::X86_64 => Arch::Aarch64,
+        Arch::Aarch64 => Arch::X86_64,
+    }
+}
+
+// ------------------------------------------------- a header for another CPU --
+
+/// A copy of `image` whose object header names the other architecture, in the
+/// container format `image` already is.
+///
+/// "The other" is read off the file rather than off the host — the flip of
+/// the machine its own header names — so the answer for [`ginary_bin`] is the
+/// architecture [`Target::host`] is not, and the answer for a synthetic
+/// fixture is the flip of whatever that fixture was built for.
+///
+/// The fixture `same_format_other_arch` could not build on every host. That
+/// helper answers "a target in this container format for another machine",
+/// and on a Windows runner the only answer it has is `windows-aarch64` — a
+/// combination `ginary::target::ALL` does not carry, so the marker written
+/// from it does not scan back and the header gate is never reached:
+///
+/// ```text
+/// ---- a_marker_that_disagrees_with_the_file_is_refused_by_the_header ----
+/// expected StubError::ObjectMismatch, got Marker { path: "...\\liar", source:
+///   UnknownTarget { name: "windows-aarch64",
+///                   source: Unsupported("windows-aarch64") } }
+/// ```
+///
+/// (`Windows build and exit-code propagation`
+/// <https://github.com/P4suta/ginary/actions/runs/33823103540/job/100869848230>,
+/// `tests/stub.rs:488`.)
+///
+/// The gate's subject is not a second *target*, it is a second *machine*: the
+/// marker is text and copies, the header is what the linker wrote, and the
+/// test needs a file whose header says one thing while its marker says
+/// another. So the machine field is rewritten instead of the target, and the
+/// marker and the `want` both stay the host — which is a supported target on
+/// every runner.
+///
+/// The field is one halfword in every format ginary reads: `e_machine` at
+/// offset 18 of an ELF, the COFF `Machine` four bytes past the PE signature,
+/// and the Mach-O `cputype` at offset 4.
+///
+/// # Panics
+///
+/// If `image` is not an object in a format this rewrites, or is too short to
+/// hold the field.
+pub fn for_other_machine(image: &[u8]) -> Vec<u8> {
+    let mut bytes = image.to_vec();
+    let format = ginary::platform::object_format_of(&bytes)
+        .expect("the fixture image is an object in a format ginary reads");
+    let (at, width) = machine_field(&bytes, format);
+    let found = read_field(&bytes, at, width);
+    let other = other_machine_code(format, found);
+    write_field(&mut bytes, at, width, other);
+    bytes
+}
+
+/// Where the machine field of an object in `format` is, and how wide it is.
+///
+/// The offset is the same in every file of its format, so no parser is
+/// needed and none is wanted: the fixture is deliberately a byte rewrite of a
+/// real binary, which is what makes it a file whose *header* says one thing
+/// while every other byte of it is the object a linker wrote.
+///
+/// # Panics
+///
+/// If `bytes` is too short to hold the field, or if the file is a fat Mach-O,
+/// which carries one machine per slice and is not a fixture this builds.
+fn machine_field(bytes: &[u8], format: ginary::platform::ObjectFormat) -> (usize, usize) {
+    match format {
+        // `e_machine`, a halfword at offset 18 of every ELF header.
+        ginary::platform::ObjectFormat::Elf => {
+            assert_eq!(
+                bytes.get(5),
+                Some(&1),
+                "the ELF fixture is little-endian, which every target ginary has a name for is"
+            );
+            (18, 2)
+        }
+        // The COFF header's `Machine`, a halfword four bytes past the `PE\0\0`
+        // signature the DOS header's `e_lfanew` points at.
+        ginary::platform::ObjectFormat::Pe => {
+            let at = usize::try_from(u32::from_le_bytes(
+                bytes[0x3c..0x40]
+                    .try_into()
+                    .expect("the PE fixture holds an `e_lfanew`"),
+            ))
+            .expect("the PE signature offset fits in this machine's usize");
+            assert_eq!(
+                bytes.get(at..at + 4),
+                Some(&b"PE\0\0"[..]),
+                "the PE fixture carries its signature where `e_lfanew` says"
+            );
+            (at + 4, 2)
+        }
+        // `cputype`, a word at offset 4 of a thin Mach-O header.
+        ginary::platform::ObjectFormat::MachO => {
+            assert!(
+                !bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]),
+                "a fat Mach-O carries one machine per slice; this builds a thin fixture"
+            );
+            assert_eq!(
+                bytes.first(),
+                Some(&0xcf),
+                "the Mach-O fixture is a little-endian 64-bit object"
+            );
+            (4, 4)
+        }
+    }
+}
+
+/// The `width` little-endian bytes at `at`, as a number.
+fn read_field(bytes: &[u8], at: usize, width: usize) -> u32 {
+    let mut value = 0u32;
+    for (index, byte) in bytes[at..at + width].iter().enumerate() {
+        value |= u32::from(*byte) << (8 * index);
+    }
+    value
+}
+
+/// Writes `value` back over the same `width` bytes.
+fn write_field(bytes: &mut [u8], at: usize, width: usize, value: u32) {
+    for index in 0..width {
+        bytes[at + index] = u8::try_from((value >> (8 * index)) & 0xff).unwrap_or_default();
+    }
+}
+
+/// The code for the architecture that is not the one `found` names, in
+/// `format`'s own numbering.
+///
+/// # Panics
+///
+/// If `found` is neither of the two architectures `ginary::target::Arch`
+/// carries, because then there is no "the other one" to answer with.
+fn other_machine_code(format: ginary::platform::ObjectFormat, found: u32) -> u32 {
+    let (x86_64, aarch64) = match format {
+        // `EM_X86_64` and `EM_AARCH64`.
+        ginary::platform::ObjectFormat::Elf => (62, 183),
+        ginary::platform::ObjectFormat::Pe => {
+            (u32::from(PE_MACHINE_AMD64), u32::from(PE_MACHINE_ARM64))
+        }
+        // `CPU_TYPE_X86_64` and `CPU_TYPE_ARM64`: the 32-bit type with
+        // `CPU_ARCH_ABI64` set.
+        ginary::platform::ObjectFormat::MachO => (0x0100_0007, 0x0100_000c),
+    };
+    if found == x86_64 {
+        aarch64
+    } else if found == aarch64 {
+        x86_64
+    } else {
+        panic!("the fixture names a machine ginary has no `Arch` for: {found:#x}")
+    }
+}
+
+/// A copy of `image` at `<dir>/<name>` carrying exactly `marker`.
+///
+/// [`stub_copy`] with the bytes supplied rather than read from
+/// [`ginary_bin`], so that a fixture built by [`for_other_machine`] can carry
+/// an identity too.
+///
+/// # Panics
+///
+/// If the copy cannot be written, or if `image` carries more than one marker
+/// already.
+pub fn stub_copy_of(dir: &Path, name: &str, image: &[u8], marker: &[u8; MARKER_LEN]) -> PathBuf {
+    let mut bytes = image.to_vec();
+    let found = offsets(&bytes);
+    match found.as_slice() {
+        [] => bytes.extend_from_slice(marker),
+        [offset] => bytes[*offset..*offset + MARKER_LEN].copy_from_slice(marker),
+        many => panic!("the image carries {} markers", many.len()),
+    }
+    write_executable(dir, name, &bytes)
 }

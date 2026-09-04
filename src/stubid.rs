@@ -15,13 +15,28 @@
 //! at one offset, and the padding is zero so that two builds of the same
 //! ginary produce the same bytes.
 //!
-//! [`scan`] is the reader. It assembles its needle at run time out of
-//! [`NEEDLE_HEAD`] and [`NEEDLE_TAIL`], so the scanner's own `.rodata` never
-//! holds the needle contiguously and a ginary scanning *itself* — or a
-//! `ginary` binary embedded in a test fixture — is not a second hit. Exactly
-//! one occurrence is a stub; none is [`StubIdError::NotAStub`] and more than
-//! one is [`StubIdError::Ambiguous`], because a file with two identities has
-//! none.
+//! [`scan`] is the reader, and it has to be able to read a file that holds a
+//! copy of the scanner. Two rules keep it honest, and a Windows build found
+//! that either one alone is not enough.
+//!
+//! **The needle is never stored.** What this module stores is one masked image:
+//! the needle with every byte masked, which spells nothing. [`needle`] unmasks
+//! it at run time, so the compiled scanner's own read-only data holds the
+//! fifteen bytes it looks for exactly once — inside [`GINARY_STUB_ID`], where
+//! they belong. The obvious weaker version of this, storing the name in two
+//! halves and joining them, is what shipped until E10, and a linker laid the
+//! two halves side by side in the Windows `ginary.exe`: two constants a linker
+//! is free to place adjacently are, between them, one contiguous needle. See
+//! [`needle_fragments`] and
+//! `tests/regressions/e10_the_needle_halves_were_stored_side_by_side.rs`.
+//!
+//! **A scan counts records, not hits.** Fifteen bytes of data are not an
+//! identity. [`candidates`] is every offset the needle appears at and
+//! [`records`] is every offset a whole, terminated, zero-padded, four-field
+//! record begins at; [`scan`] counts the second. Exactly one record is a stub;
+//! none is [`StubIdError::NotAStub`] (or the typed reason the one candidate is
+//! not a record) and more than one is [`StubIdError::Ambiguous`], because a
+//! file with two identities has none.
 
 use std::fmt;
 
@@ -30,11 +45,48 @@ use crate::target::{ParseTargetError, Target};
 /// The length of the embedded marker, in bytes.
 pub const MARKER_LEN: usize = 128;
 
-/// The first half of the needle a scan assembles at run time.
-pub const NEEDLE_HEAD: &str = "GINARY-STUB";
+/// The length of the needle: the record's name and the NUL that closes it.
+pub const NEEDLE_LEN: usize = 15;
 
-/// The second half of the needle, ending in the NUL that closes the name.
-pub const NEEDLE_TAIL: &str = "-ID\0";
+/// The byte [`NEEDLE_IMAGE`] is masked with.
+///
+/// Any non-zero value does the job; this one turns every character of the name
+/// into a byte no ASCII text carries, so the stored image does not read as a
+/// truncated word either.
+const NEEDLE_MASK: u8 = 0x5a;
+
+/// The one image of the needle this build stores: every byte of the name
+/// exclusive-ored with [`NEEDLE_MASK`].
+///
+/// Masked rather than split, because splitting is not a defence. Two constants
+/// are two objects and a linker may lay two objects out adjacently; a masked
+/// one is fifteen bytes that spell the needle in no arrangement whatsoever, so
+/// no linker has a choice to get wrong.
+static NEEDLE_IMAGE: [u8; NEEDLE_LEN] = mask(needle_plain());
+
+/// The needle itself, written a byte at a time.
+///
+/// Not a string literal: a literal is an image the compiler may place in the
+/// binary, and the whole point is that this build carries exactly one image of
+/// these fifteen bytes. Every caller is a constant evaluation — the
+/// [`NEEDLE_IMAGE`] initialiser and [`marker`] — so the array exists while the
+/// crate is compiled and never afterwards.
+const fn needle_plain() -> [u8; NEEDLE_LEN] {
+    [
+        b'G', b'I', b'N', b'A', b'R', b'Y', b'-', b'S', b'T', b'U', b'B', b'-', b'I', b'D', 0,
+    ]
+}
+
+/// Exclusive-ors every byte with [`NEEDLE_MASK`]. Its own inverse, which is
+/// why one function both stores and reads the needle.
+const fn mask(mut bytes: [u8; NEEDLE_LEN]) -> [u8; NEEDLE_LEN] {
+    let mut index = 0;
+    while index < NEEDLE_LEN {
+        bytes[index] ^= NEEDLE_MASK;
+        index += 1;
+    }
+    bytes
+}
 
 /// The canonical name of the target this build runs on.
 ///
@@ -67,9 +119,9 @@ pub static GINARY_STUB_ID: [u8; MARKER_LEN] = marker();
 /// Renders this build's marker.
 ///
 /// A `const fn` rather than a `concat!`, because the format version is a
-/// number and the name of the record is deliberately split: everything here is
-/// evaluated while the crate is compiled, and the array it returns is the one
-/// the linker writes into the binary.
+/// number and the record's name is [`needle_plain`] rather than a literal:
+/// everything here is evaluated while the crate is compiled, and the array it
+/// returns is the one the linker writes into the binary.
 ///
 /// # Panics
 ///
@@ -78,8 +130,8 @@ pub static GINARY_STUB_ID: [u8; MARKER_LEN] = marker();
 /// initialiser of a `static`.
 const fn marker() -> [u8; MARKER_LEN] {
     let buf = [0u8; MARKER_LEN];
-    let (buf, at) = put(buf, 0, NEEDLE_HEAD.as_bytes());
-    let (buf, at) = put(buf, at, NEEDLE_TAIL.as_bytes());
+    let name = needle_plain();
+    let (buf, at) = put(buf, 0, &name);
     let (buf, at) = put(buf, at, b"v=");
     let (buf, at) = put(buf, at, env!("CARGO_PKG_VERSION").as_bytes());
     let (buf, at) = put(buf, at, b";t=");
@@ -257,46 +309,114 @@ pub enum StubIdError {
 /// The four fields of the record, in the order a marker writes them.
 const FIELDS: [&str; 4] = ["v", "t", "f", "k"];
 
-/// The needle, assembled rather than stored.
+/// The needle, unmasked rather than stored.
 ///
-/// Two halves joined here, so that the bytes a scan looks for never appear
-/// contiguously in the scanner's own `.rodata`: a ginary that held them would
-/// find a second identity in every copy of itself, and every artifact built
-/// from a stub embeds one ginary inside another.
-fn needle() -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(NEEDLE_HEAD.len() + NEEDLE_TAIL.len());
-    bytes.extend_from_slice(NEEDLE_HEAD.as_bytes());
-    bytes.extend_from_slice(NEEDLE_TAIL.as_bytes());
+/// The stored image is masked, so the bytes a scan looks for do not appear
+/// contiguously anywhere in the scanner's own read-only data: a ginary that
+/// held them would find a second identity in every copy of itself, and every
+/// artifact built from a stub embeds one ginary inside another.
+///
+/// The mask is read through [`std::hint::black_box`] so that the optimiser may
+/// not fold the loop back into a plain fifteen-byte constant — which would put
+/// the image back in the binary and undo the whole arrangement. It costs one
+/// instruction on a path that is taken once per scan.
+pub fn needle() -> Vec<u8> {
+    let mask = std::hint::black_box(NEEDLE_MASK);
+    NEEDLE_IMAGE.iter().map(|byte| byte ^ mask).collect()
+}
+
+/// The byte images this build stores the needle in.
+///
+/// One image, and a masked one. The accessor exists so that
+/// the invariant can be *checked* rather than argued — no two of the images a
+/// build stores may be concatenable into the needle, in any order — because
+/// the arrangement it replaced could not pass that check.
+///
+/// Until E10 this module stored the name in two halves and joined them at run
+/// time. That keeps the needle out of any single constant and does nothing
+/// about the linker: two constants are two objects, a linker may lay two
+/// objects out adjacently, and the Windows `ginary.exe` of
+/// <https://github.com/P4suta/ginary/actions/runs/33739517757> held
+/// `GINARY-STUB` immediately followed by `-ID\0` at an address no code in this
+/// crate chose. `stubid::scan` reported two identity markers in a file that
+/// carries one. See
+/// `tests/regressions/e10_the_needle_halves_were_stored_side_by_side.rs`.
+pub fn needle_fragments() -> Vec<&'static [u8]> {
+    vec![&NEEDLE_IMAGE]
+}
+
+/// Every offset in `bytes` at which the needle appears, whether or not a whole
+/// identity record follows it.
+///
+/// A hit is a *candidate*: the fifteen bytes that open a marker can also be
+/// unrelated data a linker happened to place there, or a fragment of a payload
+/// that carries a ginary of its own. [`records`] is the stricter question.
+pub fn candidates(bytes: &[u8]) -> Vec<usize> {
+    hits(bytes, &needle())
+}
+
+/// Every offset in `bytes` at which a whole, well-formed identity record
+/// begins: [`MARKER_LEN`] bytes, opened by the needle, carrying a terminated
+/// UTF-8 body of the four known fields and zero padding after it.
+///
+/// This is what "the file carries one identity" means. A stray needle is not
+/// an identity, so it is not counted as one, and a file that holds one record
+/// and one stray hit is a stub rather than an ambiguity.
+pub fn records(bytes: &[u8]) -> Vec<usize> {
+    let needle = needle();
+    hits(bytes, &needle)
+        .into_iter()
+        .filter(|offset| parse_at(bytes, *offset, needle.len()).is_ok())
+        .collect()
+}
+
+/// Every offset in `bytes` at which `needle` occurs.
+///
+/// `windows` yields nothing for a buffer shorter than the needle, which is the
+/// "not a stub" answer a six-byte file deserves.
+fn hits(bytes: &[u8], needle: &[u8]) -> Vec<usize> {
     bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle)
+        .map(|(offset, _)| offset)
+        .collect()
 }
 
 /// Reads the identity marker out of a whole file's bytes.
 ///
-/// The needle is assembled here rather than stored, so that a binary holding
-/// this function does not itself match. Exactly one occurrence is required.
+/// The needle is unmasked here rather than stored, so that a binary holding
+/// this function does not itself match, and what is counted is whole
+/// [`records`] rather than needle [`candidates`]: exactly one record is
+/// required.
 ///
 /// # Errors
 ///
-/// [`StubIdError::NotAStub`] when there is no marker,
-/// [`StubIdError::Ambiguous`] when there is more than one, and one of the
-/// typed field errors when the single marker does not parse.
+/// [`StubIdError::NotAStub`] when the needle is nowhere in `bytes`,
+/// [`StubIdError::Ambiguous`] when more than one whole record is there, and
+/// one of the typed field errors when the needle is there and no candidate is
+/// a record — the reason the *first* candidate is not one, which for a file
+/// carrying a single malformed marker is the reason that marker is malformed.
 pub fn scan(bytes: &[u8]) -> Result<StubId, StubIdError> {
     let needle = needle();
-    // `windows` yields nothing for a buffer shorter than the needle, which is
-    // the "not a stub" answer a six-byte file deserves.
-    let mut offsets = bytes
-        .windows(needle.len())
-        .enumerate()
-        .filter(|(_, window)| *window == needle.as_slice())
-        .map(|(offset, _)| offset);
-    let Some(offset) = offsets.next() else {
+    let candidates = hits(bytes, &needle);
+    let Some(&first) = candidates.first() else {
         return Err(StubIdError::NotAStub);
     };
-    let count = 1 + offsets.count();
-    if count > 1 {
-        return Err(StubIdError::Ambiguous { count });
+    let records: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|offset| parse_at(bytes, *offset, needle.len()).is_ok())
+        .collect();
+    match records.as_slice() {
+        // No candidate is a whole record. The file is not a stub, and the
+        // useful answer is why the first hit is not one rather than a bare
+        // "no marker": a truncated, mistyped or badly padded marker is a
+        // ginary build gone wrong, not a file that was never ginary.
+        [] => parse_at(bytes, first, needle.len()),
+        [only] => parse_at(bytes, *only, needle.len()),
+        many => Err(StubIdError::Ambiguous { count: many.len() }),
     }
-    parse_at(bytes, offset, needle.len())
 }
 
 /// Reads the record whose needle starts at `offset`.

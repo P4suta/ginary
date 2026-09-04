@@ -41,6 +41,8 @@ use serde_json::Value;
 
 use crate::common::artifact::{ArtifactOptions, SyntheticArtifact};
 use crate::common::built::BuiltProject;
+use crate::common::hostpath::emulator_suffix;
+use crate::common::portability::unmet_needs;
 use crate::common::repack::{self, NATIVE_PATH, RepackOptions};
 use crate::common::tools::require_tools;
 
@@ -267,7 +269,7 @@ fn an_object_built_for_another_machine_is_a_mismatch() {
         report.issues,
         vec![Issue::MachineMismatch {
             path: NATIVE_PATH.to_owned(),
-            found: ginary::target::Target::host().arch.as_str().to_owned(),
+            found: repack::native_machine(),
             expected: foreign.arch.as_str().to_owned(),
         }]
     );
@@ -290,8 +292,8 @@ fn a_manifest_row_naming_native_code_the_artifact_does_not_carry_is_an_issue() {
                 NativeRef {
                     path: NATIVE_PATH.to_owned(),
                     kind: NativeKind::Elf,
-                    machine: Some(ginary::target::Target::host().arch.as_str().to_owned()),
-                    target: Some(ginary::target::Target::host()),
+                    machine: Some(repack::native_machine()),
+                    target: Some(repack::native_target()),
                     replaced: false,
                     source: None,
                 },
@@ -345,7 +347,7 @@ fn a_manifest_row_that_lies_about_an_objects_machine_is_an_issue() {
         vec![Issue::NativeMachineLie {
             path: NATIVE_PATH.to_owned(),
             recorded: "s390x".to_owned(),
-            actual: ginary::target::Target::host().arch.as_str().to_owned(),
+            actual: repack::native_machine(),
         }],
         "the manifest is held to the bytes the payload really carries"
     );
@@ -432,7 +434,7 @@ fn a_needed_outside_the_allowlist_is_reported() {
     let report = verify::verify_with(
         artifact.path(),
         &VerifyOptions {
-            allowlist: &[],
+            allowlist: Some(&[]),
             ..VerifyOptions::default()
         },
     )
@@ -733,7 +735,80 @@ fn a_real_artifact_verifies_clean() {
     let report = verify::verify(&project.artifact()).expect("a real artifact verifies");
 
     assert!(report.payload.ok(), "{:?}", report.payload);
-    assert_eq!(sentences(&report), Vec::<String>::new());
+
+    // What the findings are compared against is the runtime the *host*
+    // installed, not the empty list. An artifact is only as portable as the
+    // emulator it was built from: `setup-beam`'s `beam.smp` on `ubuntu-24.04`
+    // is linked against `libz.so.1`, which no glibc system is promised to
+    // have, so `ginary verify` reports it — which is the whole of the
+    // portability promise and not a defect. Asserting no findings at all
+    // asserted a property of one machine's Erlang build, and held here and
+    // nowhere it mattered. Adding `libz.so.1` to `NEEDED_ALLOWLIST` would be
+    // weakening the gate: it would promise a stranger's machine has zlib.
+    //
+    // The two sides stay independent. The report was read out of the
+    // artifact's own copy of the bytes; the expectation is computed from the
+    // installation those bytes were copied from, file by file, so a finding
+    // ginary invented and a finding it lost are both failures. An object the
+    // installation does not hold — a project's own NIF — is expected to have
+    // no findings at all, because nothing accounts for it. See
+    // `tests/regressions/e7_a_real_artifact_had_to_verify_on_the_hosts_own_erlang.rs`.
+    let host = ginary::otp::discover(None).expect("the host runtime is discoverable");
+    // The installation's copy is read with `native::inspect_object_bytes` and
+    // held to `verify::platform_allowlist`, not with `elf::inspect` against
+    // glibc's list: the artifact's objects are in whatever container this
+    // platform writes, and asking the ELF reader about a PE answered `Err` for
+    // every one of them, so `accounted` stayed zero and the expectation was
+    // empty because nothing had been read. See
+    // `e11_the_deep_check_read_only_one_of_the_three_object_formats`.
+    let allowlist = verify::platform_allowlist(ginary::target::Target::host().os);
+    let mut expected: Vec<String> = Vec::new();
+    let mut accounted = 0usize;
+    for object in &report.objects {
+        let Ok(bytes) = std::fs::read(host.root.join(&object.path)) else {
+            continue;
+        };
+        let Ok(info) = ginary::native::inspect_object_bytes(&bytes) else {
+            continue;
+        };
+        accounted += 1;
+        for needed in unmet_needs(&info.needed, allowlist) {
+            expected.push(
+                Issue::UnexpectedNeeded {
+                    path: object.path.clone(),
+                    needed,
+                }
+                .to_string(),
+            );
+        }
+    }
+    assert!(
+        accounted > 0,
+        "not one of the artifact's objects was found in the installation at {}, so the \
+         expectation below is empty because nothing was read rather than because nothing is \
+         wrong. The objects are {:?}",
+        host.root.display(),
+        report
+            .objects
+            .iter()
+            .map(|object| object.path.as_str())
+            .collect::<Vec<_>>()
+    );
+    expected.sort();
+    let mut found = sentences(&report);
+    found.sort();
+    assert_eq!(
+        found, expected,
+        "every finding has to be one the installed runtime accounts for, and every one it \
+         accounts for has to be found"
+    );
+    assert_eq!(
+        report.ok(),
+        expected.is_empty(),
+        "a runtime whose libraries are all on the allowlist verifies clean, and one whose are \
+         not does not: {found:?}"
+    );
+
     assert!(
         report.objects.len() > 1,
         "a real runtime carries beam.smp and its friends: {:?}",
@@ -743,15 +818,20 @@ fn a_real_artifact_verifies_clean() {
             .map(|object| object.path.as_str())
             .collect::<Vec<_>>()
     );
+    // The emulator this host's runtime ships, by the rule rather than by one
+    // platform's answer: it is a program `erlexec` execs on unix and the
+    // library `erl.exe` loads on Windows, where a path ending `/beam.smp`
+    // names nothing. See
+    // `tests/regressions/e12_the_real_artifact_check_named_the_unix_emulator.rs`.
+    let emulator = emulator_suffix(ginary::platform::HOST);
     assert!(
         report
             .objects
             .iter()
-            .any(|object| object.path.ends_with("/beam.smp")),
-        "{:?}",
+            .any(|object| object.path.ends_with(&emulator)),
+        "the artifact has to carry `{emulator}`: {:?}",
         report.objects
     );
-    assert!(report.ok());
 }
 
 #[test]
@@ -768,6 +848,16 @@ fn a_shipment_named_by_the_environment_verifies_clean() {
 
     let report = verify::verify(&path).expect("the named artifact verifies");
 
-    assert_eq!(sentences(&report), Vec::<String>::new());
-    assert!(report.ok());
+    // `report.ok()` is `payload.ok() && issues.is_empty()`, so this says
+    // everything the two assertions it replaces said, and says it with the
+    // findings in the message. Unlike `a_real_artifact_verifies_clean` there
+    // is no installation on this machine to account for a finding against:
+    // the artifact came from somewhere else, and whoever named it is the one
+    // who has to read what the verifier says about it.
+    assert!(
+        report.ok(),
+        "{} has findings: {:?}",
+        path.display(),
+        sentences(&report)
+    );
 }

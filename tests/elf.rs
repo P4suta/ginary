@@ -11,7 +11,9 @@
 //!
 //! Everything that reads `current_exe` is `cfg(target_os = "linux")`: on macOS
 //! that file is a Mach-O and the assertions would be about the wrong format.
-//! The rest — the magic check, the version comparison, the never-panic
+//! So is the one test that reads the host OTP tree's `beam.smp`: only a Linux
+//! installation has one, and only a gnu one carries the glibc libraries it
+//! names. The rest — the magic check, the version comparison, the never-panic
 //! properties — is portable and always runs.
 // The command line half of the suite: every claim in this file is about a
 // module the `cli` feature carries, so a `--no-default-features` build has
@@ -23,6 +25,8 @@ mod common;
 use ginary::elf::{self, ELF_MAGIC, ElfError};
 use proptest::prelude::*;
 
+// Read only by the one test that needs a Linux OTP tree, and gated with it.
+#[cfg(target_os = "linux")]
 use crate::common::tools::require_tools;
 
 /// Writes `bytes` into a fresh temporary file and hands back both.
@@ -111,7 +115,12 @@ fn four_bytes_of_magic_and_nothing_else_is_a_parse_error() {
     }
 }
 
-#[cfg(target_os = "linux")]
+// gnu Linux, not Linux: `libc.so.6` is glibc's own `SONAME` and `ld-linux` is
+// glibc's own loader. A musl test binary needs `libc.musl-<arch>.so.1`, and
+// the static one this project treats as its portability story needs nothing
+// and names no interpreter at all. The rule is held over the whole test tree
+// by `tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn the_running_test_binary_needs_libc_and_names_its_loader() {
     let exe = std::env::current_exe().expect("the running test binary");
@@ -135,7 +144,10 @@ fn the_running_test_binary_needs_libc_and_names_its_loader() {
     );
 }
 
-#[cfg(target_os = "linux")]
+// A floor is read out of `.gnu.version_r`, which only a glibc binary has: musl
+// carries no symbol versions to derive one from, so there is nothing here to
+// assert on a musl host.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn the_running_test_binarys_glibc_floor_is_a_version_number() {
     let exe = std::env::current_exe().expect("the running test binary");
@@ -183,6 +195,19 @@ fn a_truncated_binary_is_an_error_rather_than_a_panic() {
     }
 }
 
+// The libraries named below are glibc's and the file read is an ELF, so this
+// is a claim about a Linux OTP tree. A Windows installation has no `beam.smp`
+// at all — its emulator is the `beam.smp.dll` `erl.exe` loads, which
+// `src/erts_source.rs` already knows about — and a macOS one is a Mach-O. The
+// runner reported the Windows half as `beam.smp is an ELF file: Io { path:
+// "...\\erts-17.0.5\\bin\\beam.smp", kind: NotFound }`; see
+// `docs/dev/log/E8.md` section 14.
+//
+// And glibc's, not Linux's: the comment above says so and the gate now does
+// too. A musl-linked OTP is a healthy runtime that names none of the three
+// libraries below and carries no glibc floor, so on a musl host these
+// assertions would fail against a tree with nothing wrong with it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn the_host_beam_smp_needs_the_three_libraries_a_packaged_runtime_carries_nothing_for() {
     let Some(_tools) = require_tools(&["erl"]) else {

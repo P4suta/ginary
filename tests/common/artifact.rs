@@ -29,7 +29,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -488,7 +487,12 @@ impl<'a> Runner<'a> {
     }
 
     /// Appends an argument that is not valid UTF-8.
+    ///
+    /// Unix only: an argument that is bytes rather than text is a unix idea,
+    /// and `OsString::from_vec` is the unix half of the standard library.
+    #[cfg(unix)]
     pub fn raw_arg(mut self, bytes: &[u8]) -> Self {
+        use std::os::unix::ffi::OsStringExt as _;
         self.args.push(OsString::from_vec(bytes.to_vec()));
         self
     }
@@ -790,9 +794,12 @@ pub fn names_in(dir: &Path) -> Vec<String> {
 
 /// A file's permission bits.
 ///
+/// Unix only: a Windows file has no mode to read.
+///
 /// # Panics
 ///
 /// If the file cannot be stat'd.
+#[cfg(unix)]
 pub fn mode_of(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::symlink_metadata(path)
@@ -958,7 +965,11 @@ pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
         files.push(StagedFile {
             path,
             size: data.len() as u64,
-            mode,
+            // What the file carries once it is written, not what was asked
+            // for: on a platform whose `set_mode` is a no-op the two are
+            // different, and a listing that records the request describes a
+            // tree that does not exist.
+            mode: crate::common::payload::recorded_mode(mode, false),
             category,
         });
     }
@@ -1011,10 +1022,20 @@ pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
     listing
 }
 
+/// Gives a file `mode`, where a file has one.
+///
+/// The function itself stays portable — `write_executable` below calls it on
+/// every platform — and only the chmod is gated, because on Windows there is
+/// nothing to set and the caller has nothing to decide.
 fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .unwrap_or_else(|error| panic!("cannot chmod {}: {error}", path.display()));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
 fn write_executable(path: &Path, bytes: &[u8]) {
@@ -1035,6 +1056,10 @@ fn write_executable(path: &Path, bytes: &[u8]) {
 
 /// The bytes of a path, for an assertion about an argument that is not valid
 /// UTF-8.
+///
+/// Unix only, for the reason [`Runner::raw_arg`] is.
+#[cfg(unix)]
 pub fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
     path.as_os_str().as_bytes().to_vec()
 }

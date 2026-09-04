@@ -84,24 +84,34 @@ zstd = { version = "0.13.3", default-features = false }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip", "platform-verifier"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
-# Three system calls the launcher cannot do without and the standard library
+# The system calls the launcher cannot do without and the standard library
 # does not expose: `getuid` for the `${TMPDIR}/ginary-<uid>` fallback, `flock`
-# for the lock a running application holds on its cache entry, and `syncfs` for
-# the one-call durability barrier before an entry is renamed into place. rustix
-# wraps all three safely, so the unix launcher path opens no `unsafe` block; on
-# Linux it uses its own raw syscall backend, so nothing new is dynamically
-# linked. Unix only: none of the three exists on Windows, which takes a share
-# mode on the handle and a per-file `fsync` instead. See `src/cache_lock.rs`.
+# for the lock a running application holds on its cache entry, the `fcntl` that
+# clears `FD_CLOEXEC` off that lock so it belongs to the runtime across
+# `execve`, `syncfs` for the one-call durability barrier before an entry is
+# renamed into place, and `kill(pid, 0)` for the liveness probe `cache::sweep`
+# puts to the process table before it removes another launcher's temporary
+# tree. rustix wraps them all safely, so the unix launcher path opens no
+# `unsafe` block; on Linux it uses its own raw syscall backend, so nothing new
+# is dynamically linked. Unix only: Windows has none of them and takes a share
+# mode on the handle, a per-file `fsync` and `OpenProcess` instead. See
+# `src/cache_lock.rs` and `src/cache.rs`.
 rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
-# The two Win32 facilities the Windows launcher is built on, and nothing else.
-# `SetConsoleCtrlHandler` keeps Ctrl-C from killing the launcher out from under
-# the runtime it is waiting for, and a job object with
+# The three Win32 facilities the crate's Windows path is built on, and nothing
+# else. `SetConsoleCtrlHandler` keeps Ctrl-C from killing the launcher out from
+# under the runtime it is waiting for, and a job object with
 # `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` makes a killed launcher take the runtime
 # with it rather than leaving an orphan holding a cache entry. Both are needed
 # because Windows has no `execve`: the launcher stays resident as the runtime's
-# parent. See `docs/adr/0015-windows-launcher-stays-resident.md`.
+# parent. The third is not the launcher's: `OpenProcess` with
+# `PROCESS_QUERY_LIMITED_INFORMATION` is how `cache::sweep` asks whether the
+# process that owns a temporary tree still exists, which is `kill(pid, 0)` on
+# unix, and it is what `Win32_System_Threading` is in the list for.
+# `Win32_Security` is in it for a signature rather than for a call of ours: the
+# job-object entry points take a `SECURITY_ATTRIBUTES` pointer. See
+# `docs/adr/0015-windows-launcher-stays-resident.md`.
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",

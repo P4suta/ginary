@@ -26,7 +26,7 @@
 | `tests/manifest.rs` | `ginary.json` and `ginary.index.json`: the wire field order, the unknown-key round trip, `check_version`, the `launch` path rules, `created_at`, and the index over a staging root |
 | `tests/payload.rs` | the payload: deterministic packing, the round trip with modes, eight hand-built malicious archives, the two streaming reads, and three never-panic properties |
 | `tests/macho.rs` | read-only Mach-O inspection (D3), against a committed real arm64 binary and hand-fabricated headers: the four thin magics and the two fat, `cputype` for x86_64 and arm64, a known section's file offset and size, an `LC_CODE_SIGNATURE` load command present and absent, a fat header's `is_fat` without an error, the typed refusals for a non-Mach-O and a truncated one, and two never-panic properties |
-| `tests/payload_locate.rs` | `payload::locate` (D3): the end-of-file trailer unchanged for a plain artifact, the eof trailer winning over a Mach-O section when both are present, a `__GINARY,__payload` section's absolute offset, `None` for a Mach-O with no section, and the three typed errors — a section too small for a trailer, one whose first bytes carry no trailer magic, and one whose declared length disagrees with the section's own size — plus `TrailerError::Fat` for a fat Mach-O |
+| `tests/payload_locate.rs` | `payload::locate` (D3, extended E9): the end-of-file trailer unchanged for a plain artifact, the eof trailer winning over a Mach-O section when both are present, a `__GINARY,__payload` section's absolute offset, `None` for a Mach-O with no section, and the three typed errors — a section too small for a trailer, one whose first bytes carry no trailer magic, and one whose declared length disagrees with the section's own size — plus `TrailerError::Fat` for a fat Mach-O. E9 adds the guard on the `LC_CODE_SIGNATURE` path a signed macOS artifact locates through: a Mach-O whose `dataoff` names an offset past the end of the file is not a read error, it falls through to the section lookup and returns `None`, rather than surfacing a spurious `TrailerError::Io` from reading past EOF |
 | `tests/diag.rs` | the recorder through injected sinks: both output shapes, event order, elapsed time, and the four ways it stays off |
 | `src/error.rs` unit tests | the five exit codes, the message of each variant, the `hint:` second line, and the panic-hook line |
 | `src/selfexe.rs` unit tests | `/proc/self/exe` opens the running test binary, at offset zero, with the ELF magic; the magic and the route are `cfg(unix)`, the other two hold on either platform |
@@ -50,11 +50,11 @@
 | `tests/crashdump.rs` | a hand-written dump read field by field, a truncated one summarised rather than refused, a file that is not a dump, the `MAX_LINE_BYTES` bound, the rendered summary, the command's two forms, and a gated dump written by a real `erl` |
 | `tests/doctor.rs` | what B2 added to `doctor`: the cache probe run honestly against a directory the test owns and rendered from hand-built values for the two failures no test may create, the project context — name, version, shipment age, `[tools.ginary]` status, native code under `priv`, a NIF installed as a symlink and a directory symlink the walk refuses to descend — and the `crypto` NIF, against a `FakeOtp` and against the host; C2 adds the targets table's host row through an injected resolution, resolving and refusing; C4 adds the per-target columns of the native table — the rendered table over one verdict of each kind, and the verdicts a project's own configuration reaches over an object under `priv` |
 | `tests/target.rs` | what other modules ask the target model for: the container platform, `from_elf` over a glibc, a musl and a static binary, and `resolve_targets` — precedence, `host`, `all`, deduplication and the message an unknown selection earns |
-| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs` |
+| `tests/erts_source.rs` | the five ERTS source spellings and their four refusals, and the resolution through an injected ELF reader: a directory, a musl runtime, a static one, a target mismatch, a machine with no target, and a `FakeOtp` whose `beam.smp` is a shell script; three gated tests read the host's own emulator. The Windows arm has no injected reader — it reads a real PE header off a `FakeOtp::new().windows()` tree — and is covered in `tests/regressions/d2_a_windows_runtime_root_could_not_be_resolved.rs`. E7 adds the macOS arm on the same terms, over a `FakeOtp::new().macos()` tree whose `beam.smp` is a real thin Mach-O: a `cputype` resolved to `macos-aarch64`, a universal binary refused as more than one runtime, a `cputype` no target of ours names, and a header too short to be one. E16 extends the same reader choice to the two sources that fill a cache first, on both platforms whose runtime the ELF reader cannot read: `tests/regressions/e16_a_cached_macos_runtime_was_read_by_the_elf_reader.rs` and `tests/regressions/e16_a_cached_windows_runtime_was_read_by_the_elf_reader.rs` drive `resolve_in_with` for `catalog` and for `tarball:` with an ELF seam that *refuses everything it is shown*, so a test that consulted it at all would fail rather than merely disagree. Each file also holds the negative claim check — a catalogue entry claiming `libc.kind = "gnu"` for a Mach-O or for a PE is `ErtsError::CatalogClaim` naming `none` as the actual — because the emulator is the evidence and an entry that lies about it must not resolve |
 | `tests/stubid.rs` | the identity marker: that this build's own binary carries exactly one, that the constant and the file scan to the same identity, the padding, and the scanner over bytes a test writes — none, two, a marker that runs past the end, an unterminated body, and each malformed field as its own typed error |
 | `tests/stub.rs` | where a cross build's stub comes from and what it refuses: the four sources in order, both spellings in `GINARY_STUB_DIR`, the `.exe` suffix, the search that found nothing with every path in its message, and the seven gates of `verify` — the size cap, the marker, the version lock, the payload format, the target, the object header that disagrees with the marker, and a file that already carries a trailer. Two tests drive the real `ginary build`, and one gated test needs a cross-built musl stub. D3 adds three darwin cases over a hand-fabricated Mach-O carrying an appended marker, against the real Mach-O arm of `check_object`: a matching `cputype` accepted, a mismatched one refused by the header, and one already carrying a `__GINARY,__payload` section refused as an artifact. The RED-phase placeholder `a_darwin_stub_cannot_be_checked_here_yet`, which pinned the old `StubError::NotYetSupported` answer, is gone — it asserted the very behaviour these three replace |
 | `tests/stub_flavor.rs` | the sentence a launcher-only build prints when it is run with no payload, asserted through `launcher::no_payload_line` in both flavors and through the process itself in whichever flavor the run compiled |
-| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, `cli`-gated): the section written at the offset and size `macho.rs` itself reports back, unsigned and ad-hoc signed, `payload::locate` round-tripping the exact bytes and digest injected, and the typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host |
+| `tests/sign_macos.rs` | `sign_macos::inject_and_sign` (D3, extended E8, reworked E9; `cli`-gated): E9 replaced the carve-a-new-section layout — which two real Macs proved verifies yet segfaults — with the append-inside-`__LINKEDIT` layout that also *runs*, so the tests move with it. The payload is appended after `__LINKEDIT`'s content and the segment grown to cover it, nothing slides, and `payload::locate` round-trips the exact bytes and digest injected — unsigned through `PayloadVia::EofTrailer` (its trailer is the last 64 bytes) and ad-hoc signed through `PayloadVia::MachOAppended` (its trailer sits just before the reused `LC_CODE_SIGNATURE`), each pinning the discriminant, `report.payload_offset`, the length and the bytes. Two E9 tests hold the run-AND-verify invariants a section layout broke: `an_injected_artifact_runs_the_stubs_own_entry_instructions` reads the bytes at the finished artifact's mapped entry (through `common::macho::entry_point`) and asserts they are the stub's own first instructions — the entry moved nowhere, because nothing moved — and `an_injected_artifact_does_not_claim_to_be_linker_signed` asserts the `CodeDirectory` `flags` carry `CS_ADHOC` and not the `CS_LINKER_SIGNED` a binary ginary rewrote must not claim. The typed refusals — a fat stub, a non-Mach-O stub, one already sectioned — stand, against the committed real Mach-O fixture standing in for a darwin stub, since none can be built on this host. E8's *validity* half through `tests/common/codesign.rs` stays: every code slot is the SHA-256 of the page it stands for (the signature covers the finished file, not the bytes before the last four fields were patched in), the signature begins on a 16-byte boundary and is the last thing in the file, the `CodeDirectory` describes the file it is attached to (`codeLimit`, one slot per page, `execSeg` naming `__TEXT` as finally laid out), and the appended payload stays inside what the signature covers and inside `__LINKEDIT`, which ends the file |
 | `tests/download.rs` | one HTTPS fetch against a hand-rolled loopback server: the body written and the part file gone, a checksum and a length mismatch naming both values, a 500 retried and a 404 asked exactly once, a truncated body retried, three failures exhausting the attempts, the offline refusal that opens no socket, and the policy — the part file's name, the backoff schedule, the retryable statuses, one spelling of a digest, the base overrides and the two environment variables; and the same six questions asked of `get_text`, the release-API reader — a body back verbatim under the GitHub accept header, a 500 retried, a 404 asked once, a body over `MAX_TEXT_BYTES` refused rather than read into memory, the offline refusal naming no file, and a read that goes through the base override |
 | `tests/catalog.rs` | the catalog: every field of schema 1 and an unknown key surviving at two levels, the schema and parse errors, the three sources with first-found winning the whole file, the selection rules — the host release, an exact version, the musl default, a named variant, ambiguity and each miss listing what is there — the version guard inside `select`, URL resolution against the catalog's own directory, and the cache: the completion marker, a warm cache needing no network, the whole cold path, a markerless extraction thrown away, the offline error travelling, a tarball keyed by its own digest, and the strict extractor's four refusals over hand-built archives — a symlink, a `..` path, an absolute path and a device node, each named and each leaving no runtime behind. D3 adds the `erlef/otp_builds` asset name for each arch, pinned against the real `OTP-29.0.5` release, and the commit guard that only admits an entry whose `otp_release` matches the host's own |
 | `tests/otp_repack.rs` | the local pipeline: the six-row upstream asset table and four combinations it has none for, the selector grammar, the tag-to-version rule, the prune list against components rather than substrings, the dereference and the assertion that guards the strict extractor, and the pipeline itself over a fake upstream asset — the entry's fields, `SOURCE_DATE_EPOCH`, URLs relative to the catalog, a mislabelled asset refused before anything is written, and the injected ELF reader's error travelling; and the release API driven against a scripted server through `Net`'s base override — the digest it reported pinned into the entry, a body that does not match it refused, an asset carrying no digest refused rather than pinned to nothing, a release holding another architecture's asset, and a document that is not a release |
@@ -63,11 +63,11 @@
 | `tests/e2e_cross.rs` | four-way gated: a real cross build out of the committed catalog for `linux-x86_64-musl`, `linux-aarch64-musl` and `linux-x86_64-gnu`, each artifact run in a container with no Erlang and no network, the aarch64 row behind a binfmt probe and the glibc row on the oldest Debian its own catalog entry allows |
 | `tests/smoke_matrix.rs` | the C3 scaffolding held against the repository: the smoke-matrix script committed, executable, probing before it installs a binfmt handler and printing a PASS/FAIL table; the two mise tasks; `git check-ignore` proving the catalog committed and the tarballs not; and the four documents — the ADR and its index entry, the catalog schema in `docs/format.md`, the README's quickstart and caveats, and this table |
 | `tests/native.rs` | the native half of a cross build, over fabricated objects: the scan — every object under `priv` in path order, the magic deciding rather than the extension, an ELF under `ebin` left alone, the format, machine and target of an ELF, a PE and a Mach-O, a library told from a program, the four files that begin like an object and are not one (a truncated ELF, a truncated Mach-O, a DOS `MZ`, an object past the size bound) and the directory a walk stopped at — and the reconciliation: an object already for the target kept, an override applied, verified, refused for the wrong machine and refused when it is not there, a static override accepted with a note, a hook's environment and working directory, a hook that writes nothing, a hook that fails, a hook that builds for the wrong machine, a hook that writes once and cannot answer for a second target, an override winning before a hook runs, the mismatch table and the same rows as an `--allow-native-mismatch` warning, the static-runtime refusal that the flag does not lift, `apply` over a staged tree, and the verdict of each artifact |
-| `tests/e2e_native.rs` | four-way gated: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
+| `tests/e2e_native.rs` | four-way gated, the cross-built stub among the four: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
-| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
-| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope |
+| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry; E15 adds the ADR's citation of the run that measured `halt(3)` propagation on a real Windows host — run 33864729638, job 100996872499 — so the claim can be re-read rather than believed |
+| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope; extended in E15 with the Windows job's exit-code probe held to three things at once — it probes the runtime the job installed through `INSTALL_DIR_FOR_OTP` rather than a bare `erl` off `PATH`, it says the code it saw, and it ends on a verdict of its own; extended in E16 with the privileged-image rule — `every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest` reads every workflow and composite action under `.github/`, every `.sh` under `scripts/` and `.github/`, and `mise.toml` (the reach `privileged_scan_set` names, because the task file is neither YAML nor a `.sh` and already runs a container), joins backslash continuations, drops shell comments through `shell_code`, and requires every image run with `--privileged` to be named `name@sha256:<64 hex>` rather than by any tag — an image with the host runner's own kernel capabilities is code this repository executes with more authority than its own workflows have, and a tag can be moved upstream between two runs with no line in any diff |
 | `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
 | `tests/deps.rs` | the committed dependency record, held to what the development machine's pre-push freshness gate reads (E4): `sha2` requested on the 0.11 line and `Cargo.lock` resolved onto it, one version each of `sha2`, `digest` and `block-buffer` — two `digest` majors are two incompatible `Digest` traits and that is what a half-finished migration looks like — and `sha2` and `hex`, the pair that computes and spells every digest, locked on the minor line their requirement names. Reads `Cargo.toml` and `Cargo.lock` through `tests/common/deps.rs`, a hand-rolled scanner rather than `toml`, because `toml` is behind the `cli` feature and these assertions hold for the stub flavor too |
@@ -135,7 +135,8 @@ reason:
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 | `tests/e2e_cross.rs` | the real `gleam` and `erl` through `ginary build --target`, and `docker run` for three images | gated four ways, each absence a printed skip naming the task that produces it: `require_tools(&["gleam", "erl", "docker"])`, `dist/otp/catalog.json` (`mise run otp:repack`), a cross-built stub (`mise run stubs:build`), and for the aarch64 row a `docker run --platform linux/arm64` probe. The build runs under `BUILD_BUDGET` (900 s) and each container under `RUN_BUDGET` (180 s), with `--network none` so an artifact that fetched anything at run time would fail rather than pass |
 | `tests/smoke_matrix.rs` | `git check-ignore`, and nothing else | gated on `require_tools(&["git"])`; every other test in the file reads committed files |
-| `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_TOOLCHAIN=1` turns that skip into a failure too. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
+| `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_STUBS=1` turns that skip into a failure, and `GINARY_REQUIRE_TOOLCHAIN` deliberately does not. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
+| `tests/e2e_native.rs`, `tests/regressions/c2_the_artifact_never_had_to_use_the_stub.rs` | five more tests that need a cross-built stub | the same `stubfile::cross_stub` gate as the row above, for `linux-aarch64-musl`, `linux-x86_64-gnu` and `Target::host()`; they are named here because they are the five that ran in no CI job while the `smoke-matrix` step listed only two files. The workflow derives the list from the tree now: `tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs` |
 
 Those bounds are what keeps `test:fast` fast; they are not a claim that nothing external runs.
 
@@ -227,10 +228,102 @@ supposed to have the toolchain cannot silently skip its coverage. CI sets it on 
 
 A test can need more than a program. `tests/closure.rs` needs a real
 `gleam export erlang-shipment` output, which `require_tools` knows nothing about, so it reads
-`GINARY_TEST_SHIPMENT` (defaulting to the author's `notify` shipment) and applies the same rule by
-hand: a directory that is not there is a reported skip, and a failure under
-`GINARY_REQUIRE_TOOLCHAIN=1`. Any fixture a gated test needs from outside the repository is
-overridable and escalated the same way.
+`GINARY_TEST_SHIPMENT` — and there is no default, because a path is not a program. The rule is
+`tests/common/shipment.rs::choose_shipment`: unset — or set to nothing at all, which is what an
+unset `${{ vars.… }}` expands to and what `var_os` reports as `Some("")` — is a reported skip
+*however* `GINARY_REQUIRE_TOOLCHAIN` is set, because that variable is a claim about programs the
+machine installs and cannot be a claim that somebody exported a Gleam project here; a non-empty
+value that is not a directory is a failure *however* it is set, because the caller asked for a
+run and mistyped the path. A fixture a gated test needs from outside the repository is named by
+the caller or it is not used.
+
+A test can also need a *file this repository builds and does not commit*, and that is a third
+question again. The five cross-built stubs under `target/stubs` come from `mise run stubs:build`,
+which needs `cross`, a running docker daemon and minutes per target; no amount of Erlang on the
+machine produces one. So `tests/common/stubfile.rs::choose_cross_stub` reads a switch of its own,
+`GINARY_REQUIRE_STUBS`, and reads `GINARY_REQUIRE_TOOLCHAIN` not at all: a missing stub is a
+printed skip that names `mise run stubs:build`, and only a job that *obtains* the stubs sets
+`GINARY_REQUIRE_STUBS=1` to turn that skip into a failure — where a miss means the step that
+built or downloaded them produced nothing rather than that the machine never had one. Four
+tracked files ask for one, and between them they hold nine tests: `tests/e2e_cross.rs` (three),
+`tests/e2e_native.rs` (four), `tests/stub.rs` (one) and
+`tests/regressions/c2_the_artifact_never_had_to_use_the_stub.rs` (one, in the `regressions`
+target). In CI two jobs have the stubs and run all four targets: `smoke-matrix`, which
+cross-builds three of them, and `coverage`, which downloads all five from `cross-build` because
+the 90% line floor it enforces was measured with those nine tests running.
+
+The stubs are half of what those nine need. Seven of them — every test in `tests/e2e_cross.rs`
+and `tests/e2e_native.rs` — write `erts = "catalog"` into the fixture and build against
+`dist/otp/catalog.json`, and the repository commits the catalog while `.gitignore` keeps every
+tarball it names out of the tree. A job holding the stubs but not the runtimes does not skip
+those seven: it runs them, and each dies in the runtime resolver with `cannot use the catalog:
+... No such file or directory`. So both jobs also run `ginary otp repack --out dist/otp` before
+the tests, and the rule that ties the two artifacts together is asserted over every job of
+`ci.yml` in
+`tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs`.
+The `test` job builds and downloads none and skips them, loudly. Conflating the two questions is
+what failed `test` and `coverage` on the first pull-request run, and counting the four files by
+hand in a comment is what left five of the nine running in no job at all; see
+`tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs` and
+`tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs`, which derives the list from the
+tree so a fifth caller cannot be added without the workflow learning about it.
+
+A fourth question, and the third gate: a program that is **not** part of that toolchain at all.
+`actionlint` lints the workflow files. It has nothing to do with whether a runtime can be
+packaged, no hosted runner ships it, and `mise` installs it on a developer machine — so
+`require_tools(&["actionlint"])` was a claim `GINARY_REQUIRE_TOOLCHAIN` could not make true, and
+the three jobs that set that variable and run the `regressions` target all panicked on runners
+whose toolchain was complete. `tests/common/tools.rs::require_actionlint` reads
+`GINARY_REQUIRE_ACTIONLINT` instead, and exactly one job sets it: `lint` in
+`.github/workflows/ci.yml`, which installs the tool from its own release with a pinned digest and
+then *runs the test by name*. Both halves are asserted, because a check moved out of three jobs
+and into none is a check that was deleted rather than fixed; see
+`tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+
+E11 adds two gates that are not variables at all, and that is the point of them. Both live in
+`tests/common/tools.rs` beside the three above. `require_posix_shell` answers with `/bin/sh` by
+absolute path, or a printed skip: the claim those tests make is about what a POSIX shell does
+with a line, so a machine without one cannot answer it. It is a program the toolchain jobs do
+install, so it escalates under `GINARY_REQUIRE_TOOLCHAIN` exactly like `require_tools`, and a
+name looked up on `PATH` would not do — `bash` resolves on a Windows runner to the Windows
+Subsystem for Linux launcher, which exits `1` with nothing on either stream. What the gate
+answers is held equal to what the hook rule names by
+`tests/regressions/e11_a_shell_script_test_ran_on_a_host_with_no_posix_shell.rs`, so the two
+cannot drift.
+
+`require_elf_stripper` is the new *kind*. It asks two things: that `strip` is on `PATH`, which is
+the ordinary gate, and that the host's own executables are ELF files, which nobody can install.
+The fixture every ELF-stripping test plants is a real binary this machine wrote, and
+`ginary::strip`'s ELF phase reads what a linker put there rather than a header written by hand,
+so on a Windows runner the first condition holds and the second cannot. That half therefore
+escalates under **no** variable: `GINARY_REQUIRE_TOOLCHAIN=1` on a Windows job is a true claim
+about the toolchain and would be a false claim about the object format, and a gate that panicked
+there would be demanding a machine nobody can provide. The skip is printed and names the format
+the host writes, so the reason is in the log rather than in a reader's head.
+
+E15 adds a sixth, and it is a third *kind* again: `require_working_pwsh` **runs** the program
+rather than merely finding it. The rule it carries is about what PowerShell does with the exit
+code a step leaves behind — the Windows exit-code probe asserted `halt(3)` correctly, left `3` in
+`$LASTEXITCODE`, and was failed by the `exit $LASTEXITCODE` GitHub appends to every `pwsh` step —
+and the only honest way to state such a rule is to measure it, which a name on `PATH` is not
+enough for. On the machine E15 was written on the first `pwsh` on `PATH` is
+`~/.local/share/mise/shims/pwsh`, a version-manager shim with no version selected: it exits
+non-zero and prints `mise ERROR No version is set for shim: pwsh`. That is not a PowerShell, and
+a test that ran it would have reported a defect in this repository for a fact about somebody's
+shims. So the gate spends one `pwsh -NoProfile -Command "exit 0"` — under `PWSH_BUDGET` (60 s)
+through `run_bounded`, like every other child the suite starts — and skips with the answer it got
+when that fails. It escalates under no variable, for `require_elf_stripper`'s reason: `pwsh` is
+not part of the toolchain an artifact is built with, and the two hosted runners that ship one,
+`ubuntu-24.04` and `windows-2022`, run the measurement without being told to.
+
+The rule the six gates share is worth stating once. A gate is a claim somebody has to be able to
+make true, so it belongs to whichever job installs the thing it is about:
+`GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang, Gleam and a POSIX shell,
+`GINARY_REQUIRE_STUBS` to the jobs that build or download the cross stubs,
+`GINARY_REQUIRE_ACTIONLINT` to the job that installs actionlint. A sixth variable is warranted
+exactly when a sixth kind of thing is promised by a different job — and *no* variable is
+warranted when the thing is a property of the platform, because then there is no job that could
+set it honestly.
 
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
@@ -239,10 +332,59 @@ as a defect.
 
 `tests/common/fake_otp.rs` builds the two directory layouts every build-side module reads, in a
 temporary directory, in milliseconds, with no Erlang installed. `tests/common/script.rs` is the
-third builder: it writes an executable `/bin/sh` stub, which is how a test puts a chosen `erl`
-on a `PATH` of its own. `tests/common/snapshot.rs` is the fourth helper, and exists because those
+third builder: `program` plants a throwaway `erl` on a `PATH` of its own, described as a list of
+`ShimStep` rather than a line of shell, because the same behaviour has to exist in two forms.
+`shim_form` and `shim_file_name` are the two rules that decide which: on unix an executable
+`/bin/sh` file called `erl`, and on Windows the compiled `examples/ginary_test_shim.rs` copied
+to `erl.exe`, because nothing there reads a shebang — `CreateProcess` looks for `MZ`, finds
+`#!`, and refuses the file, which is how thirty-six targets failed on the first Windows runner
+inside the fixture builder itself. The shim reads its steps from `<program>.steps` and writes
+`<program>.argv`, and `shim_sidecar` is the one naming rule both forms use for those files.
+`tests/common/snapshot.rs` is the fourth helper, and exists because those
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
-with a placeholder, longest path first, so a snapshot pins the sentence rather than the machine.
+with a placeholder, longest path first, and respells every separator as `/` through
+`tests/common/hostpath.rs`, so a snapshot pins the sentence and the shape of the path rather
+than the machine or the slash it writes between two components. `hostpath` holds twelve more
+rules of the same kind. `is_absolute_for` decides absoluteness per platform, over drive-absolute,
+UNC and verbatim spellings, and `strip_dir` removes a fixture directory whichever separator
+joined it to the name behind it. E11 added five: `separator_for` names a platform's separator;
+`joined_for` joins a `/`-separated listing path onto a root the way a named platform spells one,
+respelling every separator of the relative half and leaving the root and every backslash in a
+unix file name alone, with `joined` the same rule asked about this machine; `json_escaped`
+spells a path the way a JSON document carries it, so a test that looks for a path inside a trace
+looks for what is actually written there; and `same_path` compares two paths as the host's file
+system does, which is not string equality on a platform whose names are case-insensitive. E12
+added five more. `nested_json_escaped` is `json_escaped` applied as often as a value nests —
+the `prune` record writes a list of paths as a JSON string *inside* a JSON document, so a needle
+escaped once is not the one on the page. `same_directory_text` settles the part of "one
+directory, two spellings" that is syntax on a named platform — the verbatim `\\?\` prefix, the
+separator and the case of a drive letter, and nothing else, because folding the whole of a path
+would call two unix files one file — and `names_the_same_directory` settles the rest by
+canonicalising both sides where the filesystem can answer, which resolves an 8.3 short name, a
+symbolic link and the case in one step and falls back to the pure rule where it cannot.
+`printed_cwd` reads the `cwd=` line the `hello_ffi` fixture prints, so a test compares the
+spelling the runtime produced instead of asking `String::contains` for a needle built with
+`format!`, and `emulator_suffix` is `Target::emulator_program` under `erts-<vsn>/bin`, which is
+`beam.smp` on unix and `beam.smp.dll` on Windows. The
+join rules exist because `Path::join` spells one join with the host separator and leaves the rest
+alone, which on Windows produces the mixed spelling nothing writes — see
+`tests/regressions/e11_a_listing_path_was_joined_the_way_the_host_spells_one.rs`.
+
+`script` grew three helpers and a step alongside the shim rules above: `ShimStep::Sleep` is a
+program that stays alive for a while, expressed in milliseconds and rendered as whole seconds by
+the `/bin/sh` form and as milliseconds by the compiled one; `live_process` plants and spawns one,
+which is how a test gets a process it can observe without a `sleep` binary; and `recorded_argv`
+reads the argument vector a planted program wrote, through `argv_log_path`, which names the
+sidecar under the platform's own spelling of the program rather than under its unix name.
+`tests/common/native.rs` is the object-fixture builder: `object_for` writes a shared object for a
+named target in that target's own container format, `host_native_object` is what a test plants
+where the host's own native code goes — the committed x86-64 glibc ELF fixture on the one host it
+is really for, a fabricated header everywhere else — and `host_writes_elf` is the question a test
+asks before reaching for the running executable as a fixture. `tests/common/http.rs` gained
+`REPLY_SHUTDOWN`, `DRAIN_BUDGET` and `answer_one`: the first two are the close rule for a served
+connection, half-closed and then drained under a bound rather than dropped, because a fixture
+that tore down a connection it had just answered raced its own client; the third serves exactly
+one request and hands back what was asked.
 `tests/common/fixture.rs` and `tests/common/erl.rs` are the two A1c added, and they work on real
 trees rather than fake ones: the first copies a fixture Gleam project and exports it, the second
 boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn through, so that
@@ -262,7 +404,8 @@ itself, so a supervised run has a signal to turn into `128 + signo`), `--dump` (
 runtime to observe and a grandchild to inherit the lock). It exits 0 rather than 7 when its
 `-eval` is `erlang:halt(0)`, so that `GINARY_CMD=selftest` exercises the whole path on a machine
 with no Erlang, and the `env:` lines it prints cover `HEART_COMMAND` and the manifest's own
-`launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is therefore readable on
+`launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is
+therefore readable on
 standard output, and the launcher's whole contract is testable on a machine with no Erlang at
 all. `SyntheticArtifact` also carries the ways an artifact can be broken — `break_magic`,
 `break_geometry`, `break_payload`, `break_payload_tail`, `truncate` — because each one is a
@@ -305,9 +448,17 @@ file nobody packed, `appended` writes entries the packer never would — a secon
 directory entry, a symlink — and `target` makes the manifest claim another architecture. What
 comes out is a whole artifact whose *trailer digest matches its payload*, which is the point:
 `inspect --verify` passes on every one of them. It also carries the real ELF the synthetic tree
-deliberately has not got — `with_native_object` copies this test run's own binary in at
-`NATIVE_PATH`, and `patch_elf_machine` rewrites two bytes of its header so a test on one
-architecture has a binary for another with no cross toolchain.
+deliberately has not got — `with_native_object` plants `test_binary()` at `NATIVE_PATH`, and
+`patch_elf_machine` rewrites two bytes of its header so a test on one architecture has a binary
+for another with no cross toolchain. E7 pointed `test_binary()` at this test run's own binary; E9
+repointed it at the committed `tests/fixtures/elf/` ELF (read directly, so `repack` still builds
+under `--no-default-features`), because a test that plants "a real ELF" was planting a PE on
+Windows and a Mach-O on macOS, where `elf::inspect_bytes` refused it. With the fixture the plant
+is a genuine `x86_64` Linux ELF on every host, and the expectations read the object's own machine
+— `native_machine`/`native_target` off the fixture's `e_machine`, not `Target::host()` — so the
+row a healthy artifact lists is the one the payload really carries; `foreign_machine`/
+`foreign_target` are that value's opposite, the machine to rewrite the header to for the mismatch
+tests.
 
 `tests/common/cachefs.rs` is what B1 added, and it exists because pruning turns on two things a
 test cannot fake for itself: how old an entry is, and whether anybody is using it. `plant_entry`
@@ -348,7 +499,18 @@ developer had Erlang installed has proved nothing.
 `tests/common/payload.rs` is what A3a added, and it builds no tree at all in the `FakeOtp` sense:
 it writes tar headers byte by byte (`RawTar`), the smallest staging root the format tests need
 (`staging_tree`), and the two instruments those tests read through, `CountingReader` and
-`SharedSink`. The two policy sections below say why each exists.
+`SharedSink`. The two policy sections below say why each exists. E8 added `recorded_mode(requested,
+is_dir)`: the mode a staging fixture records for a file — the value asked for where the host has
+permission bits, and `platform::modeless_mode` where it does not — so a fixture built on a Windows
+host records the same `0o644`/`0o755` its filesystem and the `tar` header do, rather than a mode
+the filesystem discarded. It was the fixture-side half of A1 (the `0o755` a no-op `set_mode` left
+in the listing was what `ginary verify` reported five mismatches over), and `staging_tree` now
+routes every file's mode through it.
+
+`tests/common/native.rs` gained `host_object_target` in E8's Fix round 2: the target an object
+built with `host_machine()` and `host_interp()` actually describes. It is a Linux ELF with a
+glibc or musl `PT_INTERP` whatever machine wrote it, and a test that expected `Target::host()`
+out of `native::scan_shipment` was reading the two as one value because on a Linux host they are.
 
 `tests/common/stubfile.rs` is what C2 added, and it builds the two shapes of fixture the stub
 half needs. `Marker` is the four fields of an identity marker held as *text*, so a test can write
@@ -358,22 +520,39 @@ level lower and takes bytes, for a body that is not UTF-8. `with_markers` plants
 those in `noise`, which is a seeded xorshift rather than anything random — a scanner bug that
 turns on one byte in ten thousand has to be a failure that reproduces, not a flake — and asserts
 its own bytes hold no needle, which is what makes it a negative fixture rather than an accident.
-The needle itself is assembled from `HEAD` and `TAIL` at run time for the same reason
-`stubid::scan` assembles its own: a helper holding `GINARY-STUB-ID\0` contiguously would put a
-second marker into every test binary that links it, and `tests/stubid.rs` would be scanning
-itself.
+The needle itself is stored *masked* and unmasked at run time, for the same reason `stubid`
+masks its own: a helper holding `GINARY-STUB-ID\0` contiguously would put a second marker into
+every test binary that links it, and `tests/stubid.rs` would be scanning itself. Splitting it in
+two halves — which is what both did until E10 — is not enough, because a linker may lay two
+constants out side by side and then the file holds the needle after all; that is exactly what a
+Windows `ginary.exe` was found doing. `fragments` exposes the stored images so the invariant is
+checkable rather than argued: no two of them, in any order, may spell the needle. `stubid::scan`
+counts whole *records* for the same reason, so fifteen bytes of unrelated data are not a second
+identity.
 
 `stub_copy` is the other shape: `stub::verify` reads a *file* and looks at its object header, so
 its fixtures have to be real executables. It copies this test run's own `ginary` and rewrites the
 marker in place — rather than fabricating an ELF — because the claim under test is what the gates
 do with a header a linker actually wrote; `stub_copy_without_marker` zeroes it instead, and
 `text_with_marker` writes a shell script carrying a perfectly good marker, which is what tells
-the marker gates and the object gate apart. `pe_bytes` and `pe_with_marker` are the Windows
-counterpart and are written by hand, the way `payload.rs` writes tar headers by hand: there is no
-Windows toolchain here, and the only fields `check_object` reads out of a PE are the format and
-the COFF machine. `cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
-a real cross-built stub, and it follows the `require_tools` rule: a printed skip, unless
-`GINARY_REQUIRE_TOOLCHAIN=1` says the file was supposed to be there.
+the marker gates and the object gate apart. `stub_copy_of` is `stub_copy` with the bytes supplied
+rather than read off this run's own binary, and it exists for `for_other_machine`, which E12
+added: the host's own object with its machine field rewritten in place — `e_machine` in an ELF,
+the COFF `Machine` in a PE, the Mach-O `cputype` — which is the fixture the *header* gate needs
+and the one no target name can produce on a platform with a single published architecture.
+`other_supported_target` (E11's `same_format_other_arch`, renamed in E12 when its contract
+changed) answers the *target* gate's question instead — a row of `ginary::target::ALL` that is
+not the host — and `other_arch`, now public, is the architecture flip both of them are built on.
+`pe_bytes` and `pe_with_marker` are the Windows counterpart and are written by hand, the way
+`payload.rs` writes tar headers by hand: there is no Windows toolchain here, and the only fields
+`check_object` reads out of a PE are the format and the COFF machine. `native::pe_with_imports`
+is the one PE fixture that is more than a header: it writes an import directory naming the
+libraries it was given, because `doctor::crypto_report_for` reads a file rather than taking a
+name and every PE fixture before it imported nothing at all.
+
+`cross_stub` is the gated lookup — `GINARY_STUB_DIR`, then `target/stubs` — for
+a real cross-built stub, and its rule is `stubfile::choose_cross_stub`: a printed skip, unless
+`GINARY_REQUIRE_STUBS=1` says the file was supposed to be there.
 
 `tests/common/http.rs` is one of the two C3 added, and it exists because four of the claims about
 `src/download.rs` are properties of a *server* and none of them can be written down as a file: a
@@ -381,17 +560,50 @@ body that hashes to the wrong digest, a 500 that becomes a 200 on the second ask
 *not* be asked again, and a connection that dies mid-body. `TestServer::start` takes a map of path
 to a list of `Reply` values, answers them in order and then repeats the last one for ever, and
 records every request — so a test asserts on *how many times* the client asked as readily as on
-what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has three
-shapes: `Body` with a status and a `Content-Length` that matches, `Truncated` with a
+what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has four
+shapes: `Body` with a status and a `Content-Length` that matches, `Encoded`, which adds the one
+header this fixture sends — a `Content-Encoding` naming what the body is compressed in, so that a
+bound on the document can be told apart from a bound on the transfer — `Truncated` with a
 `Content-Length` that promises more than is written before the close, and `Hangup`, which accepts
 the connection and writes nothing. It binds `127.0.0.1:0` and reports the port it was given, so
 any number of tests run in parallel without agreeing on anything, and `wait_for_requests` is
 bounded by `WAIT_BUDGET` (10 s) so a stalled client is a failed assertion rather than a hung test
 binary. It is hand-rolled rather than a dependency and it is the smallest server those claims
-need: HTTP/1.1, `GET` only, one connection at a time, no chunking, no ranges, no keep-alive — and
-**no read timeout**, so a client that connects and never sends a request line stalls the serving
-thread until the test binary exits. Nothing ginary sends does that; a helper that grew one would
-need one.
+need: HTTP/1.1, `GET` only, one connection at a time, no chunking, no ranges, no keep-alive. Every
+connection it accepts goes through `adopt` first, which puts it into the mode the fixture serves
+in rather than the one `accept` handed over — POSIX says an accepted socket does not inherit the
+listener's `O_NONBLOCK` and Winsock says it does, and this fixture polls its listener — and bounds
+the two waits that opens up by `REQUEST_BUDGET` (5 s for the request) and `REPLY_BUDGET` (5 s for
+one write of the reply to be taken), beside `DRAIN_BUDGET` (5 s for the peer's own close) and
+`WAIT_BUDGET` (10 s in `wait_for_requests`). Nothing ginary sends reaches any of them.
+
+What the fixture cannot serve through it records rather than discards, because it runs on a thread
+of its own and an error it swallows becomes a request nobody counted or a reply sent short under a
+full `Content-Length` — either of which a download test reads as the *client's* doing.
+`after_accept`, `after_request_read` and `after_write` are the three decisions — one per stage of
+serving a connection — written as functions of the error's kind so they can be asserted on where
+the platform that reaches them cannot run: an accept error the peer caused (`ConnectionAborted`,
+`ConnectionReset`, `Interrupted`) takes the next connection rather than ending the server, a read
+of a request and a write of a reply that failed because the peer let go (`BrokenPipe`,
+`ConnectionReset`, `ConnectionAborted`) are ordinary, and everything else — a `REQUEST_BUDGET` or
+`REPLY_BUDGET` timeout above all — is a fault. A peer that closes before sending a byte is not an
+error at all: nobody asked anything on that connection, so nothing is recorded either way.
+`TestServer::requests` — and so `hits` and `wait_for_requests` — refuses to answer while
+one stands, and `TestServer::faults` is the one accessor that does not assert, for the tests that
+are about the fixture itself.
+
+The reply half of that is `answer_reply`, which is the one call `serve_one` makes once it has
+chosen an answer: `send_reply` writes the reply over any writer and says whether the write that
+failed was the fixture's own, and `answer_reply` records the one that was, so both halves of the
+rule live where a test can hold them — a caller that asked the first question and dropped the
+answer would be the same silence one level up, and the suite stayed green with exactly that in
+place, which is what E14 found. `HaltingSink` is the transport those tests write over: it takes a
+stated number of bytes and then fails every write with a stated `ErrorKind`, because how much a
+loopback connection with nothing reading it will buffer, and when a blocked send gives up, are
+properties of the host rather than of this fixture — the E14 argument, made after the live form of
+the claim passed on Linux and failed on Windows. It refuses `Interrupted` at construction, since
+`write_all` retries that kind for ever and a sink answering it would hang the test binary rather
+than fail it.
 
 `tests/common/catalog.rs` is the other, and it builds the three fixtures the catalogue half needs.
 `CatalogBuilder` assembles a `catalog.json` out of the schema types and serialises it with
@@ -412,6 +624,115 @@ that a warm cache is used rather than re-fetched. The runtime inside every one o
 `FakeOtp`, whose `beam.smp` is a shell script, which is exactly the shape the *unseamed*
 inspection refuses and is why the catalogue tests drive `resolve_in_with` and `repack_with` with
 the ELF reader injected.
+
+`tests/common/portability.rs` is what E6 added, and it is not a fixture builder at all: it is the
+rule that the *test tree itself* has to compile on all three operating systems. `unix_sites` is a
+pure function over one file's text — it strips comments and literals with a small lexer that
+carries block comments and raw strings across lines, then tracks `cfg(unix)` gates through the
+brace stack — and it answers, for every mention of `os::unix`, whether a gate covers it. The rule
+it enforces is that every such mention sits under one: an inner attribute on a file that is wholly
+about unix, an outer attribute on the item, or an attribute on an enclosing block, whichever fits.
+`tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs` asserts the scanner against
+source it is handed and then turns it loose on every `.rs` file `git` tracks under `tests/`.
+
+E16 sharpened `unix_sites` on both halves of a review finding, and the two calibration fixtures in
+that regression file are what hold the sharpening. **Lexically**, whether a line *is* an attribute
+is now decided on the *stripped* code rather than on the raw line, so a `#[cfg(unix)]` inside a
+block comment or inside a raw string — both of which this very module and that regression file are
+full of — arms no gate over the next real reach. **Semantically**, `names_unix` no longer asks
+whether the attribute mentions `unix`: it parses the `cfg` predicate into a small `CfgExpr` and
+asks whether every configuration the expression admits is a unix one. `all(unix, ..)` and
+`target_family = "unix"` guarantee it; `any(unix, windows)` does not, because it is true on
+Windows, and neither does `not(any(unix, feature = "cli"))`, which is true on Windows whenever the
+feature is off. `not(..)` guarantees nothing by decision — `not(windows)` is true on targets that
+are neither — and the cost of that answer is a false report on a spelling nothing in this tree
+uses, against a hidden naked reach if it went the other way. **Structurally**, the attribute run
+is accumulated to its closing bracket and parsed whole, the bracket count `gnu_gate_sites` keeps,
+because `rustfmt` breaks a `cfg` that does not fit on a line: read one line at a time,
+`#[cfg(all(` is an `all` of no options, which guarantees no unix, and the next line was then read
+as ordinary code and dropped the gate — so a covered reach under a perfectly good
+`#[cfg(all(unix, ..))]` was reported as naked, which is a guard failing a correct tree. See
+`a_gate_rustfmt_wrapped_over_four_lines_is_still_one_gate`.
+
+E16 also added `gnu_gate_sites` to the same file, the same shape as `unix_sites` and for the same
+class of defect one level down. `#[cfg(target_os = "linux")]` is true on **musl** Linux as well as
+gnu, and the two Linux C libraries differ in exactly the facts a test is likely to assert about
+one: `libc.so.6` is glibc's own `SONAME`, a `glibc_max` floor is read out of `.gnu.version_r`,
+and `ld-linux` names glibc's loader. A static musl binary has none of the three. Two of the seven
+targets this project distributes are musl, so the host those assertions fail on is one the project
+already supports and has simply never run `cargo test` on. `gnu_gate_sites` reports every `#[test]`
+under a `target_os = "linux"` gate that does not also name `target_env = "gnu"` and that asserts
+one of `GLIBC_CLAIMS`; a needle inside a `//` comment is prose, not a claim. It is calibrated on
+the committed fixture `tests/fixtures/portability/gnu_gated_tests.rs.txt` — a `.rs.txt` name,
+because the tree scan reads every tracked `.rs` file under `tests/` and would otherwise read its
+own fixture — and turned loose on the tree by
+`tests/regressions/e16_a_glibc_only_assertion_ran_under_a_linux_gate.rs`.
+
+What that scan cannot see is stated where it is written, because the same defect had a seventh
+instance in a shape no attribute carries. `tests/stage_run.rs`'s `needs:` assertion chose its
+expectation at *run* time, from `platform::object_format(platform::HOST)`, whose ELF arm is every
+Linux — so it asserted glibc's four sonames and a `(GLIBC_` floor on a musl host too.
+Widening `gnu_gate_sites` to report every ungated test holding a `GLIBC_CLAIMS` needle would
+report a pure unit test over literal input, which asserts nothing about a host and is not a
+defect, so the runtime shape is answered where it belongs instead: `host_needs_expectation` keys
+the expectation on the C library as well as the object format — glibc's four names and a floor
+for gnu, `libc.musl-<arch>.so.1` and no floor for musl, `kernel32.dll` folded for a PE,
+`libSystem` for a Mach-O — and being a pure function it can be asserted from a host that is not
+the one it describes. `tests/regressions/e16_a_glibc_only_expectation_was_asserted_on_any_elf_host.rs`
+does exactly that.
+
+E7 added `unmet_needs` to the same file, which is not a scanner: it is the `DT_NEEDED` names
+of an emulator that `ginary::verify::NEEDED_ALLOWLIST` does not admit, sorted and deduplicated.
+It exists because the portability promise is about the *host's* Erlang and not about ginary,
+so a test that asserted a real artifact verifies with no findings at all was asserting a
+property of one machine's OTP build. The expectation is computed from the installation, which
+makes the two sides of that assertion two different files.
+
+E8's Fix round 2 added the rule that decides when a test may be scoped to one platform at all,
+because the Windows runner made the difference matter. **A test may be scoped to a platform when
+its subject only exists there; it may not be scoped to a platform to avoid a failure that is
+about the product.** The first kind is a claim whose fixture the other platform cannot supply —
+`tests/elf.rs`'s reads of `current_exe` and of the host OTP tree's `beam.smp` (only a Linux host
+links an ELF and ships an ELF emulator), `tests/cli.rs`'s three `elf deps` claims about the
+binary this run built, and `tests/native.rs`'s seven hook claims (`native::HOOK_SHELL` is
+`/bin/sh` on every host by decision, so a host without a POSIX shell gets the documented
+`NativeError::HookProcess` instead). Every one of those leaves an ungated test that holds the
+contract on all three platforms — the not-an-ELF path, the format-blind half of `tests/elf.rs`,
+and `tests/regressions/c4_the_hook_shell_was_cmd_on_a_windows_host.rs`. The second kind is what
+`src/platform.rs` is for: a fact about an operating system, written once and asserted for every
+`Os` on the machine ginary is developed on. `docs/dev/log/E8.md` §16 keeps the ledger of which
+Windows failures are which.
+
+E16 added the corollary the Linux rows had been getting wrong: **a gate names the thing the claim
+is about, and for a Linux claim that is often the C library rather than the operating system.**
+`target_os = "linux"` is one gate for two platforms, and the `tests/elf.rs`, `tests/cli.rs` and
+`tests/report.rs` rows above assert glibc's `libc.so.6`, glibc's `ld-linux` and a floor read out of
+a glibc-only section — none of which a musl host has. All six are gated
+`#[cfg(all(target_os = "linux", target_env = "gnu"))]` now, and `gnu_gate_sites` fails the suite
+on the next one written without it.
+
+A scan is a proxy, and a better check exists on any machine with docker. `mingw-w64` is all a
+Linux host needs to type-check the whole tree for Windows, which is what the C sources of
+`zstd-sys` had made look impossible:
+
+```console
+$ mise run check:windows
+```
+
+The image is `scripts/ci/wincheck.Dockerfile` — `rust:1-bookworm` plus `mingw-w64` plus
+`rustup target add x86_64-pc-windows-gnu` — and the task builds it and runs the check inside it,
+against a target directory of its own so a foreign libc's objects never land in `target/`:
+
+```console
+$ docker build -t ginary-wincheck:1 -f scripts/ci/wincheck.Dockerfile .
+$ docker run --rm -v "$PWD":/w -w /w -e CARGO_TARGET_DIR=/tmp/t ginary-wincheck:1 \
+    cargo check --all-targets --locked --keep-going --target x86_64-pc-windows-gnu
+```
+
+Forty-five seconds warm, and it catches what the scan cannot: a call to something *already*
+gated — `cache::prepare` is `cfg(unix)`, and an ungated call site of it mentions no `os::unix`
+for a scan to find. Run it before changing a shared test helper. The gnu triple and not the msvc
+one, because `zstd-sys` compiles C and `mingw-w64` is the C compiler a Linux host can have.
 
 `tests/common/native.rs` is what C4 added, and it is the fixture half of a milestone that has no
 cross toolchain to build a real fixture with. Three kinds of object, by the same rule the earlier
@@ -434,9 +755,15 @@ which is a file that begins like an object and is not one. `plant` and `plant_ex
 fixture into a tree the test owns.
 
 One shape the file cannot fabricate is a position-independent *program*, because `DF_1_PIE` lives
-in a `DT_FLAGS_1` entry of a real dynamic section. The tests that need one use
-`repack::test_binary` — this test run's own binary, which `cargo` links `-pie` — and that is the
-better fixture for the claim anyway: the classification rule is about what real linkers emit.
+in a `DT_FLAGS_1` entry of a real dynamic section. The C4 tests that need one used
+`repack::test_binary` — this test run's own binary, which `cargo` links `-pie`. E9 turned that
+same accessor into the committed ELF fixture (see `tests/common/repack.rs` above), because a real
+ELF the *host* refuses is no ELF at all on Windows or macOS; `common::native::real_elf_bytes` /
+`real_elf_path` are the accessors for `tests/fixtures/elf/inet_gethost-x86_64-linux-gnu`, the
+committed `x86_64` Linux ELF that reads as one whatever host opens it. It parallels
+`tests/fixtures/macho/` exactly: a real, unmodified binary, committed rather than downloaded at
+test time, for the tests that must plant an object a real linker wrote rather than one this module
+fabricated.
 
 `tests/common/macho.rs` is what D3 added, and — like `tests/common/native.rs` before it — it has
 no macOS toolchain to build a real fixture with, so almost everything in it is written field by
@@ -454,12 +781,29 @@ for the one section shape `src/payload.rs::locate` and `src/sign_macos.rs` are w
 ahead of their own implementation: the 64-byte trailer struct at the section's own start,
 `payload_offset` fixed at `TRAILER_LEN` because the payload immediately follows it, and nothing
 else in the section — see "Payload section geometry" below for why that fixed layout, and not
-just the equation `Trailer::parse` checks, is what `locate` itself enforces. The other half of
-the file is `tests/fixtures/macho/`: a real, unmodified `aarch64-apple-darwin` binary
-(`tests/fixtures/macho/README.md` records its origin and licence), committed rather than
-downloaded at test time, for the tests — `inject_and_sign`'s among them — that have to hold
-against load commands and segment geometry a real linker wrote rather than one this module
-fabricated.
+just the equation `Trailer::parse` checks, is what `locate` itself enforces. E9 adds
+`entry_point`, a by-hand reader of `LC_MAIN` plus `__TEXT` that resolves the file offset a
+Mach-O's entry point maps to and returns the bytes there, so a test can assert the finished
+artifact's mapped entry still holds the stub's own first instructions — the invariant the
+segfaulting section layout broke. The other half of the file is `tests/fixtures/macho/`: a real,
+unmodified `aarch64-apple-darwin` binary (`tests/fixtures/macho/README.md` records its origin and
+licence), committed rather than downloaded at test time, for the tests — `inject_and_sign`'s
+among them — that have to hold against load commands and segment geometry a real linker wrote
+rather than one this module fabricated.
+
+`tests/common/codesign.rs` is what E8 added, and it is the reading half of the ad-hoc signature
+`src/sign_macos.rs` writes — the counterpart to `macho.rs`, and, crucially, one that goes nowhere
+near `src/sign_macos.rs`, so a test written against it checks the signer rather than restating
+it. It walks the load commands to find `LC_CODE_SIGNATURE`, parses the `CSMAGIC_EMBEDDED_SIGNATURE`
+superblob and then the `CodeDirectory` field by field from Apple's `cs_blobs.h` layout (`version`,
+`flags`, `codeLimit`, `hashSize`/`hashType`/`pageSize`, `execSegBase`/`execSegLimit`, the code
+slots), and recomputes the SHA-256 of every 4096-byte page of the file below the signature with
+`sha2` — the value a kernel computes for itself as it faults each page in. `first_bad_slot` is the
+whole point: it returns the first slot whose stored hash is not the page's own (and the count
+disagreement first, so a directory claiming more slots than the file has pages is not read as
+agreement), which is the state that gets a Mach-O `SIGKILL`ed before `main`. `segments` and
+`segment` expose the load map for the page-alignment checks. It is not `cli`-gated, for the reason
+`macho.rs` is not.
 
 `FakeOtp` writes a runtime root that `otp::inspect_root` accepts as it stands — `erts-<vsn>/bin`
 holding the four required binaries as executable shell stubs, `bin/no_dot_erlang.boot`,
@@ -530,6 +874,14 @@ D2 added a fifth thing, and it keeps the rule above rather than stepping outside
 `extra_erts_bins` named. Everything else about the root is the unix builder's, because
 everything else about a Windows runtime is the same.
 
+E12 added a sixth, for the same reason and in the same shape. `FakeOtp::with_crypto_for(os,
+bytes)` plants the `crypto` application carrying the NIF an `os` installation spells, and
+`fake_otp::crypto_nif_under_priv` is where that name comes from: `platform::crypto_nif` with the
+`priv/` the builder supplies itself removed, so the fixture and the probe that looks for it are
+one rule. Two `tests/doctor.rs` tests wrote `priv_file("lib/crypto.so", ..)` by hand, which is
+the unix name on every host, and then asserted a host probe had found it — on a Windows runner it
+was looking for `crypto.dll` and the fixture had planted a file nothing looks for.
+
 Every `.exe` and `.dll` it writes is a real, if minimal, PE image: a DOS header whose
 `e_lfanew` points at the PE signature, a COFF header naming the machine, and a PE32+ optional
 header of the size that header declares. Nothing in one is executable and nothing needs to be —
@@ -537,6 +889,13 @@ this machine could not run a PE anyway — but the machine field is real, becaus
 field a Windows runtime is read for. `FakeOtp::pe_machine` sets it, so a test about a runtime
 for the wrong architecture changes that number and nothing else. `erl.ini` stays text, which is
 what it is.
+
+D3's Mach-O work needed the third flavour, and E7 added it on exactly the same terms.
+`FakeOtp::macos()` writes the unix tree's names — nothing else about a macOS runtime differs —
+with `beam.smp` written as a real thin 64-bit Mach-O rather than as a shell stub. As with the PE
+images, nothing in it is executable and nothing needs to be; the `cputype` is real, because that
+is the one field `erts_source::resolve` reads off a macOS runtime, and `FakeOtp::macho_cpu_type`
+sets it and changes nothing else — the exact counterpart of `FakeOtp::pe_machine`.
 
 So `otp::inspect_root` **accepts** a `FakeOtp::new().windows()` root, and the "no API for an
 invalid tree" rule holds for both flavours. It reads the flavour off the tree —
@@ -604,10 +963,11 @@ The gated test at the end of the file runs the same closure over a real
 `gleam export erlang-shipment` output with `--root notify`, and asserts what only a real tree can
 show: `crypto` resolves to a version that exists under the host `lib/`, every OTP `ebin` is a
 directory under that `lib/`, and every shipment application has a directory. The shipment it uses
-is `GINARY_TEST_SHIPMENT` when that is set and a path on the author's machine otherwise, and a
-missing one is escalated exactly as a missing program is: a reported skip, or a failure under
-`GINARY_REQUIRE_TOOLCHAIN=1`. Without that escalation the only test that touches a real tree would
-evaporate silently on every machine but one.
+is `GINARY_TEST_SHIPMENT` and nothing else: unset is a reported skip, and a value that is not a
+directory is a failure. It used to fall back to a path on the author's machine, which read as a
+default and was one machine's truth; the first live CI run failed the `test` and `coverage` jobs on
+it, and `tests/regressions/e5_a_gated_test_defaulted_to_one_developers_machine.rs` now holds both
+halves of the rule.
 
 ## Fixture policy
 
@@ -703,7 +1063,8 @@ and a hand-written test for each way its input can be short.** A branch a random
 reach in a lifetime of cases — the gzip wrapper `beam::form` unwraps needs two exact magic bytes
 and then a decodable deflate stream — gets a property test of its own with the prefix fixed, and
 hand-built inputs for its failures; a branch covered only by a toolchain-gated test is not
-covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs` and `src/elf.rs` were
+covered, because the machines the policy exists for are the ones with no toolchain. `src/beam.rs`
+and `src/elf.rs` were
 the first two; `src/trailer.rs` and `src/payload.rs` joined them in A3a, with
 `parse_never_panics_on_arbitrary_bytes`, `parse_never_panics_on_the_magic_followed_by_rubbish`,
 `unpack_never_panics_on_arbitrary_bytes`, `read_manifest_never_panics_on_arbitrary_bytes` and
@@ -818,16 +1179,63 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   snapshot test rather than `read`: a panic reports only the path, while the marker makes the
   failure a diff between the record the milestone promised and the empty tree, so one run shows
   both the path and the whole expected content.
+- `shell_code(line)` — one shell line with its comment removed: the part a shell would actually
+  run. `#` opens a comment only where a word starts, and inside `'..'` or `".."` it is an ordinary
+  character, so `--skip 'a#b'` passes `a#b`. E16 bought it twice over, and both times the naive
+  read failed *in the direction that passes*: `cargo test --locked # --no-fail-fast` contains the
+  flag and does not pass it, and a commented-out `docker run --privileged` runs nothing. Use it in
+  any rule that reads a `run:` block or a committed script as commands; a `split_once('#')` per
+  scanner is the copy that drifts.
 - `parse_yaml(text)` / `yaml(path)` — the document as YAML, through `saphyr`. GitHub loads the
   issue forms, `dependabot.yml` and every workflow with a YAML reader, and a substring assertion
   is just as happy with a file no reader will accept; parsing first makes that a test failure.
   `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
   and it holds every `.github` record to it through `yaml_files_under(".github")`.
+- `workflow_steps(path)` — every step of every job of one workflow, in file order, as
+  `WorkflowStep { workflow, job, position, name, run, uses, shell, with, env }`: the job id it
+  belongs to, its 1-based position within that job, its `name:` (or its `uses:`), its `run:`
+  script, and the job's `env:` overlaid with the step's own. `step.commands()` is that script as
+  one command per line with backslash continuations joined and shell comments removed through
+  `shell_code`, because a command wrapped for width is still one command, a cosmetic reflow must
+  not change what a rule asserts, and a line a shell never runs is not a command at all. E5 bought it:
+  three of that milestone's findings are about *order* and *environment* within a job — which
+  build last wrote `target/release/ginary`, which target directory a second `cross` invocation
+  reuses, which job a step lives in and therefore which `if:` decides whether it runs — and a
+  substring search over the file text cannot answer any of them. E15 added `shell`, because which
+  shell wraps a script decides what its last line means: GitHub runs a `shell: pwsh` step as
+  `pwsh -command ". '<file>'"` with `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
+  $LASTEXITCODE }` appended, so a step that ends while `$LASTEXITCODE` is non-zero fails whatever
+  its own assertions concluded — and `$LASTEXITCODE` in a `shell: bash` step is not a variable at
+  all. Neither rule can be written from the script alone.
+- `composite_action_steps(path)` — the same `WorkflowStep`s for a composite action's `runs.steps`,
+  with `<composite>` as the job id, because a composite action has none: it borrows whichever job
+  used it. E15 bought it. A composite action's steps carry a `shell:` of their own and are wrapped
+  by the same runner in the same way, so a rule about what CI executes that reads
+  `.github/workflows` alone reads half of what runs.
 - `rust_toolchain_sites()` — every `dtolnay/rust-toolchain` step under `.github/`, as
   `ToolchainSite { workflow, job, toolchain }`, read out of the parsed workflow rather than
   grepped: the word `toolchain` also appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in
   a job name, so a grep would answer a question nobody asked. E4 bought it, because every job
   had quietly pinned the MSRV and CI had therefore never once built this crate on stable.
+- `workflow_jobs(path)` — every job of one workflow as
+  `WorkflowJob { workflow, id, needs, env, commands, uses }`, with `runs(needle)` and
+  `uses_action(needle)` over the last two. `workflow_steps` merges the job's `env:` into each
+  step, which answers "what does this command run under"; two questions are about the job
+  itself — what it `needs:`, and whether *the job* declares a variable — and neither survives
+  that flattening. E6 bought it: the rule that a job may set `GINARY_REQUIRE_STUBS` exactly when
+  it obtains the stubs is a statement about jobs.
+- `parse_ginary_command(line)` / `ginary_invocations(path)` — one shell command line, and every
+  ginary invocation in one committed file, as
+  `GinaryInvocation { source, site, line, path, long_flags }`. `path` is the subcommand path
+  (`["otp", "repack"]`), `long_flags` is every `--flag` it passes without its value. A `.yml` is
+  read as a workflow step by step and anything else as a shell script line by line, so
+  `scripts/smoke-matrix.sh` is scanned as well as the step that calls it. What the parser does
+  *not* cover, deliberately: short flags are counted only as "a flag was seen", a flag's value
+  is never read, and a program the scan cannot name — an interpolation other than a
+  `GINARY_*BIN` variable — is not an invocation. `tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs`
+  holds every long flag found against the binary's own `--help`.
+- `yaml_files_under(dir)` / `shell_scripts_under(dir)` — every `.yml`/`.yaml`, and every `.sh`,
+  under a directory, recursively and sorted, so a failure names the same file on every machine.
 
 `tests/common/digest.rs` is the other helper E4 added, and it is not a repository reader at all
 — it is the fixture half of `tests/digest.rs`. It holds the three published SHA-256 vectors (the
@@ -1015,7 +1423,15 @@ assertion.
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
 `cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
-`coverage.rs`, `repo.rs`, `deps.rs` and `digest.rs`, described above. Still to come:
+`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs`, `portability.rs`, `homepath.rs`
+and `srcscan.rs`, described above. The last two are E7's, and both are pure scanners meant to be
+reused: `homepath.rs` finds a person's absolute home path — `/home/<name>` or `/Users/<name>` —
+in a file that has to run anywhere, reading each file in its own comment syntax (`//` opens one
+in Rust and `#` opens an attribute; `#` opens one in YAML, TOML and shell; anything else is read
+as code throughout) and exempting the fictional accounts this suite's own unit tests spell.
+`srcscan.rs` holds the two scanners for defects only another platform can see: `calls_with`,
+which finds a call to a named function that names the host in its arguments, and
+`literal_sites`, which finds a literal in code rather than in prose. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache

@@ -17,7 +17,8 @@ use ginary::stubid::{self, Flavor, GINARY_STUB_ID, MARKER_LEN, StubId, StubIdErr
 use ginary::target::{ParseTargetError, Target};
 
 use crate::common::stubfile::{
-    Marker, ginary_bin, marker_from_body, needle, noise, offsets, with_markers,
+    Marker, fragments, ginary_bin, marker_from_body, needle, noise, offsets, stray_needle,
+    with_markers,
 };
 
 /// The flavor a binary built with the current feature set carries.
@@ -336,4 +337,155 @@ fn the_marker_errors_say_what_is_wrong_with_the_file() {
         .join("\n");
 
     insta::assert_snapshot!("stub_id_error_messages", rendered);
+}
+
+// ------------------------------- E10: a stray needle is not a second identity --
+//
+// `cargo test` on the Windows runner found *two* markers in one `ginary.exe`:
+//
+// ```text
+// ---- the_binary_this_test_run_built_carries_exactly_one_marker stdout ----
+// a ginary binary carries one identity marker, at one offset: [10961490, 10971432]
+// ---- scanning_this_builds_own_binary_reports_its_identity stdout ----
+// the ginary binary is a stub: Ambiguous { count: 2 }
+// ```
+//
+// (`Windows build and exit-code propagation`
+// <https://github.com/P4suta/ginary/actions/runs/33739517757/job/100597889388>.)
+//
+// The file carries one identity. What it also carries is the needle a second
+// time, because the two halves this module splits it into are two constants,
+// and a linker may lay two constants out side by side. Both halves of that are
+// wrong and both are fixed: the images a build stores must not be joinable into
+// the needle, and a scan must count *records* rather than needle hits, because
+// a scanner that can be fooled by fifteen bytes of unrelated data is one every
+// future linker gets another go at.
+
+/// Noise, a stray needle, noise, one real marker, noise — the shape of a
+/// binary that carries one identity and one accident.
+fn one_marker_and_one_stray() -> (Vec<u8>, usize, usize) {
+    let mut bytes = noise(2048, 0xa11ce);
+    let stray_at = bytes.len();
+    bytes.extend_from_slice(&stray_needle());
+    bytes.extend_from_slice(&noise(1024, 0xb0b));
+    let marker_at = bytes.len();
+    bytes.extend_from_slice(&Marker::host().bytes());
+    bytes.extend_from_slice(&noise(512, 0xc0ffee));
+    (bytes, stray_at, marker_at)
+}
+
+#[test]
+fn a_needle_that_is_not_a_whole_record_is_not_an_identity() {
+    let (bytes, _stray_at, _marker_at) = one_marker_and_one_stray();
+
+    let id = stubid::scan(&bytes).expect("one record and one stray hit is one identity");
+
+    assert_eq!(
+        id,
+        StubId {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            target: Target::host(),
+            format_version: FORMAT_VERSION,
+            // `Marker::host` writes the `full` flavor whichever way this suite
+            // was built, so the expectation names it rather than this build's.
+            flavor: Flavor::Full,
+        }
+    );
+}
+
+#[test]
+fn records_and_candidates_tell_a_whole_record_from_a_stray_needle() {
+    let (bytes, stray_at, marker_at) = one_marker_and_one_stray();
+
+    assert_eq!(
+        stubid::candidates(&bytes),
+        vec![stray_at, marker_at],
+        "both offsets hold the needle"
+    );
+    assert_eq!(
+        stubid::records(&bytes),
+        vec![marker_at],
+        "only one of them opens a whole, terminated, zero-padded record"
+    );
+    assert_eq!(
+        offsets(&bytes),
+        stubid::candidates(&bytes),
+        "the suite's own needle search and the scanner's agree about the hits"
+    );
+}
+
+#[test]
+fn two_whole_records_are_ambiguous_and_the_count_is_of_records() {
+    let marker = Marker::host().bytes();
+    let mut bytes = with_markers(&[marker, marker]);
+    bytes.extend_from_slice(&stray_needle());
+
+    let error = stubid::scan(&bytes).expect_err("a file with two identities has none");
+
+    assert_eq!(
+        error,
+        StubIdError::Ambiguous { count: 2 },
+        "two records and one stray hit are two identities, not three"
+    );
+    assert_eq!(stubid::records(&bytes).len(), 2);
+    assert_eq!(stubid::candidates(&bytes).len(), 3);
+}
+
+#[test]
+fn the_needle_halves_this_build_stores_cannot_be_joined_into_the_needle() {
+    let needle = needle();
+    let stored = stubid::needle_fragments();
+
+    assert_eq!(
+        stored
+            .concat()
+            .windows(needle.len())
+            .filter(|w| *w == &needle[..])
+            .count(),
+        0,
+        "every fragment this build stores, laid out end to end in emission order, must not spell \
+         the needle: a linker that lays them out that way puts a second identity into every \
+         ginary. The fragments are {stored:?}"
+    );
+    for (first, second) in stored
+        .iter()
+        .flat_map(|a| stored.iter().map(move |b| (*a, *b)))
+    {
+        let mut joined = first.to_vec();
+        joined.extend_from_slice(second);
+        assert!(
+            !joined
+                .windows(needle.len())
+                .any(|window| window == &needle[..]),
+            "{first:?} followed by {second:?} spells the needle, and a linker chooses that order, \
+             not this module"
+        );
+    }
+    assert_eq!(
+        stubid::needle(),
+        needle,
+        "however the fragments are stored, they still assemble into the one needle a scan looks \
+         for"
+    );
+}
+
+#[test]
+fn the_test_suites_own_needle_halves_cannot_be_joined_into_the_needle_either() {
+    let needle = needle();
+    let stored = fragments();
+
+    for (first, second) in stored
+        .iter()
+        .flat_map(|a| stored.iter().map(move |b| (*a, *b)))
+    {
+        let mut joined = first.to_vec();
+        joined.extend_from_slice(second);
+        assert!(
+            !joined
+                .windows(needle.len())
+                .any(|window| window == &needle[..]),
+            "the helper is linked into every test binary, and `tests/stub.rs` scans real files \
+             built from them: {first:?} followed by {second:?} spells the needle"
+        );
+    }
 }

@@ -23,12 +23,11 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt as _;
-
 use ginary::target::Target;
 use serde_json::Value;
 
 use crate::common::built::{BuiltProject, PINNED_EPOCH, names_in, sha256_of};
+use crate::common::hostpath::{names_the_same_directory, printed_cwd};
 use crate::common::tools::require_tools;
 
 /// The fixture this file builds, and therefore the artifact's file name.
@@ -69,12 +68,16 @@ fn ginary_build_writes_one_executable_at_the_default_output_path() {
         "the default output is build/ginary/<app>, and there is nothing at {}",
         artifact.display()
     );
-    let mode = std::fs::metadata(&artifact)
-        .expect("stat the artifact")
-        .permissions()
-        .mode()
-        & 0o7777;
-    assert_eq!(mode, 0o755, "the artifact has to be runnable by its user");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&artifact)
+            .expect("stat the artifact")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755, "the artifact has to be runnable by its user");
+    }
 
     // The number `docs/dev/log/A4.md` records. Printed rather than gated: a
     // size assertion that fails on a new ERTS release is one that gets
@@ -112,9 +115,18 @@ fn the_built_artifact_runs_the_application_with_no_erlang_on_the_machine() {
         "code:priv_dir/1 must find the extracted priv:\n{stdout}"
     );
     let cwd = std::fs::canonicalize(run.cwd.as_path()).expect("canonicalise");
+    let printed = printed_cwd(&stdout)
+        .unwrap_or_else(|| panic!("the application printed no `cwd=` line:\n{stdout}"));
+    // Two spellings of one directory are one directory. On Windows the
+    // runtime prints a lower-case drive letter and forward separators, and
+    // `canonicalize` answers with the verbatim `\\?\` form — and `%TEMP%` on a
+    // runner is an 8.3 name whose long form only the filesystem knows. See
+    // `tests/regressions/e12_a_printed_working_directory_was_compared_as_text.rs`.
     assert!(
-        stdout.contains(&format!("cwd={}", cwd.display())),
-        "the application must start where the user is, not where the runtime unpacked:\n{stdout}"
+        names_the_same_directory(printed, &cwd),
+        "the application must start where the user is, not where the runtime unpacked:\n\
+         printed {printed}\nexpected {}\n{stdout}",
+        cwd.display()
     );
 }
 
@@ -778,10 +790,13 @@ fn build_fixture_with(args: &[&str]) -> BuiltProject {
 
 /// `build/ginary/<app>-<host target>`, the name an explicit `--target` writes.
 fn suffixed_artifact(project: &BuiltProject) -> std::path::PathBuf {
-    project
-        .root()
-        .join("build/ginary")
-        .join(format!("{APP}-{}", Target::host().name()))
+    // The artifact carries the host target's executable suffix — `.exe` on
+    // Windows, nothing elsewhere — the same as the file `ginary build` writes.
+    project.root().join("build/ginary").join(format!(
+        "{APP}-{}{}",
+        Target::host().name(),
+        Target::host().exe_suffix()
+    ))
 }
 
 #[test]
@@ -862,14 +877,34 @@ fn the_manifest_records_what_the_bundled_runtime_is_and_where_it_came_from() {
         otp["linkage"], "dynamic",
         "the host's own emulator is dynamically linked: {otp}"
     );
-    assert_eq!(otp["libc"]["kind"], "gnu", "{otp}");
-    let min = otp["libc"]["min"]
-        .as_str()
-        .unwrap_or_else(|| panic!("a gnu runtime records a minimum glibc: {otp}"));
-    assert!(
-        min.split('.').all(|part| part.parse::<u32>().is_ok()),
-        "the minimum is a version and not a sentence: {min}"
-    );
+    // The C library this host actually has, and not `gnu` written down. A
+    // platform with a single system C runtime records `null` here —
+    // `Libc::None` is what `Target::host().libc` answers there — and the
+    // block is right to say so, so it is the block that decides what to
+    // assert. `tests/target.rs` pins `Target::host` itself.
+    match ginary::target::Target::host().libc {
+        ginary::target::Libc::Gnu => {
+            assert_eq!(otp["libc"]["kind"], "gnu", "{otp}");
+            let min = otp["libc"]["min"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a gnu runtime records a minimum glibc: {otp}"));
+            assert!(
+                min.split('.').all(|part| part.parse::<u32>().is_ok()),
+                "the minimum is a version and not a sentence: {min}"
+            );
+        }
+        ginary::target::Libc::Musl => {
+            assert_eq!(otp["libc"]["kind"], "musl", "{otp}");
+            assert!(
+                otp["libc"]["min"].is_null(),
+                "musl carries no symbol versions, so there is no minimum: {otp}"
+            );
+        }
+        ginary::target::Libc::None => assert!(
+            otp["libc"].is_null(),
+            "a platform with one system C runtime names no C library: {otp}"
+        ),
+    }
     assert_eq!(otp["nif_loading"], true, "{otp}");
     assert!(
         otp["source"]
@@ -891,7 +926,10 @@ fn the_same_target_named_twice_produces_one_artifact() {
 
     assert_eq!(
         written,
-        vec![format!("{APP}-{host}"), format!("{APP}-{host}.json")],
+        vec![
+            format!("{APP}-{host}{}", Target::host().exe_suffix()),
+            format!("{APP}-{host}.json")
+        ],
         "`host` and the host's own name are one target, so one artifact and one manifest"
     );
 }

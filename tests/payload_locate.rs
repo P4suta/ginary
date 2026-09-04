@@ -297,3 +297,41 @@ fn a_flushed_write_is_visible_to_locate_on_the_same_open_file() {
     let file = File::open(&path).expect("open");
     assert_eq!(locate(&file).expect("no trailer, no macho magic"), None);
 }
+
+#[test]
+fn a_signed_macho_whose_dataoff_points_past_eof_is_not_a_read_error() {
+    // A thin Mach-O with a valid header and an `LC_CODE_SIGNATURE` whose
+    // `dataoff` names an offset past the end of the file — the shape a
+    // truncated or malformed signed image has. `locate` must treat the
+    // out-of-range signature as "no ginary trailer here" and fall through
+    // to the section lookup (which finds nothing), returning `None`, not
+    // raise a spurious `TrailerError::Io` from reading past EOF. The comment
+    // beside the code-signature branch promises exactly this fall-through.
+    let mut built = with_section(CPU_TYPE_ARM64, "__TEXT", "__text", b"a little code", true);
+    let (codesig_offset, _size) = built.codesig.expect("with_section wrote a code signature");
+
+    // The `LC_CODE_SIGNATURE` command sits after the one segment+section:
+    // header (32) + segment_command_64 (72) + section_64 (80) = 184, and its
+    // `dataoff` field is 8 bytes into the 16-byte command.
+    const DATAOFF_FIELD: usize = 32 + 72 + 80 + 8;
+    assert_eq!(
+        u32::from_le_bytes(
+            built.bytes[DATAOFF_FIELD..DATAOFF_FIELD + 4]
+                .try_into()
+                .unwrap()
+        ) as u64,
+        codesig_offset,
+        "the field we are about to overwrite is the code-signature dataoff",
+    );
+    let past_eof: u32 = 0xffff_ff00;
+    assert!(
+        u64::from(past_eof) > built.bytes.len() as u64,
+        "dataoff is past EOF"
+    );
+    built.bytes[DATAOFF_FIELD..DATAOFF_FIELD + 4].copy_from_slice(&past_eof.to_le_bytes());
+
+    let (file, _dir) = file_of(&built.bytes);
+    let found = locate(&file)
+        .expect("an out-of-range signature dataoff is not a read error; it falls through");
+    assert_eq!(found, None, "no ginary payload, so locate finds none");
+}

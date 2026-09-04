@@ -10,6 +10,14 @@
 //! reaches `execve` — and would be untestable if the plan itself were only
 //! checked from outside.
 
+// A unix file. `launch::plan` is cfg-split down the middle — the program it
+// names, the way arguments are quoted and the variables it sets all differ —
+// so a plan asserted argument by argument is an assertion about one family.
+// The Windows half is `tests/windows.rs`, which pins the same decisions for
+// the other one. See
+// tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs.
+#![cfg(unix)]
+
 mod common;
 
 use std::collections::BTreeMap;

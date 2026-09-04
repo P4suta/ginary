@@ -23,6 +23,14 @@ jobs:
     env:
       # rustdoc warnings are denied for the `cargo doc` step below.
       RUSTDOCFLAGS: -D warnings
+      # This is the one job that installs actionlint, so it is the one job
+      # entitled to say a missing one is a failure rather than a skip. It is
+      # deliberately not GINARY_REQUIRE_TOOLCHAIN, which is a claim about the
+      # toolchain a runtime is packaged with — gleam, erl, strip, docker —
+      # and which three jobs set on runners that install no actionlint at
+      # all. See
+      # tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs.
+      GINARY_REQUIRE_ACTIONLINT: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,10 +52,27 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
       - run: cargo doc --no-deps --locked
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.7
       - run: cargo deny check
+      # actionlint is a lint over these files and belongs to the job that
+      # lints. It is installed from its own release rather than through
+      # taiki-e/install-action, whose manifests do not carry it; the digest is
+      # the one `docs/dev/log/E7.md` records checking.
+      - uses: ./.github/actions/install-actionlint
+        with:
+          tool: actionlint@1.7.12
+          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      # And the job that installs it runs the test that needs it. A check
+      # moved out of three jobs and into none is a check that was deleted, so
+      # the selection is by name, and the name is asserted against the tree as
+      # well as against this line: `cargo test <a filter matching nothing>`
+      # exits 0, so a rename would leave this step green over no workflow at
+      # all. `--no-fail-fast` here for the reason every other `cargo test` in
+      # this file carries it — one run, one full report — and because a rule
+      # with an exception is one the next author has to relitigate.
+      - run: cargo test --locked --no-fail-fast --test regressions actionlint_accepts_every_workflow
 
   msrv:
     name: MSRV check (the declared floor)
@@ -98,10 +123,16 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
+      # `--no-fail-fast` because cargo stops at the first *target* that fails
+      # and abandons the rest: the first pull-request run reported three
+      # failures in `tests/e2e_cross.rs` and never compiled or ran the eleven
+      # targets after it, so the failure set the log recorded was the first
+      # slice of one rather than the whole. One run, one full report.
+      #
       # The full command line tool, with the launcher fault points compiled in.
-      - run: cargo test --features fault-injection --locked
+      - run: cargo test --features fault-injection --locked --no-fail-fast
       # The launcher-only stub flavor: no clap, no TOML reader, no build side.
-      - run: cargo test --no-default-features --locked
+      - run: cargo test --no-default-features --locked --no-fail-fast
 
   smoke:
     name: Clean-room smoke test
@@ -159,9 +190,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
       # The launcher-only stub for each target. `cross` runs the compiler in a
       # per-triple container, so a build script linked against this runner's
       # glibc does not leak into the cross build; hence a separate target dir.
@@ -191,6 +222,13 @@ jobs:
       contents: read
     env:
       GINARY_REQUIRE_TOOLCHAIN: "1"
+      # This is the one job that cross-builds the stubs, so it is the one job
+      # entitled to say a missing one is a failure rather than a skip. `test`
+      # and `coverage` build none and must not set it; conflating that with
+      # GINARY_REQUIRE_TOOLCHAIN is what failed both of them on the first
+      # pull-request run. See
+      # tests/regressions/e6_the_toolchain_flag_required_a_cross_stub_nobody_built.rs.
+      GINARY_REQUIRE_STUBS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,16 +240,33 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cross
+          tool: cross@0.2.5
       # Register the qemu binfmt handlers so the aarch64 container row can run
       # on this x86_64 runner, then run the committed matrix script.
+      #
+      # Pinned to a manifest digest for the reason every `uses:` above it is
+      # pinned to a commit SHA, and more so: `--privileged` hands the container
+      # this runner's own kernel capabilities, so the image is code this
+      # repository executes with more authority than its own workflows have.
+      # Named by tag, that code could be replaced upstream between two runs
+      # with no commit here. The digest is the multi-platform index, so it
+      # resolves on an arm64 runner too; it is `tonistiigi/binfmt:qemu-v10.2.3`
+      # as of 2026-09-04. `scripts/smoke-matrix.sh` runs the same image inside
+      # this job and carries the same pin. Held by
+      # tests/ci_matrix.rs::every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest.
       - name: Bootstrap binfmt for arm64
-        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
+      # One target directory per triple, because one target directory belongs to
+      # one container image. `cross` runs each triple's compiler in its own
+      # image and the gnu image is deliberately ancient, so a host
+      # `build-script-build` cached by the musl row cannot start in it:
+      # `GLIBC_2.28 not found`, which is how the first live run died before it
+      # built a single stub. GitHub does not shell-expand `env:` values, so the
+      # per-triple directory is exported inside the loop. See
+      # tests/regressions/e5_one_cross_target_directory_was_shared_between_images.rs.
       - name: Build the cross stubs the matrix runs against
-        env:
-          CARGO_TARGET_DIR: target/cross
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           mkdir -p target/stubs
@@ -220,8 +275,10 @@ jobs:
             linux-x86_64-gnu:x86_64-unknown-linux-gnu \
             linux-aarch64-musl:aarch64-unknown-linux-musl; do
             name=${entry%%:*}; triple=${entry##*:}
-            cross build --release --locked --no-default-features --target "$triple"
-            cp "target/cross/$triple/release/ginary" "target/stubs/ginary-stub-$version-$name"
+            ( export CARGO_TARGET_DIR="target/cross/$triple"
+              cross build --release --locked --no-default-features --target "$triple"
+              cp "$CARGO_TARGET_DIR/$triple/release/ginary" \
+                 "target/stubs/ginary-stub-$version-$name" )
           done
       - name: Repack the OTP catalog the matrix builds from
         run: |
@@ -232,18 +289,41 @@ jobs:
       - run: scripts/smoke-matrix.sh
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+      # The stub-gated tests, run in the job that cross-builds the stubs. Here
+      # `GINARY_REQUIRE_STUBS=1` forbids the skip, so a cross build that
+      # produced nothing fails the job rather than quietly removing its own
+      # coverage. Four targets, because four tracked files call
+      # `stubfile::cross_stub`: `tests/e2e_cross.rs`, `tests/stub.rs`,
+      # `tests/e2e_native.rs` and one file under `tests/regressions/`, which
+      # `tests/regressions.rs` compiles into the `regressions` target. That
+      # list is derived from the tree rather than counted by hand in
+      # tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs, because
+      # counting it by hand is how five of the nine came to run nowhere.
+      - name: Run the tests that need a cross-built stub
+        run: |
+          cargo test --locked --no-fail-fast \
+            --test e2e_cross --test stub --test e2e_native --test regressions
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
 
   macos:
     name: macOS build, launch and signature
-    # macos-13 is the last x86_64 image; macos-14 is arm64. This is the job that
+    # macos-15-intel is the x86_64 image; macos-14 is arm64. This is the job that
     # closes the D3 "awaits a Mac runner" gap: the darwin stub is built natively
     # here (there is no macOS cross toolchain on Linux) and its signature is
     # verified against the kernel's own requirement.
+    #
+    # Not macos-13. GitHub has withdrawn that label, and a withdrawn label is
+    # worse than a failing job: the parser accepts it, the job appears, no
+    # runner is ever assigned, and the whole *run* keeps the `queued` status —
+    # so `Required CI` never resolves and the pull request cannot merge however
+    # green everything else is. See
+    # tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             target: macos-x86_64
           - runner: macos-14
             target: macos-aarch64
@@ -264,14 +344,29 @@ jobs:
           gleam-version: "1.18.1"
       - run: cargo build --release --locked
       # The darwin stub comes from here and from nowhere else.
+      #
+      # Into a target directory of its own. Both flavors are one Cargo target
+      # and share `target/release/ginary`, so a stub built into the default
+      # directory replaces the command line tool the next step runs — which is
+      # exactly what happened on the first live run, and the packaging step
+      # below was answered by the launcher stub's payloadless sentence. See
+      # tests/regressions/e5_the_macos_job_ran_the_stub_as_the_command_line_tool.rs.
       - name: Build the darwin stub natively
         run: |
-          cargo build --no-default-features --release --locked
+          cargo build --no-default-features --release --locked --target-dir target/stub
           mkdir -p target/stubs
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          cp target/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
-      # Build a hello_ffi artifact against a dir: catalog ERTS, run it (its
+          cp target/stub/release/ginary "target/stubs/ginary-stub-${version}-${{ matrix.target }}"
+      # Build a hello_ffi artifact against the runner's own ERTS, run it (its
       # arguments, its greeting, exit 3), and verify the ad-hoc signature.
+      #
+      # The ERTS source is a `gleam.toml` setting and not a flag: `ginary build`
+      # has no `--erts` and never had one, and passing it killed this job at
+      # argument parsing on two consecutive runs. The line appended below is the
+      # one `scripts/smoke-matrix.sh` appends, with `dir:` instead of `catalog`
+      # because this job repacks no catalog. Appended to the *copy*, never to
+      # the committed fixture. See
+      # tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs.
       - name: Package, run and verify a hello_ffi artifact
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
@@ -279,13 +374,66 @@ jobs:
           otp_root="$(dirname "$(dirname "$(command -v erl)")")"
           work=$(mktemp -d)
           cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
+          printf '\n[tools.ginary.target."%s"]\nerts = "dir:%s"\n' \
+            "${{ matrix.target }}" "$otp_root" >> "$work/hello_ffi/gleam.toml"
           ( cd "$work/hello_ffi"
             "$GITHUB_WORKSPACE/target/release/ginary" build \
-              --target "${{ matrix.target }}" \
-              --erts "dir:${otp_root}" )
+              --target "${{ matrix.target }}" )
           artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
+          # Diagnostic: the stub's load commands beside the finished artifact's.
+          # A valid signature over a structurally broken image verifies and then
+          # segfaults on exec (exit 139), which is what both runners reported on
+          # run 33724862229: the E8 writer injected a new segment, and making
+          # room for its load command slid the code forward — invalidating the
+          # entry point and every LC_DYLD_CHAINED_FIXUPS rebase target, which the
+          # signature happily covered. E9 rewrote the writer to grow __LINKEDIT
+          # over the payload instead, moving nothing. These dumps are the
+          # evidence: __TEXT's fileoff/filesize, LC_MAIN's entryoff and every
+          # segment before __LINKEDIT must read identically in both columns, and
+          # only __LINKEDIT's filesize/vmsize and LC_CODE_SIGNATURE's
+          # dataoff/datasize may differ. They cost a second on the third round
+          # of this bug and stay for the fourth. See docs/dev/log/E9.md.
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          stub="$GITHUB_WORKSPACE/target/stubs/ginary-stub-${version}-${{ matrix.target }}"
+          fields='cmd |segname|fileoff|filesize |vmaddr|vmsize|entryoff|dataoff|datasize'
+          echo "== stub load commands =="
+          otool -l "$stub" | grep -E "$fields" || true
+          echo "== artifact load commands =="
+          otool -l "$artifact" | grep -E "$fields" || true
+          # The signature is read and checked *before* the artifact is run, and
+          # not only after it. An invalid ad-hoc signature is not a program
+          # that starts and misbehaves: the kernel refuses to map a page whose
+          # hash disagrees with the CodeDirectory and kills the process with
+          # SIGKILL before `main`. Checking first turns that back into a sentence
+          # naming the defect, and `--display` prints the geometry a future one
+          # needs: the CDHash, the flags, the hash type and the executable
+          # segment. See docs/dev/log/E8.md and docs/dev/log/E9.md.
+          codesign --display --verbose=4 "$artifact" || true
+          codesign --verify --strict --verbose=4 "$artifact"
+          # Run the artifact, and on any non-zero exit print the crash report the
+          # runner keeps before failing: a low faulting address is a null deref
+          # in our own first instructions, a fault inside dyld is a malformed
+          # image. The exit code is still asserted — the diagnostics do not
+          # soften it.
+          set +e
           "$artifact" 0 hello world
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the hello_ffi artifact exited $status, not 0"
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \
+              -name '*.ips' 2>/dev/null || true
+            for report in "$HOME"/Library/Logs/DiagnosticReports/hello_ffi-*.ips; do
+              [ -f "$report" ] && { echo "== $report =="; cat "$report"; }
+            done
+            log show --last 5m \
+              --predicate 'process == "hello_ffi-${{ matrix.target }}"' 2>/dev/null \
+              | tail -n 40 || true
+            exit "$status"
+          fi
           set +e; "$artifact" 3; test $? -eq 3; set -e
+          # And again afterwards: the artifact extracts its payload into a
+          # cache directory and must not have touched its own file to do it.
           codesign --verify --strict --verbose=4 "$artifact"
 
   windows:
@@ -314,22 +462,95 @@ jobs:
       # wine, so these run nowhere until a real Windows runner does it).
       - run: cargo build --no-default-features --release --locked
       - run: cargo build --release --locked
-      - run: cargo test --locked
-      # Prove an exit code crosses the launcher: erl halt(3) reaches ERRORLEVEL.
+      # `--no-fail-fast` for the reason the `test` job gives: cargo abandons
+      # every target after the first that fails, so the seven library failures
+      # this job reported on the first Windows-native run were the first slice
+      # of a report rather than the whole of one.
+      - run: cargo test --locked --no-fail-fast
+      # Prove an exit code crosses the launcher: erl halt(3) reaches the parent,
+      # which is the platform fact `launch_windows::run` rests on and the one
+      # D2 recorded as needing a real Windows host. ADR 0015 cites the run.
+      #
+      # Two things the first execution of this step taught, both of them the
+      # reason it no longer reads `erl -noshell -eval "halt(3)"` and a bare
+      # `if ($LASTEXITCODE -ne 3) { throw ... }`:
+      #
+      # 1. A `pwsh` step must end on a status of its own. GitHub appends
+      #    `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
+      #    $LASTEXITCODE }` to every one, and `pwsh -command ". '<file>'"`
+      #    reports any non-zero exit from the sourced script to the runner as 1
+      #    with nothing on either stream. So the old shape asserted `halt(3)`
+      #    correctly, left 3 behind, and failed the job in silence with the very
+      #    number it had just proved right — job 100996872499 of run
+      #    33864729638, 0.54 s, `##[error]Process completed with exit code 1.`
+      #    and not one other line. The code under test is therefore captured,
+      #    printed and compared, and the step exits 0 or 1 on its own verdict.
+      #    See tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs.
+      # 2. It probes the runtime this job installed, named through the
+      #    `INSTALL_DIR_FOR_OTP` that `setup-beam` exports, rather than a bare
+      #    `erl` it hopes `PATH` resolves: a runtime that is not where it is
+      #    looked for has to be a sentence naming the path, never a number.
       - name: Assert exit-code propagation
         shell: pwsh
         run: |
-          erl -noshell -eval "halt(3)"
-          if ($LASTEXITCODE -ne 3) { throw "expected ERRORLEVEL 3, got $LASTEXITCODE" }
+          $otp = $env:INSTALL_DIR_FOR_OTP
+          if (-not $otp -or -not (Test-Path -LiteralPath $otp)) {
+            Write-Host "::error::INSTALL_DIR_FOR_OTP names no directory: '$otp'"
+            Write-Host "erlef/setup-beam exports it, and this step probes the erl it installed"
+            exit 1
+          }
+          $erl = Join-Path $otp 'bin\erl.exe'
+          if (-not (Test-Path -LiteralPath $erl)) {
+            $found = Get-ChildItem -LiteralPath $otp -Filter 'erl.exe' -Recurse -File |
+              Select-Object -First 1
+            if (-not $found) {
+              Write-Host "::error::no erl.exe anywhere under INSTALL_DIR_FOR_OTP ($otp)"
+              exit 1
+            }
+            Write-Host "no erl.exe at $erl; falling back to $($found.FullName)"
+            $erl = $found.FullName
+          }
+          Write-Host "probing $erl"
+          & $erl -noshell -eval "halt(3)"
+          $code = $LASTEXITCODE
+          Write-Host "erl -noshell -eval halt(3) left exit code $code"
+          if ($code -ne 3) {
+            Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
+            exit 1
+          }
+          exit 0
 
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # Forty minutes was the budget before this job also repacked the runtimes
+    # and stopped skipping nine end-to-end tests; the download, the repack and
+    # seven instrumented cross builds are all new work since.
+    timeout-minutes: 60
+    # The floor below is measured over the whole suite, and nine of its
+    # end-to-end tests need a cross-built stub. This job builds none, so it
+    # waits for the job that does and downloads what that one uploaded:
+    # without them those nine skip, 54 lines of reached code disappear and the
+    # same measurement is 89.92% against a 90% floor. Lowering the floor would
+    # be weakening a gate to go green; obtaining what the measurement assumes
+    # is the fix.
+    #
+    # The stubs are half of what the measurement assumes. Seven of those nine
+    # tests write `erts = "catalog"` into the fixture and build against
+    # dist/otp/catalog.json, and only the catalog is committed - .gitignore
+    # keeps the tarballs it names out of the tree - so with the stubs alone
+    # they stop skipping and start failing in the runtime resolver instead.
+    # Hence the repack step below, the same one smoke-matrix runs. See
+    # tests/regressions/e6_the_coverage_floor_measured_a_stubless_subset.rs.
+    needs: [cross-build]
     permissions:
       contents: read
     env:
       GINARY_REQUIRE_TOOLCHAIN: "1"
+      # This job now has the stubs, so a missing one is a broken download and
+      # not a machine without them.
+      GINARY_REQUIRE_STUBS: "1"
+      GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -342,16 +563,56 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@47be02f2de8a32619316956f6117e150bdc6763f # v2.62.44
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ginary-stub-*
+          path: target/stub-artifacts
+      # The upload names each artifact `ginary-stub-<target>`; the suite looks
+      # a stub up as `ginary-stub-<version>-<target>` (`stubfile::stub_file_name`),
+      # so the version goes back in here rather than into the artifact name the
+      # release workflow also consumes. The executable bit does not survive the
+      # artifact round trip and a stub is copied, gated and executed as a file,
+      # so it is restored explicitly. An empty download is a failure: this job
+      # promises the stubs to every test in it.
+      - name: Name the downloaded stubs the way the suite looks them up
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          mkdir -p target/stubs
+          found=0
+          for file in target/stub-artifacts/*/ginary-stub-*; do
+            test -f "$file" || continue
+            base=${file##*/}
+            cp "$file" "target/stubs/ginary-stub-$version-${base#ginary-stub-}"
+            found=$((found + 1))
+          done
+          test "$found" -ge 5 || {
+            echo "only $found stubs were downloaded; the coverage floor is measured with them" >&2
+            exit 1
+          }
+          chmod +x target/stubs/*
+          ls -l target/stubs
+      # The runtimes the catalog names, which the repository does not carry.
+      # Without this the seven catalog-built tests reach `ginary build` and die
+      # with `cannot use the catalog: ... No such file or directory`, which is
+      # where downloading the stubs moved the failure to.
+      - name: Repack the OTP runtimes the catalog-built tests bundle
+        run: |
+          cargo run --quiet --locked -- otp repack \
+            --upstream-tag OTP-29.0.5 \
+            --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
+            --out dist/otp
       # Line coverage, gated at 90%. The branch floor is documented as
       # nightly-only (it needs a `-Z coverage-options=branch` build); see
       # docs/dev/testing.md. The threshold lives here, not only in the script's
       # default, so it cannot be lowered without the diff showing it. The
       # full end-to-end suite runs under coverage (the toolchain is present and
-      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure), so the
-      # number reflects the whole tree rather than a toolchain-free subset.
+      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure, and the
+      # stubs downloaded above plus the runtimes repacked above keep the nine
+      # stub-gated tests in the run), so the number reflects the whole tree
+      # rather than a subset of it.
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info
       - run: scripts/ci/coverage-gate.sh target/lcov.info 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

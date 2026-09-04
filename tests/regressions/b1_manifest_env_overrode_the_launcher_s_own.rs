@@ -30,6 +30,7 @@ use ginary::cache::Env;
 use ginary::launch::{self, CRASH_DUMP_NAME, HEART_COMMAND_VAR, LaunchPlan};
 
 use crate::common::artifact::canonical_manifest;
+use crate::common::hostpath::joined_for;
 
 /// The entry the plan is built against.
 const ROOT: &str = "/cache/hello/0123456789abcdef";
@@ -89,9 +90,13 @@ fn a_manifest_env_may_not_take_over_a_name_the_launcher_derives() {
         "the runtime's root is the entry it was extracted into, and a manifest does not get \
          a second say"
     );
+    // The launcher joins the dump directory and the file name with
+    // `Path::join`, so the separator between them is the host's: writing `/`
+    // down asserted that this host spells one that way. `hostpath::joined_for`
+    // is the rule; see `e11_a_listing_path_was_joined_the_way_the_host_spells_one`.
     assert_eq!(
         values(&plan, "ERL_CRASH_DUMP"),
-        vec![format!("{DUMPS}/{CRASH_DUMP_NAME}")],
+        vec![joined_for(ginary::platform::HOST, DUMPS, CRASH_DUMP_NAME)],
         "the dump goes where the launcher put it"
     );
     assert_eq!(

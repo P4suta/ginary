@@ -84,15 +84,19 @@ pub enum LockKind {
 /// `FILE_SHARE_READ`: another handle may open the file for reading.
 pub const FILE_SHARE_READ: u32 = 0x0000_0001;
 
-/// `FILE_SHARE_DELETE`: another handle may delete or rename the file — and,
-/// with it, the directory the file is in.
+/// `FILE_SHARE_DELETE`: another handle may delete or rename *this file*.
 ///
-/// That second half is the reason it is here. Windows refuses to rename a
-/// directory that has open handles beneath it unless every one of those
-/// handles permits deletion, and [`crate::cache::prune_app`] renames a cache
-/// entry while still holding `<entry>/.lock` inside it. Without this bit every
-/// prunable entry is reported unremovable and `ginary cache prune` removes
-/// nothing.
+/// It is here because the removal that follows a prune deletes `<entry>/.lock`
+/// along with the tree it is in, and Windows refuses to delete a file whose
+/// open handles do not permit it.
+///
+/// It does **not** extend to the directory the file is in, which is what this
+/// crate believed until a real Windows runner said otherwise: renaming
+/// `<entry>` while `<entry>/.lock` is open is refused whatever this handle
+/// shares. [`crate::cache::prune_app`] therefore releases the lock before the
+/// rename where the platform requires that —
+/// [`crate::platform::rename_refuses_open_children`] — and
+/// `docs/dev/log/E8.md` records the run.
 pub const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 
 /// The `dwShareMode` `<entry>/.lock` is opened with on Windows.
@@ -122,11 +126,10 @@ pub const fn windows_share_mode(kind: LockKind) -> u32 {
         LockKind::Shared => FILE_SHARE_READ,
         // No reading and no writing: an entry a prune can open is an entry no
         // runtime is holding. Deletion is the one thing it does share, and it
-        // shares it with itself — the prune renames the entry directory while
-        // this handle is still open inside it, which Windows refuses for a
-        // directory whose open handles do not permit it. Sharing deletion says
-        // nothing about read or write access, so what the two locks mean to
-        // each other is unchanged.
+        // shares it with the removal that follows, which deletes this very
+        // file along with the tree it is in. Sharing deletion says nothing
+        // about read or write access, so what the two locks mean to each other
+        // is unchanged.
         LockKind::Exclusive => FILE_SHARE_DELETE,
     }
 }
@@ -278,7 +281,12 @@ pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
 /// access, and this open asks for write access as well as read — or the lock
 /// file could not be opened at all. Both mean "leave this entry alone". What
 /// this handle shares is [`FILE_SHARE_DELETE`] and nothing else, so the answer
-/// above is unchanged and the caller may rename the entry it is inside.
+/// above is unchanged and the removal that follows may delete this file along
+/// with the tree it is in. It does *not* let the caller rename the entry
+/// directory while this handle is open — `FILE_SHARE_DELETE` speaks for the
+/// file it is on and not for an ancestor of it, which is why
+/// [`crate::cache::prune_app`] releases the lock first on a platform that
+/// refuses that; see [`crate::platform::rename_refuses_open_children`].
 #[cfg(windows)]
 pub fn try_exclusive(entry: &Path) -> Option<ExclusiveLock> {
     let path = lock_path(entry);
@@ -402,9 +410,8 @@ fn open_windows_shared(path: &Path) -> std::io::Result<File> {
 ///
 /// Read and write access, sharing only deletion: an open that succeeds proves
 /// no runtime holds the entry, and holds it against every one that arrives
-/// while the prune runs. Deletion is shared because the prune's own next step
-/// is to rename the entry directory this handle is inside; see
-/// [`FILE_SHARE_DELETE`].
+/// while the prune runs. Deletion is shared because the removal that follows
+/// deletes this file along with the tree it is in; see [`FILE_SHARE_DELETE`].
 #[cfg(windows)]
 fn open_windows_exclusive(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt as _;

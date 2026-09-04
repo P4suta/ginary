@@ -15,6 +15,10 @@
 //! The script does not exist yet: this is the milestone that writes it. Until
 //! it does, every test here fails at the assertion that looks for it.
 
+// A unix file, for the reason `tests/coverage_gate.rs` is: it spawns
+// `scripts/ci/version-consistency.sh` and asserts its execute bit.
+#![cfg(unix)]
+
 mod common;
 
 use std::path::PathBuf;
