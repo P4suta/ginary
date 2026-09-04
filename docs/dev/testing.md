@@ -66,8 +66,8 @@
 | `tests/e2e_native.rs` | four-way gated, the cross-built stub among the four: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
-| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry |
-| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope |
+| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry; E15 adds the ADR's citation of the run that measured `halt(3)` propagation on a real Windows host — run 33864729638, job 100996872499 — so the claim can be re-read rather than believed |
+| `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope; extended in E15 with the Windows job's exit-code probe held to three things at once — it probes the runtime the job installed through `INSTALL_DIR_FOR_OTP` rather than a bare `erl` off `PATH`, it says the code it saw, and it ends on a verdict of its own |
 | `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
 | `tests/deps.rs` | the committed dependency record, held to what the development machine's pre-push freshness gate reads (E4): `sha2` requested on the 0.11 line and `Cargo.lock` resolved onto it, one version each of `sha2`, `digest` and `block-buffer` — two `digest` majors are two incompatible `Digest` traits and that is what a half-finished migration looks like — and `sha2` and `hex`, the pair that computes and spells every digest, locked on the minor line their requirement names. Reads `Cargo.toml` and `Cargo.lock` through `tests/common/deps.rs`, a hand-rolled scanner rather than `toml`, because `toml` is behind the `cli` feature and these assertions hold for the stub flavor too |
@@ -301,7 +301,22 @@ about the toolchain and would be a false claim about the object format, and a ga
 there would be demanding a machine nobody can provide. The skip is printed and names the format
 the host writes, so the reason is in the log rather than in a reader's head.
 
-The rule the five gates share is worth stating once. A gate is a claim somebody has to be able to
+E15 adds a sixth, and it is a third *kind* again: `require_working_pwsh` **runs** the program
+rather than merely finding it. The rule it carries is about what PowerShell does with the exit
+code a step leaves behind — the Windows exit-code probe asserted `halt(3)` correctly, left `3` in
+`$LASTEXITCODE`, and was failed by the `exit $LASTEXITCODE` GitHub appends to every `pwsh` step —
+and the only honest way to state such a rule is to measure it, which a name on `PATH` is not
+enough for. On the machine E15 was written on the first `pwsh` on `PATH` is
+`~/.local/share/mise/shims/pwsh`, a version-manager shim with no version selected: it exits
+non-zero and prints `mise ERROR No version is set for shim: pwsh`. That is not a PowerShell, and
+a test that ran it would have reported a defect in this repository for a fact about somebody's
+shims. So the gate spends one `pwsh -NoProfile -Command "exit 0"` — under `PWSH_BUDGET` (60 s)
+through `run_bounded`, like every other child the suite starts — and skips with the answer it got
+when that fails. It escalates under no variable, for `require_elf_stripper`'s reason: `pwsh` is
+not part of the toolchain an artifact is built with, and the two hosted runners that ship one,
+`ubuntu-24.04` and `windows-2022`, run the measurement without being told to.
+
+The rule the six gates share is worth stating once. A gate is a claim somebody has to be able to
 make true, so it belongs to whichever job installs the thing it is about:
 `GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang, Gleam and a POSIX shell,
 `GINARY_REQUIRE_STUBS` to the jobs that build or download the cross stubs,
@@ -1116,15 +1131,25 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
   and it holds every `.github` record to it through `yaml_files_under(".github")`.
 - `workflow_steps(path)` — every step of every job of one workflow, in file order, as
-  `WorkflowStep { workflow, job, position, name, run, env }`: the job id it belongs to, its
-  1-based position within that job, its `name:` (or its `uses:`), its `run:` script, and the
-  job's `env:` overlaid with the step's own. `step.commands()` is that script as one command per
-  line with backslash continuations joined, because a command wrapped for width is still one
-  command and a cosmetic reflow must not change what a rule asserts. E5 bought it: three of that
-  milestone's findings are about *order* and *environment* within a job — which build last wrote
-  `target/release/ginary`, which target directory a second `cross` invocation reuses, which job a
-  step lives in and therefore which `if:` decides whether it runs — and a substring search over
-  the file text cannot answer any of them.
+  `WorkflowStep { workflow, job, position, name, run, uses, shell, with, env }`: the job id it
+  belongs to, its 1-based position within that job, its `name:` (or its `uses:`), its `run:`
+  script, and the job's `env:` overlaid with the step's own. `step.commands()` is that script as
+  one command per line with backslash continuations joined, because a command wrapped for width
+  is still one command and a cosmetic reflow must not change what a rule asserts. E5 bought it:
+  three of that milestone's findings are about *order* and *environment* within a job — which
+  build last wrote `target/release/ginary`, which target directory a second `cross` invocation
+  reuses, which job a step lives in and therefore which `if:` decides whether it runs — and a
+  substring search over the file text cannot answer any of them. E15 added `shell`, because which
+  shell wraps a script decides what its last line means: GitHub runs a `shell: pwsh` step as
+  `pwsh -command ". '<file>'"` with `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
+  $LASTEXITCODE }` appended, so a step that ends while `$LASTEXITCODE` is non-zero fails whatever
+  its own assertions concluded — and `$LASTEXITCODE` in a `shell: bash` step is not a variable at
+  all. Neither rule can be written from the script alone.
+- `composite_action_steps(path)` — the same `WorkflowStep`s for a composite action's `runs.steps`,
+  with `<composite>` as the job id, because a composite action has none: it borrows whichever job
+  used it. E15 bought it. A composite action's steps carry a `shell:` of their own and are wrapped
+  by the same runner in the same way, so a rule about what CI executes that reads
+  `.github/workflows` alone reads half of what runs.
 - `rust_toolchain_sites()` — every `dtolnay/rust-toolchain` step under `.github/`, as
   `ToolchainSite { workflow, job, toolchain }`, read out of the parsed workflow rather than
   grepped: the word `toolchain` also appears in comments, in `GINARY_REQUIRE_TOOLCHAIN` and in

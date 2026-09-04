@@ -290,6 +290,32 @@ fn the_windows_launcher_adr_is_committed() {
 }
 
 #[test]
+fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
+    let adr = read("docs/adr/0015-windows-launcher-stays-resident.md");
+    for needle in [
+        // The job that ran it, so the claim can be re-read rather than
+        // believed: `Windows build and exit-code propagation`, run
+        // 33864729638, job 100996872499.
+        "33864729638",
+        "100996872499",
+        "halt(3)",
+    ] {
+        assert!(
+            adr.contains(needle),
+            "a real Windows host has now run `erl -noshell -eval \"halt(3)\"`, and the ADR that \
+             rests the whole Windows exit-code contract on that propagation has to cite the run \
+             that proved it: it mentions no `{needle}`"
+        );
+    }
+    assert!(
+        !adr.contains("milestone on a `windows-latest` runner"),
+        "the ADR still lists `halt(N)` propagation among the things no machine has run, and it \
+         still names a runner label this repository deliberately does not use. Both are now \
+         wrong: the propagation was proved on `windows-2022`"
+    );
+}
+
+#[test]
 fn the_windows_launcher_adr_is_in_the_index() {
     let index = read("docs/adr/README.md");
     assert!(

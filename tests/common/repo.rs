@@ -286,6 +286,17 @@ pub struct WorkflowStep {
     pub run: String,
     /// The step's `uses:`, empty for a step that only `run:`s a script.
     pub uses: String,
+    /// The step's `shell:`, empty for a step that does not name one.
+    ///
+    /// Which shell a script runs under decides what its last line means. A
+    /// `shell: pwsh` step is run as `pwsh -command ". '<file>'"` with
+    /// `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
+    /// $LASTEXITCODE }` appended, so a step that ends with a non-zero
+    /// `$LASTEXITCODE` fails whatever its own assertions concluded — which is
+    /// exactly what happened to the Windows exit-code probe. A rule about
+    /// that cannot be written from the script alone. See
+    /// `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs`.
+    pub shell: String,
     /// The step's `with:` mapping, string pairs only.
     ///
     /// Which *tool* an install step installs is a `with:` key and not part of
@@ -348,37 +359,80 @@ pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
         let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
             continue;
         };
-        for (index, step) in steps.iter().enumerate() {
-            let run = step
-                .as_mapping_get("run")
-                .and_then(YamlOwned::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let label = step
-                .as_mapping_get("name")
-                .and_then(YamlOwned::as_str)
-                .or_else(|| step.as_mapping_get("uses").and_then(YamlOwned::as_str))
-                .unwrap_or("<a run step>")
-                .to_owned();
-            let mut env = job_env.clone();
-            env.extend(env_map(step.as_mapping_get("env")));
-            out.push(WorkflowStep {
-                workflow: relative.to_owned(),
-                job: name.to_owned(),
-                position: index + 1,
-                name: label,
-                run,
-                uses: step
-                    .as_mapping_get("uses")
-                    .and_then(YamlOwned::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                with: env_map(step.as_mapping_get("with")),
-                env,
-            });
-        }
+        push_steps(relative, name, steps, &job_env, &mut out);
     }
     out
+}
+
+/// Every step of one composite action, in file order.
+///
+/// A composite action's steps are `run:` scripts with a `shell:` of their own,
+/// run in the caller's job by the same runner that runs a workflow step, so a
+/// rule about what CI executes that reads `.github/workflows` alone reads half
+/// the tree. The `job` of every step it returns is `<composite>`, because a
+/// composite action does not have one — it borrows whichever job used it.
+///
+/// # Panics
+///
+/// As [`workflow_steps`].
+pub fn composite_action_steps(relative: &str) -> Vec<WorkflowStep> {
+    let parsed = yaml(relative);
+    let mut out = Vec::new();
+    let Some(steps) = parsed
+        .as_mapping_get("runs")
+        .and_then(|runs| runs.as_mapping_get("steps"))
+        .and_then(YamlOwned::as_vec)
+    else {
+        return out;
+    };
+    let action_env = env_map(parsed.as_mapping_get("env"));
+    push_steps(relative, "<composite>", steps, &action_env, &mut out);
+    out
+}
+
+/// The half of [`workflow_steps`] and [`composite_action_steps`] that reads a
+/// `steps:` sequence, whichever document it came out of.
+fn push_steps(
+    relative: &str,
+    job: &str,
+    steps: &[YamlOwned],
+    outer_env: &BTreeMap<String, String>,
+    out: &mut Vec<WorkflowStep>,
+) {
+    for (index, step) in steps.iter().enumerate() {
+        let run = step
+            .as_mapping_get("run")
+            .and_then(YamlOwned::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let label = step
+            .as_mapping_get("name")
+            .and_then(YamlOwned::as_str)
+            .or_else(|| step.as_mapping_get("uses").and_then(YamlOwned::as_str))
+            .unwrap_or("<a run step>")
+            .to_owned();
+        let mut env = outer_env.clone();
+        env.extend(env_map(step.as_mapping_get("env")));
+        out.push(WorkflowStep {
+            workflow: relative.to_owned(),
+            job: job.to_owned(),
+            position: index + 1,
+            name: label,
+            run,
+            uses: step
+                .as_mapping_get("uses")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            shell: step
+                .as_mapping_get("shell")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            with: env_map(step.as_mapping_get("with")),
+            env,
+        });
+    }
 }
 
 /// One `env:` mapping as name to value, dropping anything that is not a pair

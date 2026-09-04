@@ -456,12 +456,58 @@ jobs:
       # this job reported on the first Windows-native run were the first slice
       # of a report rather than the whole of one.
       - run: cargo test --locked --no-fail-fast
-      # Prove an exit code crosses the launcher: erl halt(3) reaches ERRORLEVEL.
+      # Prove an exit code crosses the launcher: erl halt(3) reaches the parent,
+      # which is the platform fact `launch_windows::run` rests on and the one
+      # D2 recorded as needing a real Windows host. ADR 0015 cites the run.
+      #
+      # Two things the first execution of this step taught, both of them the
+      # reason it no longer reads `erl -noshell -eval "halt(3)"` and a bare
+      # `if ($LASTEXITCODE -ne 3) { throw ... }`:
+      #
+      # 1. A `pwsh` step must end on a status of its own. GitHub appends
+      #    `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
+      #    $LASTEXITCODE }` to every one, and `pwsh -command ". '<file>'"`
+      #    reports any non-zero exit from the sourced script to the runner as 1
+      #    with nothing on either stream. So the old shape asserted `halt(3)`
+      #    correctly, left 3 behind, and failed the job in silence with the very
+      #    number it had just proved right — job 100996872499 of run
+      #    33864729638, 0.54 s, `##[error]Process completed with exit code 1.`
+      #    and not one other line. The code under test is therefore captured,
+      #    printed and compared, and the step exits 0 or 1 on its own verdict.
+      #    See tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs.
+      # 2. It probes the runtime this job installed, named through the
+      #    `INSTALL_DIR_FOR_OTP` that `setup-beam` exports, rather than a bare
+      #    `erl` it hopes `PATH` resolves: a runtime that is not where it is
+      #    looked for has to be a sentence naming the path, never a number.
       - name: Assert exit-code propagation
         shell: pwsh
         run: |
-          erl -noshell -eval "halt(3)"
-          if ($LASTEXITCODE -ne 3) { throw "expected ERRORLEVEL 3, got $LASTEXITCODE" }
+          $otp = $env:INSTALL_DIR_FOR_OTP
+          if (-not $otp -or -not (Test-Path -LiteralPath $otp)) {
+            Write-Host "::error::INSTALL_DIR_FOR_OTP names no directory: '$otp'"
+            Write-Host "erlef/setup-beam exports it, and this step probes the erl it installed"
+            exit 1
+          }
+          $erl = Join-Path $otp 'bin\erl.exe'
+          if (-not (Test-Path -LiteralPath $erl)) {
+            $found = Get-ChildItem -LiteralPath $otp -Filter 'erl.exe' -Recurse -File |
+              Select-Object -First 1
+            if (-not $found) {
+              Write-Host "::error::no erl.exe anywhere under INSTALL_DIR_FOR_OTP ($otp)"
+              exit 1
+            }
+            Write-Host "no erl.exe at $erl; falling back to $($found.FullName)"
+            $erl = $found.FullName
+          }
+          Write-Host "probing $erl"
+          & $erl -noshell -eval "halt(3)"
+          $code = $LASTEXITCODE
+          Write-Host "erl -noshell -eval halt(3) left exit code $code"
+          if ($code -ne 3) {
+            Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
+            exit 1
+          }
+          exit 0
 
   coverage:
     name: Coverage

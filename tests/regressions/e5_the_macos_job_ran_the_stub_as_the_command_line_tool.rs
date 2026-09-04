@@ -104,6 +104,7 @@ fn a_build_wrapped_over_two_lines_is_still_one_build() {
             name: "<none>".to_owned(),
             run: run.to_owned(),
             uses: String::new(),
+            shell: String::new(),
             with: std::collections::BTreeMap::new(),
             env: std::collections::BTreeMap::new(),
         })

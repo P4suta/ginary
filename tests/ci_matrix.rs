@@ -22,7 +22,8 @@ use serde_json::Value;
 
 use crate::common::deps::{Version, rust_version};
 use crate::common::repo::{
-    ToolchainSite, exists, parse_yaml, read, read_opt, read_or_missing, root, rust_toolchain_sites,
+    ToolchainSite, WorkflowStep, exists, parse_yaml, read, read_opt, read_or_missing, root,
+    rust_toolchain_sites, workflow_steps,
 };
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
@@ -262,6 +263,151 @@ fn the_windows_job_asserts_exit_code_propagation() {
     assert!(
         job.contains("halt(3)") || job.contains("ERRORLEVEL") || job.contains("exit-code"),
         "the windows job proves an exit code crosses the launcher, the wine gap from D2:\n{job}"
+    );
+}
+
+/// The Windows job's exit-code probe.
+///
+/// The one step in this repository that checks the Windows exit-code contract
+/// end to end: D2 recorded `halt(N)` propagation as a platform fact needing a
+/// real Windows host, and `launch_windows::run` mirrors what `erl.exe` leaves
+/// behind. Looked up by what it does rather than by its name, so renaming the
+/// step keeps the rules and deleting it fails them.
+///
+/// # Panics
+///
+/// If the windows job no longer probes an exit code at all.
+fn exit_code_probe() -> WorkflowStep {
+    workflow_steps(".github/workflows/ci.yml")
+        .into_iter()
+        .find(|step| step.job == "windows" && step.run.contains("halt(3)"))
+        .expect(
+            "the windows job has to keep a step that runs the runtime and reads the code it left: \
+             it is the only end-to-end check of the Windows exit-code contract there is",
+        )
+}
+
+/// Whether one command line starts an `erl` looked up on `PATH`.
+///
+/// Pure and syntactic: a bare program name is one the step hopes the runner
+/// put somewhere it can see, and the runtime this job installed is at
+/// `%INSTALL_DIR_FOR_OTP%\bin\erl.exe` whatever `PATH` holds.
+fn invokes_a_bare_erl(command: &str) -> bool {
+    let command = command.trim_start_matches(['&', ' ']);
+    command.starts_with("erl ") || command.starts_with("erl.exe ")
+}
+
+/// The variable a script captures `$LASTEXITCODE` into, if it captures it.
+///
+/// `$code = $LASTEXITCODE` and nothing else: a probe that reads the automatic
+/// variable twice reads two different moments, and the second is whatever the
+/// line between them left.
+fn captured_variable(script: &str) -> Option<String> {
+    for line in script.lines() {
+        let line = line.trim();
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if right.trim() != "$LASTEXITCODE" {
+            continue;
+        }
+        let name = left.trim();
+        if let Some(bare) = name.strip_prefix('$')
+            && !bare.is_empty()
+            && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && bare != "LASTEXITCODE"
+        {
+            return Some(name.to_owned());
+        }
+    }
+    None
+}
+
+#[test]
+fn the_windows_exit_code_probe_runs_the_erl_the_job_installed() {
+    assert!(
+        invokes_a_bare_erl("erl -noshell -eval \"halt(3)\""),
+        "the scanner has to see the invocation that ran in run 33864729638 as a bare one"
+    );
+    assert!(
+        !invokes_a_bare_erl("& $erl -noshell -eval \"halt(3)\""),
+        "and it has to leave alone an invocation through a path the step resolved"
+    );
+
+    let probe = exit_code_probe();
+    assert_eq!(
+        probe.shell, "pwsh",
+        "{probe} decides what its last line means by naming its shell"
+    );
+    assert!(
+        probe.run.contains("INSTALL_DIR_FOR_OTP"),
+        "{probe} has to run the runtime `setup-beam` installed — the job's own \
+         `INSTALL_DIR_FOR_OTP`, `D:\\a\\_temp\\.setup-beam\\otp` on the runner — rather than \
+         hoping a bare `erl` resolves in a pwsh step:\n{}",
+        probe.run
+    );
+    let bare: Vec<&str> = probe
+        .run
+        .lines()
+        .map(str::trim)
+        .filter(|line| invokes_a_bare_erl(line))
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "{probe} invokes an `erl` off `PATH`: {bare:?}. A probe that cannot find the runtime must \
+         say which path it looked at, not report whatever number a missing program leaves"
+    );
+}
+
+#[test]
+fn the_windows_exit_code_probe_says_so_when_the_runtime_is_missing() {
+    let probe = exit_code_probe();
+    assert!(
+        probe.run.contains("Test-Path"),
+        "{probe} has to look for the runtime before running it, so that an install that moved \
+         is a sentence and not a number:\n{}",
+        probe.run
+    );
+    assert!(
+        probe.run.contains("::error::"),
+        "{probe} has to name what went wrong in a line GitHub renders as an error, both for a \
+         runtime it could not find and for a code it did not expect:\n{}",
+        probe.run
+    );
+}
+
+#[test]
+fn the_windows_exit_code_probe_records_the_code_it_observed() {
+    assert_eq!(
+        captured_variable("& $erl -noshell -eval \"halt(3)\"\n$code = $LASTEXITCODE\n").as_deref(),
+        Some("$code"),
+        "the scanner has to find the capture a probe makes"
+    );
+    assert_eq!(
+        captured_variable("if ($LASTEXITCODE -ne 3) { throw \"got $LASTEXITCODE\" }"),
+        None,
+        "and it has to see the script that failed run 33864729638 as capturing nothing"
+    );
+
+    let probe = exit_code_probe();
+    let captured = captured_variable(&probe.run).unwrap_or_else(|| {
+        panic!(
+            "{probe} has to capture `$LASTEXITCODE` into a variable on the line after the \
+             invocation: the automatic one is whatever the last command left, and every line \
+             between the runtime and the assertion can change it:\n{}",
+            probe.run
+        )
+    });
+    let printed = probe.run.lines().map(str::trim).any(|line| {
+        (line.contains("Write-Host") || line.contains("Write-Output") || line.contains("echo "))
+            && line.contains(&captured)
+            && !line.contains("::error::")
+    });
+    assert!(
+        printed,
+        "{probe} has to print the code it saw — job 100996872499 failed with no Erlang banner, no \
+         message and no number, and 0.54 s of silence is not a report:\n{}",
+        probe.run
     );
 }
 

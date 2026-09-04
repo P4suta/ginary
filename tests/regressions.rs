@@ -432,3 +432,7 @@ mod e13_a_request_the_fixture_could_not_read_was_dropped_in_silence;
 mod e13_the_fixture_server_inherited_its_listeners_non_blocking_mode;
 #[path = "regressions/e13_the_fixture_server_stopped_on_an_error_a_peer_can_cause.rs"]
 mod e13_the_fixture_server_stopped_on_an_error_a_peer_can_cause;
+#[path = "regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs"]
+mod e15_a_pwsh_step_ended_with_the_code_it_asserted;
+#[path = "regressions/e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran.rs"]
+mod e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran;

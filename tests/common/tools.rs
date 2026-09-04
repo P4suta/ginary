@@ -19,6 +19,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::common::bounded::run_bounded;
 
 /// The variable that turns a skip into a failure.
 ///
@@ -246,3 +249,64 @@ pub fn require_actionlint() -> Option<PathBuf> {
 
 /// The program [`require_actionlint`] looks for.
 pub const ACTIONLINT: &str = "actionlint";
+
+/// The PowerShell a `shell: pwsh` step runs under, or a reported skip.
+///
+/// E15's rule is about what PowerShell does with the exit code a step leaves
+/// behind, and the only honest way to state such a rule is to measure it: the
+/// Windows job's exit-code probe asserted `halt(3)` correctly, left `3` in
+/// `$LASTEXITCODE`, and was then failed by the `exit $LASTEXITCODE` GitHub
+/// appends to every `pwsh` step — a shape that fails identically under the
+/// `pwsh` on a Linux machine. See
+/// `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs`.
+///
+/// The probe *runs* the program rather than merely finding it, which
+/// [`require_tools`] would. A name on `PATH` can be a version-manager shim
+/// with no version selected: on the machine E15 was written on,
+/// `~/.local/share/mise/shims/pwsh` is first on `PATH`, exits non-zero and
+/// prints `mise ERROR No version is set for shim: pwsh`. That is not a
+/// PowerShell, and a test that ran it would report a defect in this
+/// repository for a fact about somebody's shims.
+///
+/// There is no escalation under [`REQUIRE_VAR`], for [`require_elf_stripper`]'s
+/// reason: `pwsh` is not part of the toolchain an artifact is built with, and
+/// the hosted runners that have one — `ubuntu-24.04` and `windows-2022` both
+/// ship it — run the measurement without being told to.
+///
+/// The probe runs under [`PWSH_BUDGET`] through
+/// [`run_bounded`](crate::common::bounded::run_bounded), like every other
+/// child this suite starts: a `pwsh` that stops for a prompt — a profile
+/// asking something, a module autoload — would otherwise hang the whole test
+/// binary, and the gate that exists to keep a broken PowerShell from failing
+/// this repository would be the thing that hung it.
+pub fn require_working_pwsh() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH");
+    let Some(pwsh) = ginary::process::find_in_path(PWSH, path_var.as_deref()) else {
+        eprintln!("skipping: {PWSH} not on PATH");
+        return None;
+    };
+    let mut command = std::process::Command::new(&pwsh);
+    command.args(["-NoProfile", "-Command", "exit 0"]);
+    let output = run_bounded(&mut command, PWSH_BUDGET, "the pwsh health check");
+    if output.status.success() {
+        return Some(pwsh);
+    }
+    eprintln!(
+        "skipping: `{} -NoProfile -Command \"exit 0\"` answered {}: {}",
+        pwsh.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    None
+}
+
+/// The program [`require_working_pwsh`] looks for.
+pub const PWSH: &str = "pwsh";
+
+/// How long a `pwsh` this suite starts gets to finish.
+///
+/// Both children are seconds of work — `exit 0`, and a two-line script whose
+/// slowest statement exits 3 — so this is the interpreter's own start-up on a
+/// loaded runner with room to spare, and it is a deadline rather than an
+/// expectation.
+pub const PWSH_BUDGET: Duration = Duration::from_secs(60);
