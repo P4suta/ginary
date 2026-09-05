@@ -72,6 +72,7 @@
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
 | `tests/deps.rs` | the committed dependency record, held to what the development machine's pre-push freshness gate reads (E4): `sha2` requested on the 0.11 line and `Cargo.lock` resolved onto it, one version each of `sha2`, `digest` and `block-buffer` — two `digest` majors are two incompatible `Digest` traits and that is what a half-finished migration looks like — and `sha2` and `hex`, the pair that computes and spells every digest, locked on the minor line their requirement names. Reads `Cargo.toml` and `Cargo.lock` through `tests/common/deps.rs`, a hand-rolled scanner rather than `toml`, because `toml` is behind the `cli` feature and these assertions hold for the stub flavor too |
 | `tests/digest.rs` | SHA-256 is on-disk format, and this is the statement of it (E4): three published vectors — the empty input, `abc`, and one mebibyte of `index % 251` — hashed through `manifest::Index::from_staged` against hard-coded hex, the mebibyte pattern itself pinned so the vector above cannot become a test of nothing, the five committed `hello_ffi` fixture files snapshotted as `path size sha256`, `Packed.sha256` proved to be the digest of the bytes `payload::pack` wrote, and the unpack side recomputing exactly what the index recorded. Every constant was recorded before the 0.11 bump and checked against `sha256sum`, so a future swap of the hashing library that moves one byte fails loudly |
+| `tests/version_consistency.rs` | the three records of a version and what each of them means (E20): `Cargo.toml` holds the version being prepared, `.release-please-manifest.json` holds the *last released* version — `0.0.0` while nothing has been released — and `docs/RELEASE.md` says which of those two states the tree is in. `scripts/ci/version-consistency.sh` is driven over fixture trees in every state through the `GINARY_VERSION_ROOT` seam, so the release gate is held to its contract in the states this checkout is not in, and its three refusals are one snapshot |
 
 `src/process.rs` holds the tests that used to live in `src/doctor.rs`: the
 timeout runner moved there in A1a, because `otp::discover` needs the same
@@ -360,6 +361,16 @@ make true, so it belongs to whichever job installs the thing it is about:
 exactly when a new kind of thing is promised by a different job — and *no* variable is
 warranted when the thing is a property of the platform, because then there is no job that could
 set it honestly.
+
+There is one skip of exactly that platform-property kind, and it has no escalating variable for
+that reason. `tests/regressions/e21_an_unreadable_record_escaped_the_existence_check.rs` needs a
+file its own process cannot read, which root cannot have: the mode bits are advisory to a process
+holding `CAP_DAC_OVERRIDE`, so a suite run as root would drive `VersionRoot::unreadable` over a
+file it can still read and assert the wrong thing. `tests/common/version.rs::files_can_be_made_unreadable`
+measures it rather than assuming it — write a file, clear its bits, try to read it, because
+`geteuid` is a dependency this crate does not have — and the test's own `can_build_the_fixture`
+prints `skipping: this suite is running as a user that can read a file with no permission bits
+set, …` and returns. Nobody can install not being root, so there is nothing a job could promise.
 
 A skipped test must say so. A silent skip is indistinguishable from a passing test and is treated
 as a defect.
@@ -1526,15 +1537,50 @@ assertion.
 `tests/common/` already holds `tools.rs`, `fake_otp.rs`, `snapshot.rs`, `script.rs`,
 `fixture.rs`, `erl.rs`, `bounded.rs`, `payload.rs`, `artifact.rs`, `built.rs`, `project.rs`,
 `cachefs.rs`, `repack.rs`, `stubfile.rs`, `http.rs`, `catalog.rs`, `native.rs`, `macho.rs`,
-`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs`, `portability.rs`, `homepath.rs`
-and `srcscan.rs`, described above. The last two are E7's, and both are pure scanners meant to be
-reused: `homepath.rs` finds a person's absolute home path — `/home/<name>` or `/Users/<name>` —
-in a file that has to run anywhere, reading each file in its own comment syntax (`//` opens one
-in Rust and `#` opens an attribute; `#` opens one in YAML, TOML and shell; anything else is read
-as code throughout) and exempting the fictional accounts this suite's own unit tests spell.
-`srcscan.rs` holds the two scanners for defects only another platform can see: `calls_with`,
-which finds a call to a named function that names the host in its arguments, and
-`literal_sites`, which finds a literal in code rather than in prose. Still to come:
+`coverage.rs`, `repo.rs`, `deps.rs`, `digest.rs`, `shipment.rs`, `portability.rs`, `homepath.rs`,
+`srcscan.rs`, `version.rs`, `mise.rs` and `nightly.rs`, described above. `homepath.rs` and
+`srcscan.rs` are E7's, and both are pure scanners meant to be reused: `homepath.rs` finds a
+person's absolute home path — `/home/<name>` or `/Users/<name>` — in a file that has to run
+anywhere, reading each file
+in its own comment syntax (`//` opens one in Rust and `#` opens an attribute; `#` opens one in
+YAML, TOML and shell; anything else is read as code throughout) and exempting the fictional
+accounts this suite's own unit tests spell. `srcscan.rs` holds the two scanners for defects only
+another platform can see: `calls_with`, which finds a call to a named function that names the
+host in its arguments, and `literal_sites`, which finds a literal in code rather than in prose.
+
+`version.rs` and `mise.rs` are E20's, and both are readers of a record no other target reads.
+`version.rs` is the one place the suite reads the three records of a version from —
+`cargo_version`, `manifest_version`, `last_released_version` (`None` while the manifest records
+`0.0.0`) and `nothing_has_been_released`, which reads `docs/RELEASE.md` for the sentence
+`No release has been cut yet.` because no committed file can derive whether a tag exists. It also
+holds the two changelog scanners, stated over the shape release-please's own
+`versionHeaderRegex` uses rather than over one spelling of one version, and `VersionRoot`, a
+`tempfile` tree carrying just a `Cargo.toml` and a manifest so
+`scripts/ci/version-consistency.sh` can be driven in every release state through the
+`GINARY_VERSION_ROOT` seam. That variable exists for the suite and for nothing else: a workflow
+that sets it makes the release gate prove a tag against some other tree, which is the check
+passing while not running, and a regression test asserts that no workflow mentions it.
+
+`mise.rs` reads one task out of `mise.toml` — a hand-rolled scanner rather than the `toml` crate,
+for the reason `deps.rs` gives: `toml` is behind the `cli` feature and these assertions hold for
+the stub flavor too. Its grammar is the one `mise.toml` is written in and nothing wider: a
+`[tasks."name"]` or `[tasks.name]` header, a `description = "..."` line, and a `run` that is a
+single string, a `'''` or `"""` block, or an array of strings. **Anything else is not read**,
+which is a stated limit rather than half a TOML parser — a task written in a form it does not
+cover reads as an empty one, so a contributor adding a task keeps to those four. It also holds
+`cleaner_violations`, the rule `mise run clean:cache` is held to, stated over a task so that the
+shell this repository does *not* carry can be handed to it as well.
+
+`nightly.rs` is E21's, and it reads `.github/workflows/nightly.yml` as the two plans it runs.
+`FuzzPlan` reduces a caller of the fuzz targets — the workflow's `fuzz` job, or `mise.toml`'s
+`fuzz` task — to the targets it names, the directories it creates before the first
+`cargo fuzz run`, the directories it passes and the libFuzzer flags after the `--`, so the two
+can be compared and a precondition one satisfies and the other does not stops being invisible.
+`MutantsPlan` reads the mutation matrix as one `MutantsShard` per row — module, `--shard i/n`,
+`--timeout` — and `measured_mutants` parses `tests/fixtures/nightly/mutants-measured.json`, the
+measured record the budget is argued from. A gate that cannot finish inside its own
+`timeout-minutes` is not a gate, and holding the configured side against the measured one is how
+that is checked here rather than in a `cancelled` job nobody reads. Still to come:
 
 - **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
   artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache
@@ -1579,7 +1625,8 @@ Planned test categories:
   side, and it is there so that a test can assert that a failed build leaves neither a work
   directory nor a half-written artifact. `FAULT_POINTS` in `src/fault.rs` is the list both this
   document and `debugging.md` are held against by unit test, so the three cannot drift apart.
-- **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job.
+- **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job; see
+  [what the nightly mutation pass covers](#what-the-nightly-mutation-pass-covers).
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table
   above and `tests/regressions/README.md`.
@@ -1593,7 +1640,7 @@ are all installed on the current development machine, and each has a mise task:
 |---|---|---|
 | `mise run deny` | `cargo deny check` | advisories, bans, licences, sources; part of `mise run check` |
 | `mise run cov` | `cargo llvm-cov ... --lcov --output-path target/lcov.info`, then a summary | gated at 90% lines |
-| `mise run mutants` | `cargo mutants` | copies the tree; not `--in-place`; sharded in CI later |
+| `mise run mutants` | `cargo mutants` | copies the tree; not `--in-place`; the nightly job shards it, see below |
 | `mise run test:nextest` | `cargo nextest run` | nextest does not run doc tests, so it is not a replacement for `mise run test` |
 | `mise run fuzz:build` | `cargo +nightly fuzz build` | builds the four targets; nightly, and outside the gate |
 | `mise run fuzz` | each target for 30 s, in turn | nightly; see the fuzzing section |
@@ -1611,9 +1658,120 @@ with `No version is set for shim: cargo-insta`; pin it, or call the binary under
 dependency and needs none of that: `cargo test` compares snapshots and writes `.snap.new` beside
 a mismatch, and only reviewing them wants the subcommand.
 
+### What the nightly mutation pass covers
+
+The `mutants` job in `.github/workflows/nightly.yml` is a *divided* pass, and a divided pass
+proves something narrower than "every mutant of this crate is caught". What it is, exactly:
+
+**It covers** every mutant `cargo-mutants` generates for the seven modules the matrix names —
+`appfile`, `cache`, `closure`, `launch`, `payload`, `trailer` and `verify` — with the
+`fault-injection` feature on. Each module is divided with `--shard i/n` and **every** shard of
+every division is a matrix row, so the division makes each job smaller and takes nothing out of
+the pass. `tests/regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs` fails if
+a shard of a division is ever missing.
+
+**It does not cover** any other module of the crate: `src/main.rs`, `src/lib.rs`, `src/cli.rs`,
+`src/download.rs` and the rest are not mutated by CI at all. It does not cover a mutant whose
+suite run exceeds `--timeout 420`, which is reported as a timeout rather than as caught. It proves
+nothing about a build the `fault-injection` feature is off in. And **it cannot catch a mutant of
+code the runner does not compile**: a `#[cfg(windows)]` body mutated on a Linux runner changes
+nothing the tests can run, so it survives whatever the suite asserts. The shards run on
+`ubuntu-24.04`, so every Windows-only body is in that position — which is a reason to keep such
+bodies to the thinnest possible delegation and to put the logic in a function both platforms
+compile. `src/trailer.rs`'s `ReadAt` seam is what that looks like: three lines per platform, one
+loop tested everywhere.
+
+**It does not cover the worst case of its own budget.** `--timeout 420` caps what *one* mutant
+may spend, not what a shard may: the largest shard holds 35 mutants, so a shard in which every
+mutant hangs costs about four hours against `timeout-minutes: 150` and is cancelled exactly as
+before. The pass is bounded in expectation — 35 mutants at the measured 210 seconds each is about
+127 minutes — and not in the worst case, and the regression test that checks the budget multiplies
+by the measured average, so it cannot see that tail. Bounding it would mean either a `--timeout`
+small enough that shard size times timeout fits the budget (about 257 seconds, which is 1.5 times
+the measured test time and would start reporting slow mutants as timeouts) or roughly twice as
+many shards. Neither is paid for by a failure anybody has seen; a shard cancelled for this reason
+is the signal to pay for one.
+
+**The budget is measured, not guessed.** `tests/fixtures/nightly/mutants-measured.json` records
+what one mutant costs and how many each module produces, read off nightly run
+[33969332537](https://github.com/P4suta/ginary/actions/runs/33969332537); its `README.md` derives
+every number, including why the figure is that run's 210 seconds a mutant rather than the 107 the
+one small shard that finished averaged. `tests/ci_matrix.rs` and the regression above hold the
+job's `timeout-minutes` against that record, so a shard that could not finish is a failing test
+here rather than a `cancelled` job nobody reads. **Re-measure the record when the suite's runtime
+changes materially** — a pass sized from a stale measurement is the same cancelled job with a
+newer date.
+
+Before E21 the job took whole modules against `timeout-minutes: 90`, which was five to twelve
+hours of work each: six of the seven shards of run 33969332537 were cancelled at the cap or lost
+to a runner shutdown, and a cancelled job neither passes nor fails. A gate that cannot finish is
+not a gate.
+
 `proptest` is a dev dependency too. Its failure-persistence file for an integration test lands at
 `tests/<target>.proptest-regressions`; a file that records a real counterexample is committed with
 the fix it belongs to.
 
 `cross` is the one tool from the plan's list that is *not* installed; cross-compilation is not
 exercised locally.
+
+## Reclaiming disk space
+
+The suite is expensive on disk. A full run plus `cov`, `mutants` and the fuzz targets leaves
+tens of gigabytes under `target/`, and one directory does most of it: `target/debug/incremental`
+reached 25 GB during E19 and filled the machine. `mise run clean:cache` is the way back:
+
+| task | command | notes |
+|---|---|---|
+| `mise run clean:cache` | removes `fuzz/target`, `mutants.out`, `target/cross`, `target/debug`, `target/llvm-cov-target`, `target/nextest` and `target/release` | keeps `target/stubs` and `dist/otp`; prints what it reclaimed |
+
+Everything it removes is regenerable by a plain `cargo`, `cargo llvm-cov` or `cargo mutants` run.
+What it keeps is what is not:
+
+- **`target/stubs`** — the five cross-built launcher stubs from `mise run stubs:build`. Each one
+  costs `cross`, a docker daemon and minutes of container time, and `tests/e2e_cross.rs`,
+  `tests/e2e_native.rs` and the smoke matrix skip without them.
+- **`dist/otp`** — the committed catalog and the runtime tarballs `mise run otp:repack` produces,
+  roughly 130 MB of downloads and a repack.
+
+Between them they are about 165 MB against the 26 GB the task reclaims, and losing them turns a
+disk-space chore into an afternoon. That is also why the task never runs `cargo clean`, which
+would empty the whole of `target/`, `target/stubs` included.
+
+The task **refuses rather than guesses** where it is. `MISE_PROJECT_ROOT` is set by `mise` and by
+nothing else, so a run block extracted and run by hand — which is how a disk chore actually gets
+done once the disk is full — would fall back to `$PWD`; seven `rm -rf` on relative paths would
+then take the caller's own `target/debug`. So it checks for a `Cargo.toml` beside a `mise.toml`
+naming this crate before it changes into the root, and exits non-zero saying which directory it
+declined to clean when it finds anything else.
+
+The rule the task is held to lives in `tests/common/mise.rs` as `cleaner_violations`: every
+removal is a literal path relative to the project root, none of them is or contains a kept tree,
+every verb the shell uses is in a small reviewed allowlist — so a deletion written as
+`find … -delete`, `xargs rm` or `cargo clean` fails the rule until somebody adds the verb and says
+why — the `cd` runs before the first removal and names the root itself rather than a directory
+inside it, and the root is checked before anything is removed. Both the verb list and the removal
+list are read per *command*, splitting each line at the shell's unquoted `|`, `&` and `;`, so
+neither a `find` nor an `rm` hidden after an `&&`, an `||` or a `;` goes unread; a separator inside
+quotes is text, and `>&2` stays part of the redirection it belongs to.
+
+Two refinements from E21, both about a guard that could be walked around. A **command
+substitution is read as commands wherever it appears**, quoted or not, in both its spellings:
+bash runs `$( … )` and `` ` … ` `` before the quoting is applied — the quotes go round the
+substitution's *output* — so `echo "$(rm -rf target/stubs)"` deletes a tree while reading, to a
+scanner that stopped at the quote, as one `echo` with one text argument. Its opening and closing
+are segment boundaries and the quoting outside it does not reach in. The two exceptions are a
+substitution inside `'…'`, which bash does not run, and `$(( … ))`, which is arithmetic and runs
+no command at all: that is stepped over whole, by parenthesis depth, because the committed
+cleaner's own `$(( (before - after) / 1024 ))` nests one. And **every word is normalised once**,
+by `words_of`, which both the verb allowlist and the removal list read through: bash strips the
+quotes round a command word before it looks the word up, so `rm`, `'rm'` and `"rm"` are one word
+to both. Two readers of one grammar that disagreed about what a word is were how
+`'rm' -rf target/stubs` passed every rule; see
+`tests/regressions/e21_a_quoted_command_substitution_hid_a_removal.rs` and
+`tests/regressions/e21_a_quoted_verb_walked_around_the_cleaner_guard.rs`.
+`tests/ci_matrix.rs` asks it about the committed task and snapshots the plan;
+`tests/regressions/e20_a_removal_the_cleaner_rule_could_not_see.rs` asks it about the shell this
+repository does not carry, and
+`tests/regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs` runs the block itself
+over a throwaway tree. This section is pinned by
+`the_cache_cleaner_is_documented_beside_the_other_tasks`.

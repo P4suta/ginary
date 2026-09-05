@@ -124,10 +124,27 @@ tool, the seven stubs, and the OTP catalog tarballs — shares a single version,
 launcher only reads the payload format its own build writes. A stub from `0.1.0` and a payload
 from `0.2.0` is exactly the mismatch the version lock exists to prevent.
 
-That single number lives in `Cargo.toml`. `.release-please-manifest.json` mirrors it, and a
-release tag has to equal it. `scripts/ci/version-consistency.sh` is the check that proves it, and
-`distribute.yml` runs that check before it builds or uploads anything: a tag of `v0.1.0` against
-a `Cargo.toml` of `0.1.0` passes, and any drift fails the release, naming both sides.
+That single number lives in `Cargo.toml`, and a release tag has to equal it.
+
+`.release-please-manifest.json` is **not** a second copy of it. release-please reads that file as
+the **last released version** and derives the next proposal from it, so before the first release
+the two records legitimately differ: the manifest records `0.0.0` — release-please's own spelling
+of "this package has never been released" — while `Cargo.toml` carries the version being prepared.
+Recording anything else there asserts a release that was made, and a manifest of `0.1.0` for a
+repository with no tag is what made release-please propose `0.2.0` for a project that had released
+nothing (`docs/dev/log/E20.md`). From the first release onward release-please writes `Cargo.toml`
+and the manifest in one commit, and the two hold one version between them.
+
+`scripts/ci/version-consistency.sh` is the check that proves all three agree, and `distribute.yml`
+runs it before it builds or uploads anything: a tag of `v0.1.0` against a `Cargo.toml` of `0.1.0`
+and a manifest recording `0.1.0` passes. A tag cut while the manifest still records `0.0.0` fails —
+that is a hand-cut tag, because release-please writes the version into the manifest before it
+creates the tag — and so does any other drift, naming both sides.
+
+`release-please-config.json` states the first version this repository will release,
+`"initial-version": "0.1.0"`. `release-type: rust` independently starts a never-released package at
+`0.1.0`, so the key does not change today's answer; it says in the file release-please reads what
+the strategy does silently, and the two cannot drift apart unnoticed.
 
 ## The three steps
 
@@ -136,12 +153,21 @@ a `Cargo.toml` of `0.1.0` passes, and any drift fails the release, naming both s
 `release.yml` runs `release-please` on every push to `main`, authenticated with the App token from
 the one-time setup above. It reads the Conventional Commits since the last release and maintains a
 **release pull request** that bumps the version in `Cargo.toml` and
-`.release-please-manifest.json` and rewrites the `[Unreleased]` section of `CHANGELOG.md` into a
-dated release section.
+`.release-please-manifest.json` and writes a dated release section into `CHANGELOG.md`, built out
+of those commit messages.
 
-For `v0.1.0`, review that pull request: confirm the version is `0.1.0`, that the changelog reads
-correctly, and that `Cargo.toml` and the manifest agree. Merging it is a deliberate act — the
-version bump and the changelog are a human decision, not an automatic one.
+**Where that section lands, and what it does not touch.** release-please's changelog updater
+searches the file for its own `\n###? v?[0-9[]` and splices the generated section in immediately
+above the first line that matches. In this changelog that line is `## [Unreleased]` — the `[` is
+inside that character class — so the new section is inserted **above the `## [Unreleased]`
+heading** and everything under `[Unreleased]` is left exactly where it was. It is not rewritten,
+moved or consumed. (`src/updaters/changelog.ts`, quoted in `docs/dev/log/E20.md`.)
+
+For `v0.1.0`, review that pull request: confirm the version is `0.1.0`, that `Cargo.toml` and the
+manifest agree, that the generated section reads correctly — and **clear the `[Unreleased]`
+section by hand** in the same pull request, because the work it describes is the work being
+released and release-please will not move it. Merging is a deliberate act: the version bump and
+the changelog are a human decision, not an automatic one.
 
 ### 2. The draft release is created
 
@@ -154,7 +180,8 @@ release is visible only to maintainers, and its assets do not exist until distri
 Publishing the draft release triggers `distribute.yml`, which mirrors a strict
 verify-then-publish discipline:
 
-1. `version-consistency.sh` proves the tag equals `Cargo.toml`.
+1. `version-consistency.sh` proves the tag, `Cargo.toml` and `.release-please-manifest.json` name
+   one release.
 2. The build matrix produces, for all seven targets, the full `ginary` binary and the
    launcher-only `ginary-stub`: the four Linux targets via `cross`, the two macOS targets built
    natively on `macos-15-intel` and `macos-14`, and `windows-x86_64` on `windows-2022`. `ginary otp

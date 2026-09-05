@@ -28,8 +28,10 @@ pub mod homepath;
 pub mod hostpath;
 pub mod http;
 pub mod macho;
+pub mod mise;
 #[cfg(feature = "cli")]
 pub mod native;
+pub mod nightly;
 pub mod payload;
 pub mod portability;
 pub mod project;
@@ -42,3 +44,4 @@ pub mod snapshot;
 pub mod srcscan;
 pub mod stubfile;
 pub mod tools;
+pub mod version;
