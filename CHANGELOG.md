@@ -6,6 +6,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/P4suta/ginary/compare/v0.1.0...v0.2.0) (2026-09-05)
+
+
+### Features
+
+* **appfile,otp:** Erlang .app term parser, OTP root discovery, test builders (A1a) ([449e8c3](https://github.com/P4suta/ginary/commit/449e8c39ef9e167b8a4d1b2a4f2954e5f952b459))
+* **assemble:** stage the runtime root with boot validation and file listing (A1c) ([a8c65b7](https://github.com/P4suta/ginary/commit/a8c65b7b49e5f7be285dd0ee1f7a038a9e562700))
+* **build,inspect:** ginary build end-to-end and artifact inspection (A4) ([607bf8c](https://github.com/P4suta/ginary/commit/607bf8cf44772a336c75a401d99bdcc5583d4b7c))
+* **catalog,otp-repack:** local-first OTP catalog and cross-Linux artifacts (C3) ([304025b](https://github.com/P4suta/ginary/commit/304025b2f747e4a4c145ae3638a7312179c6baf8))
+* **closure:** application dependency closure over shipment and OTP lib (A1b) ([3604fb8](https://github.com/P4suta/ginary/commit/3604fb8b64e160f86545bb8e3e72fa160fb48bb5))
+* **launcher:** self-extracting launcher with cache, exec contract, fault injection (A3b) ([572e93d](https://github.com/P4suta/ginary/commit/572e93d43d7598b830678ecc380abfb1fd839791))
+* **macho,sign-macos:** Mach-O section payload container and ad-hoc signing (D3) ([5b35ecf](https://github.com/P4suta/ginary/commit/5b35ecfadde075a7321fc11b2bf28f4ec574fa81))
+* **native:** NIF and native-code reconciliation across targets (C4) ([f02ca5f](https://github.com/P4suta/ginary/commit/f02ca5f158a6e01e9cd8d800a1446769310117be))
+* **runtime-config,cache:** vm_args/sys_config/distribution/env/heart, flock and pruning (B1) ([62a0992](https://github.com/P4suta/ginary/commit/62a0992fec93979b46550319fe25295ec034f01b))
+* scaffold ginary crate with version and doctor commands (A0) ([9dfc5ce](https://github.com/P4suta/ginary/commit/9dfc5cef149e7569a76cc235ff7b4bd9bf134d41))
+* **strip,report:** ELF/BEAM stripping with verification and size report (A2) ([ec79070](https://github.com/P4suta/ginary/commit/ec79070504d0c9daa6ad112b8b621658504a07ec))
+* **stub:** embedded identity marker, cli feature split, stub acquisition (C2) ([b33cddc](https://github.com/P4suta/ginary/commit/b33cddc1997066e5efb2f84fd68f14087a705643))
+* **target,erts-source:** multi-target plumbing with honest provenance (C1) ([526a13d](https://github.com/P4suta/ginary/commit/526a13da802e3696237d0319914943ae50ebcddf))
+* **trailer,manifest,payload,diag:** payload format v1 and event recorder (A3a) ([d73e24f](https://github.com/P4suta/ginary/commit/d73e24f3046bc14ef6a7ca011c1172969eac20be))
+* **verify,doctor,sbom,crashdump,formal:** deep verification and developer tooling (B2) ([8730fe1](https://github.com/P4suta/ginary/commit/8730fe13146d43f23ba55589af3859a0a1a261d4))
+* **windows:** cfg split, resident spawn launcher, windows stub (D2) ([380de43](https://github.com/P4suta/ginary/commit/380de43aac9ac96c7955f073bd944017b8ad20bb))
+
+
+### Bug Fixes
+
+* **cache:** route every removal path through the long-path helper (D2 follow-up) ([df225b4](https://github.com/P4suta/ginary/commit/df225b4bb7cfad27af645d9bce2d98ff2c8b3ddd))
+
 ## [Unreleased]
 
 ## [0.1.0] - 2026-09-02
