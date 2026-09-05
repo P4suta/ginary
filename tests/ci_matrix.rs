@@ -910,6 +910,22 @@ fn an_option_value_is_read_in_both_spellings_and_not_off_a_longer_option() {
         None,
         "`--target-dir` is a different option, and this repository writes both"
     );
+
+    // A separated value that is itself an option is not a value. `--target`
+    // with nothing after it, followed by another flag, means the triple was
+    // never named — and the assurance check over the fuzz job only asks
+    // whether a value is there, so answering `Some("--release")` would let a
+    // `cargo fuzz run --target --release` through as if it had named a triple.
+    assert_eq!(
+        option_value("cargo fuzz run t --target --release", "--target"),
+        None,
+        "an option is not the value of the option before it"
+    );
+    assert_eq!(
+        option_value("cargo fuzz run t --target", "--target"),
+        None,
+        "and neither is the end of the line"
+    );
     assert_eq!(
         option_value(
             "cargo fuzz run t --target 'x86_64-unknown-linux-gnu'",

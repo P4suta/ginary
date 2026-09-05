@@ -205,7 +205,15 @@ pub fn option_value(command: &str, option: &str) -> Option<String> {
             continue;
         };
         if rest.is_empty() {
-            return words.next().map(unquoted);
+            // A separated value that is itself an option is not a value: a
+            // `--target` with a flag after it named no triple, and a caller
+            // that only asks whether a value is there would take the flag for
+            // one. The end of the line answers the same way, for the same
+            // reason.
+            return words
+                .next()
+                .filter(|word| !word.starts_with('-'))
+                .map(unquoted);
         }
         if let Some(value) = rest.strip_prefix('=') {
             return Some(unquoted(value));
