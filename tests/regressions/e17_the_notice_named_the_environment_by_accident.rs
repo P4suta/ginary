@@ -35,19 +35,10 @@
 //! against a notice with the environment name changed — the exact edit the old
 //! assertion could not see.
 
-use crate::common::repo::{WorkflowStep, workflow_steps};
-
-/// The workflow the notice lives in.
-const RELEASE: &str = ".github/workflows/release.yml";
-
-/// The variable the notice names.
-const CLIENT_ID_VAR: &str = "RELEASE_PLEASE_APP_CLIENT_ID";
-
-/// The secret the notice names.
-const PRIVATE_KEY_SECRET: &str = "RELEASE_PLEASE_APP_PRIVATE_KEY";
-
-/// The environment both credentials live in.
-const ENVIRONMENT: &str = "release";
+use crate::common::release::{
+    CLIENT_ID_VAR, ENVIRONMENT, PRIVATE_KEY_SECRET, RELEASE_WORKFLOW as RELEASE, notice_step,
+};
+use crate::common::repo::WorkflowStep;
 
 /// Whether a notice sends a maintainer to the `release` environment.
 ///
@@ -65,32 +56,24 @@ fn names_the_word_release(notice: &str) -> bool {
 
 /// The step that tells a maintainer which credentials are missing.
 ///
-/// Found by the credential names it prints and by not failing — the notice is
-/// green, the half-configured check is red. Selecting it by content is why
-/// every assertion about its *content* has to name something the search did
-/// not.
-fn notice_step() -> WorkflowStep {
-    workflow_steps(RELEASE)
-        .into_iter()
-        .find(|step| {
-            step.run.contains(CLIENT_ID_VAR)
-                && step.run.contains(PRIVATE_KEY_SECRET)
-                && !step
-                    .commands()
-                    .iter()
-                    .any(|command| command.starts_with("exit ") && command != "exit 0")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no step of {RELEASE} names both `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}` \
-                 without failing: there is nothing that could tell a maintainer where to add them"
-            )
-        })
+/// The selector is `crate::common::release`'s: it was written here, copied
+/// into the E5 regression and copied again into `tests/release_workflow.rs`,
+/// and a selector held in four places is four selectors. Found by the
+/// credential names it prints and by not failing — the notice is green, the
+/// half-configured check is red. Selecting it by content is why every
+/// assertion about its *content* has to name something the search did not.
+fn committed_notice() -> WorkflowStep {
+    notice_step(RELEASE).unwrap_or_else(|| {
+        panic!(
+            "no step of {RELEASE} names both `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}` \
+             without failing: there is nothing that could tell a maintainer where to add them"
+        )
+    })
 }
 
 #[test]
 fn the_committed_notice_sends_a_maintainer_to_the_named_environment() {
-    let notice = notice_step();
+    let notice = committed_notice();
     assert!(
         sends_to_the_environment(&notice.run),
         "step {} of `{}` is the notice a repository with no release credentials prints, and it \
@@ -108,7 +91,7 @@ fn a_notice_that_names_another_environment_is_rejected() {
     // The committed notice with one edit: the environment it sends a
     // maintainer to. Everything else about it is untouched, including every
     // occurrence of `release-please`.
-    let flipped = notice_step().run.replace(
+    let flipped = committed_notice().run.replace(
         &format!("Settings -> Environments -> {ENVIRONMENT}"),
         "Settings -> Environments -> staging",
     );

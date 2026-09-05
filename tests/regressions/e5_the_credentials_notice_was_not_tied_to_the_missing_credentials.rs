@@ -43,81 +43,32 @@
 //! against. The guard therefore moved from two job conditions to two step
 //! conditions inside the one job that declares the environment. The bug this
 //! file pins is the same one: a notice whose reachability nothing checks.
+//!
+//! **E18 moved the filter out of this file.** Which steps the guard is about
+//! was decided here and, in the same words, in `tests/release_workflow.rs`;
+//! both copies excused the notice by the *text* of its condition, so both
+//! excused any other step that carried the same text with it. The filter is
+//! now `crate::common::release::steps_that_need_the_credentials`, it takes the
+//! workflow to read, and
+//! `tests/regressions/e18_a_step_that_was_not_the_notice_wore_the_notice_guard.rs`
+//! hands it a workflow it has to fire on. The assertions below are unchanged.
 
-use crate::common::repo::{WorkflowStep, workflow_steps, yaml};
-
-use saphyr::YamlOwned;
-
-/// The workflow the two guards live in.
-const RELEASE: &str = ".github/workflows/release.yml";
-
-/// The variable both guards are ultimately written against.
-const CLIENT_ID_VAR: &str = "RELEASE_PLEASE_APP_CLIENT_ID";
-
-/// The secret the notice also names.
-const PRIVATE_KEY_SECRET: &str = "RELEASE_PLEASE_APP_PRIVATE_KEY";
-
-/// The guard the steps that need the credentials carry.
-const CONFIGURED: &str = "steps.credentials.outputs.state == 'configured'";
-
-/// The guard the notice carries.
-const ABSENT: &str = "steps.credentials.outputs.state == 'absent'";
-
-/// The id of the job that runs `release-please`.
-fn release_please_job() -> String {
-    let parsed = yaml(RELEASE);
-    let jobs = parsed
-        .as_mapping_get("jobs")
-        .and_then(YamlOwned::as_mapping)
-        .unwrap_or_else(|| panic!("{RELEASE} declares no jobs"));
-    for (key, job) in jobs {
-        let Some(steps) = job.as_mapping_get("steps").and_then(YamlOwned::as_vec) else {
-            continue;
-        };
-        if steps.iter().any(|step| {
-            step.as_mapping_get("uses")
-                .and_then(YamlOwned::as_str)
-                .is_some_and(|uses| uses.contains("release-please-action"))
-        }) {
-            return key.as_str().unwrap_or_default().to_owned();
-        }
-    }
-    panic!("no job of {RELEASE} runs googleapis/release-please-action");
-}
-
-/// The step that tells a maintainer which credentials are missing.
-///
-/// Two steps name both credentials, because there are two states to report:
-/// the environment holds neither, which is a notice and a green run, and it
-/// holds the variable without the secret, which is a failure. The notice is
-/// the one that does not exit non-zero. Selecting it by content is safe here
-/// in a way it was not before: every assertion below reads a guard and none
-/// reads a step's text, so no assertion can be satisfied by the search that
-/// found the step.
-fn notice_step() -> WorkflowStep {
-    workflow_steps(RELEASE)
-        .into_iter()
-        .find(|step| {
-            step.run.contains(CLIENT_ID_VAR)
-                && step.run.contains(PRIVATE_KEY_SECRET)
-                && !step
-                    .commands()
-                    .iter()
-                    .any(|command| command.starts_with("exit ") && command != "exit 0")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "no step of {RELEASE} names both `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}` \
-                 without failing: there is nothing that could tell a maintainer what to add when \
-                 the credentials are absent"
-            )
-        })
-}
+use crate::common::release::{
+    ABSENT, CLIENT_ID_VAR, CONFIGURED, PRIVATE_KEY_SECRET, RELEASE_WORKFLOW as RELEASE,
+    credentials_job, notice_step, steps_that_need_the_credentials,
+};
 
 #[test]
 fn the_notice_runs_exactly_when_the_release_steps_do_not() {
-    let release_job = release_please_job();
-    let notice = notice_step();
+    let release_job = credentials_job(RELEASE)
+        .unwrap_or_else(|| panic!("no job of {RELEASE} reads what the release environment holds"));
+    let notice = notice_step(RELEASE).unwrap_or_else(|| {
+        panic!(
+            "no step of {RELEASE} names both `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}` \
+             without failing: there is nothing that could tell a maintainer what to add when \
+             the credentials are absent"
+        )
+    });
 
     // Every step of the job but the two that are the guard itself: the check
     // at position one, which computes the answer, and the notice, which runs
@@ -125,18 +76,13 @@ fn the_notice_runs_exactly_when_the_release_steps_do_not() {
     // here — which is what this rule used to carry — excuses a `run:` step
     // that reads the private key out of its own `env:` and calls the API, and
     // that step needs the guard exactly as much as the App-token step does.
-    let guards: Vec<(usize, String)> = workflow_steps(RELEASE)
+    //
+    // The filter is `crate::common::release`'s rather than this file's, and
+    // takes the workflow to read, so that it can be shown a workflow that
+    // breaks it: see
+    // `tests/regressions/e18_a_step_that_was_not_the_notice_wore_the_notice_guard.rs`.
+    let guards: Vec<(usize, String)> = steps_that_need_the_credentials(RELEASE)
         .into_iter()
-        .filter(|step| step.job == release_job)
-        .filter(|step| step.position != 1 && !step.cond.contains(ABSENT))
-        .filter(|step| {
-            !step.uses.is_empty()
-                || [&step.run, &step.cond]
-                    .into_iter()
-                    .chain(step.env.values())
-                    .chain(step.with.values())
-                    .any(|text| text.contains(CLIENT_ID_VAR) || text.contains(PRIVATE_KEY_SECRET))
-        })
         .map(|step| (step.position, step.cond))
         .collect();
     assert!(

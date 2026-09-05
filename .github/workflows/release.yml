@@ -105,10 +105,13 @@ jobs:
             3. Add RELEASE_PLEASE_APP_PRIVATE_KEY, set to the App's private key, under
                Settings -> Environments -> release -> Environment secrets.
 
-          Both belong to the release environment rather than to repository scope. The
-          environment admits only the main branch and the v* tags, so neither value is
-          reachable from a pull request, from a fork, or from any other branch; a
-          repository-scope secret is readable by every workflow run there is.
+          Both belong to the release environment rather than to repository scope, which
+          applies two restrictions repository scope does not. An environment's values
+          reach a job only when that job declares the environment, so a job that does
+          not name it is handed nothing; and they are released only on a ref the
+          environment's deployment-branch policy admits, which here is the main branch
+          and the v* tags and nothing else. Neither value is therefore reachable from a
+          pull request, from a fork, or from any other branch.
 
           The default GITHUB_TOKEN is deliberately not an alternative: this repository
           sets can_approve_pull_request_reviews to false, so GitHub Actions may not

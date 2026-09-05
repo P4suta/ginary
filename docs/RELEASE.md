@@ -25,14 +25,42 @@ is missing and exits 0. The Release workflow is green and says why it did nothin
 red for a credential nobody in the tree can add.
 
 Both values live in the **`release` environment** of the repository rather than at repository
-scope, and that is the point of the setup rather than a detail of it. A value held at repository
-scope is readable by every workflow run the repository has — including a run on a pull request,
-and a run on a branch anyone with write access pushed. An environment carries a
-deployment-branch policy, and this one admits the `main` branch and the `v*` tags and nothing
-else, so the App's private key is unreachable from a pull request, from a fork, and from every
-other branch. GitHub enforces that from the other side too: an environment's variables and
-secrets reach a job **only when the job declares that environment**, so no other job of any other
-workflow can read them by accident.
+scope, and that is the point of the setup rather than a detail of it. An environment applies two
+restrictions repository scope does not. Its variables and secrets reach a job **only when the job
+declares that environment**, so a job that does not name it is handed nothing at all; and they
+are released only on a ref the environment's own protection rules admit, which here is a
+deployment-branch policy of the `main` branch and the `v*` tags and nothing else. The App's
+private key is therefore unreachable from a pull request, from a fork, and from every other
+branch. A value at repository scope carries neither restriction: no job has to ask for it, and no
+branch policy stands in front of it.
+
+What the environment does **not** do is make the release job the only reader. Declaring an
+environment is not a privilege GitHub hands to one job: any job of any workflow in this repository
+may write `environment: release`, and on a ref the branch policy admits it is handed the same
+client id and the same private key. A second reader is one line of YAML away, and nothing on
+GitHub's side says no.
+
+What says no is two of this repository's own tests, both in `tests/release_workflow.rs`, and it is
+worth being exact about which half each one covers — a control credited with more than it does is
+the same mistake as crediting the platform with it:
+
+- `no_job_of_any_workflow_reads_the_release_credentials_without_declaring_the_environment` walks
+  every scalar of every workflow for either credential name and requires each site it finds to sit
+  in a job that declares the environment. That bounds **where** a credential may be read, not how
+  many jobs read it: a second job that declares the environment and reads the private key
+  satisfies it. It is pinned by
+  `tests/regressions/e17_the_release_credentials_were_read_outside_their_environment.rs`.
+- `exactly_one_job_of_this_repository_declares_the_release_environment` is the half that bounds
+  the **number**. It collects every job of every workflow whose `environment:` is `release` — the
+  jobs GitHub hands the values to, whether or not they name a credential — and requires there to
+  be exactly one.
+  `tests/regressions/e18_nothing_bounded_the_number_of_jobs_that_may_read_the_credentials.rs` pins
+  it, against a fixture workflow that holds a second declaring job.
+
+Together they make a second reader a red suite in a pull request a human reviews — a real control,
+and ours rather than the platform's, which is why it is written down here: delete both tests and
+nothing outside this repository objects. A later milestone that needs a second environment-bound
+job should give it an environment of its own rather than widening that list.
 
 A maintainer with admin rights on `P4suta/ginary` does this once:
 

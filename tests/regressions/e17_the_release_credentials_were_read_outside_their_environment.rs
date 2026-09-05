@@ -42,47 +42,23 @@
 //! would quietly get the empty string. It now walks every scalar of every
 //! workflow, and holds that walk against the file text so that a node kind it
 //! cannot reach fails loudly instead of passing.
+//!
+//! **E18 moved the vocabulary out of this file.** The two credential names,
+//! the environment, the walk that finds every site and the reader that says
+//! which environment a job declares were written here and copied into
+//! `tests/release_workflow.rs`; they are now
+//! [`crate::common::release`]'s, and the assertions below are the ones that
+//! were here.
 
-use crate::common::repo::{
-    NameSite, name_sites, read, workflow_jobs, yaml_files_under, yaml_text_occurrences,
+use crate::common::release::{
+    CLIENT_ID_VAR, ENVIRONMENT, PRIVATE_KEY_SECRET, RELEASE_WORKFLOW as RELEASE,
+    committed_workflows, credential_occurrences, credential_sites, job_environment,
 };
-
-/// The workflow the credentials are read in.
-const RELEASE: &str = ".github/workflows/release.yml";
-
-/// The variable holding the App's client id.
-const CLIENT_ID_VAR: &str = "RELEASE_PLEASE_APP_CLIENT_ID";
-
-/// The secret holding the App's private key.
-const PRIVATE_KEY_SECRET: &str = "RELEASE_PLEASE_APP_PRIVATE_KEY";
-
-/// The environment that holds both.
-const ENVIRONMENT: &str = "release";
-
-/// Every place any workflow of this repository writes either credential.
-fn credential_sites() -> Vec<NameSite> {
-    let mut out = Vec::new();
-    for workflow in yaml_files_under(".github/workflows") {
-        for credential in [CLIENT_ID_VAR, PRIVATE_KEY_SECRET] {
-            out.extend(name_sites(&workflow, credential));
-        }
-    }
-    out
-}
-
-/// The environment one job of one workflow declares, or `<none>`.
-fn job_environment(workflow: &str, id: &str) -> String {
-    workflow_jobs(workflow)
-        .into_iter()
-        .find(|job| job.id == id)
-        .map(|job| job.environment)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "<none>".to_owned())
-}
+use crate::common::repo::workflow_jobs;
 
 #[test]
 fn every_job_that_names_a_release_credential_declares_the_environment_holding_it() {
-    let sites = credential_sites();
+    let sites = credential_sites(&committed_workflows());
     assert!(
         !sites.is_empty(),
         "no workflow of this repository names `{CLIENT_ID_VAR}` or `{PRIVATE_KEY_SECRET}`, so \
@@ -106,7 +82,7 @@ fn every_job_that_names_a_release_credential_declares_the_environment_holding_it
             job_environment(&site.workflow, &site.job),
             ENVIRONMENT,
             "{}: job `{}` reads a credential that lives in the `{ENVIRONMENT}` environment, at \
-             `{}`, but declares `environment: {}`. Outside that declaration both \
+             `{}`, and the environment its job declares is `{}`. Outside that declaration both \
              `vars.{CLIENT_ID_VAR}` and `secrets.{PRIVATE_KEY_SECRET}` expand to the empty string \
              however the environment is filled, which is a green run that says the repository is \
              unconfigured when it is not. Every site: {sites:#?}",
@@ -120,14 +96,9 @@ fn every_job_that_names_a_release_credential_declares_the_environment_holding_it
 
 #[test]
 fn the_scan_behind_that_rule_reaches_every_occurrence_there_is() {
-    for workflow in yaml_files_under(".github/workflows") {
-        let text = read(&workflow);
-        for credential in [CLIENT_ID_VAR, PRIVATE_KEY_SECRET] {
-            let written = yaml_text_occurrences(&text, credential);
-            let found: usize = name_sites(&workflow, credential)
-                .iter()
-                .map(|site| site.count)
-                .sum();
+    for workflow in committed_workflows() {
+        for count in credential_occurrences(&workflow) {
+            let (credential, written, found) = (count.credential, count.written, count.found);
             assert_eq!(
                 found, written,
                 "{workflow} writes `{credential}` {written} times outside a whole-line comment \

@@ -24,10 +24,13 @@ use std::collections::BTreeMap;
 
 use saphyr::YamlOwned;
 
-use crate::common::repo::{
-    NameSite, WorkflowStep, name_sites, read, workflow_jobs, workflow_steps, yaml,
-    yaml_files_under, yaml_text_occurrences,
+use crate::common::release::{
+    ABSENT, CHECK_STEP_ID, CLIENT_ID_VAR, CONFIGURED, ENVIRONMENT, PRIVATE_KEY_SECRET,
+    RELEASE_WORKFLOW as RELEASE, committed_workflows, credential_occurrences, credential_sites,
+    credentials_job, job_environment, jobs_declaring_the_environment, notice_step,
+    steps_that_need_the_credentials,
 };
+use crate::common::repo::{WorkflowStep, read, workflow_jobs, workflow_steps, yaml};
 
 // ------------------------------------------------------- release.yml --
 
@@ -153,9 +156,6 @@ fn distribute_runs_the_version_consistency_check() {
 
 // ------------------------------------------------ the release credentials --
 
-/// The workflow this section is about.
-const RELEASE: &str = ".github/workflows/release.yml";
-
 /// The action that mints a repository-scoped installation token.
 const APP_TOKEN_ACTION: &str = "actions/create-github-app-token";
 
@@ -167,31 +167,8 @@ const APP_TOKEN_ACTION: &str = "actions/create-github-app-token";
 /// left behind.
 const APP_TOKEN_SHA: &str = "bcd2ba49218906704ab6c1aa796996da409d3eb1";
 
-/// The variable holding the App's client id.
-const CLIENT_ID_VAR: &str = "RELEASE_PLEASE_APP_CLIENT_ID";
-
-/// The secret holding the App's private key.
-const PRIVATE_KEY_SECRET: &str = "RELEASE_PLEASE_APP_PRIVATE_KEY";
-
 /// The repository the App has to be installed on.
 const REPOSITORY: &str = "P4suta/ginary";
-
-/// The GitHub Environment both credentials live in.
-///
-/// E17 moved them off repository scope. The environment's deployment-branch
-/// policy admits exactly the `main` branch and the `v*` tags, so neither value
-/// is reachable from a pull-request run, from a fork, or from any other
-/// branch — which repository scope cannot say.
-const ENVIRONMENT: &str = "release";
-
-/// The id of the step that reads what the environment holds.
-const CHECK_STEP_ID: &str = "credentials";
-
-/// The expression every later step of the release job is guarded by.
-const CONFIGURED: &str = "steps.credentials.outputs.state == 'configured'";
-
-/// The expression the missing-credentials notice is guarded by.
-const ABSENT: &str = "steps.credentials.outputs.state == 'absent'";
 
 /// The job id of the step that runs `release-please`.
 fn release_please_job() -> String {
@@ -221,58 +198,6 @@ fn steps_of(job: &str) -> Vec<WorkflowStep> {
         .into_iter()
         .filter(|step| step.job == job)
         .collect()
-}
-
-/// Every place any workflow of this repository writes either credential.
-///
-/// Not `release.yml` alone, and not a fixed list of node kinds. A credential
-/// reaches a job through more than its `run:` blocks — the `client-id:` input
-/// is a `with:` value, the check reads its secret through `env:`, a guard is
-/// an `if:` — and it reaches a *different* workflow just as easily, where it
-/// would expand to the empty string and leave that run green. Both halves of
-/// the narrowing are how E17's first scan let three node kinds and six
-/// workflows through; [`name_sites`] walks the whole parsed document, and
-/// `every_occurrence_of_a_release_credential_is_accounted_for` holds the walk
-/// against the file text so a node kind it cannot reach fails loudly.
-fn credential_sites() -> Vec<NameSite> {
-    let mut out = Vec::new();
-    for workflow in yaml_files_under(".github/workflows") {
-        for credential in [CLIENT_ID_VAR, PRIVATE_KEY_SECRET] {
-            out.extend(name_sites(&workflow, credential));
-        }
-    }
-    out
-}
-
-/// The environment one job of one workflow declares, or `<no environment:>`.
-fn job_environment(workflow: &str, id: &str) -> String {
-    workflow_jobs(workflow)
-        .into_iter()
-        .find(|job| job.id == id)
-        .map(|job| job.environment)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "<no environment:>".to_owned())
-}
-
-/// The step that tells a maintainer which credentials are missing.
-///
-/// Two steps of `release.yml` name both credentials, because there are two
-/// states to report: the environment holds neither, which is a notice and a
-/// green run, and it holds the variable without the secret, which is a
-/// failure. They are told apart by what they do rather than by which job they
-/// sit in — since E17 both sit in the one job that declares the environment,
-/// as neither can read the values from anywhere else. What the notice *says*
-/// is not read here; only which guard it carries, because the assertions
-/// about it are about that guard.
-fn notice_step() -> Option<WorkflowStep> {
-    workflow_steps(RELEASE).into_iter().find(|step| {
-        step.run.contains(CLIENT_ID_VAR)
-            && step.run.contains(PRIVATE_KEY_SECRET)
-            && !step
-                .commands()
-                .iter()
-                .any(|command| command.starts_with("exit ") && command != "exit 0")
-    })
 }
 
 /// Whether one job of `release.yml` is excused from failing.
@@ -420,8 +345,31 @@ fn the_credential_using_job_declares_the_release_environment() {
 }
 
 #[test]
+fn exactly_one_job_of_this_repository_declares_the_release_environment() {
+    let declaring: Vec<String> = jobs_declaring_the_environment(&committed_workflows())
+        .into_iter()
+        .map(|job| format!("{}: {}", job.workflow, job.id))
+        .collect();
+    assert_eq!(
+        declaring,
+        vec![format!("{RELEASE}: release-please")],
+        "the `{ENVIRONMENT}` environment holds `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}`, and \
+         every job that declares it is handed both on every ref the deployment-branch policy \
+         admits. Declaring it is not a privilege GitHub hands to one job — any job of any \
+         workflow may write `environment: {ENVIRONMENT}` and be handed the same two values — so \
+         the bound on how many do is this repository's own, and this is it. \
+         `no_job_of_any_workflow_reads_the_release_credentials_without_declaring_the_environment` \
+         is the other half and does not cover this one: it requires a job that *names* a \
+         credential to declare the environment, which a second declaring job does. If a later \
+         milestone needs a second environment-bound job, give it an environment of its own rather \
+         than widening this list; `docs/RELEASE.md` says so under `## One-time setup` and cites \
+         this test by name"
+    );
+}
+
+#[test]
 fn no_job_of_any_workflow_reads_the_release_credentials_without_declaring_the_environment() {
-    let sites = credential_sites();
+    let sites = credential_sites(&committed_workflows());
     assert!(
         !sites.is_empty(),
         "no workflow of this repository names either credential, so nothing authenticates and \
@@ -454,14 +402,9 @@ fn no_job_of_any_workflow_reads_the_release_credentials_without_declaring_the_en
 
 #[test]
 fn every_occurrence_of_a_release_credential_is_accounted_for() {
-    for workflow in yaml_files_under(".github/workflows") {
-        let text = read(&workflow);
-        for credential in [CLIENT_ID_VAR, PRIVATE_KEY_SECRET] {
-            let written = yaml_text_occurrences(&text, credential);
-            let found: usize = name_sites(&workflow, credential)
-                .iter()
-                .map(|site| site.count)
-                .sum();
+    for workflow in committed_workflows() {
+        for count in credential_occurrences(&workflow) {
+            let (credential, written, found) = (count.credential, count.written, count.found);
             assert_eq!(
                 found, written,
                 "{workflow} writes `{credential}` {written} times outside a whole-line comment, \
@@ -543,28 +486,31 @@ fn the_credentials_check_is_the_first_step_and_publishes_what_it_found() {
 
 #[test]
 fn every_step_that_needs_the_credentials_is_gated_on_the_check() {
-    let job = release_please_job();
-    let steps = steps_of(&job);
-    // Every step but the two that are the guard itself: the check at position
-    // one, which computes the answer and so cannot be guarded on it, and the
-    // notice, which runs on the complement. Everything else in this job either
-    // uses an action, and needs the credentials to be there, or names a
-    // credential in a `run:`, an `env:` or a `with:` of its own — a `run:`
-    // step that reads the private key out of its `env:` and calls the API
-    // needs the guard exactly as much as the App-token step does, and the
-    // `!uses.is_empty()` filter this rule used to carry excused it.
-    let guarded: Vec<&WorkflowStep> = steps
-        .iter()
-        .filter(|step| step.position != 1 && !step.cond.contains(ABSENT))
-        .filter(|step| {
-            !step.uses.is_empty()
-                || [&step.run, &step.cond]
-                    .into_iter()
-                    .chain(step.env.values())
-                    .chain(step.with.values())
-                    .any(|text| text.contains(CLIENT_ID_VAR) || text.contains(PRIVATE_KEY_SECRET))
-        })
-        .collect();
+    // The job the rule actually scanned, which is the job holding the
+    // credentials check rather than the job running release-please. Naming the
+    // second here would report a job the scan need not have looked at, and
+    // would panic before the credential rule was ever evaluated if the
+    // release-please step moved — the exact coupling the helper's own doc
+    // gives as the reason it finds the job by the check.
+    let job = credentials_job(RELEASE)
+        .unwrap_or_else(|| panic!("no job of {RELEASE} reads what the release environment holds"));
+    // Every step of every job that can be handed the credentials, but the two
+    // that are the guard itself: the check, which computes the answer and so
+    // cannot be guarded on it, and the notice, which runs on the complement.
+    // Everything else either uses an action, and needs the credentials to be
+    // there, or names a credential in a `run:`, an `env:` or a `with:` of its
+    // own — a `run:` step that reads the private key out of its `env:` and
+    // calls the API needs the guard exactly as much as the App-token step
+    // does, and the `!uses.is_empty()` filter this rule used to carry excused
+    // it.
+    //
+    // The filter itself is `crate::common::release`'s, and not this file's,
+    // because it was written here and copied into the E5 regression, and the
+    // copy that was wrong was wrong in both. See
+    // `tests/regressions/e18_a_step_that_was_not_the_notice_wore_the_notice_guard.rs`
+    // and
+    // `tests/regressions/e18_a_credential_reading_step_outside_the_check_job_was_not_scanned.rs`.
+    let guarded = steps_that_need_the_credentials(RELEASE);
     assert!(
         !guarded.is_empty(),
         "job `{job}` uses no action at all, so there is nothing for the credentials to be for"
@@ -632,7 +578,7 @@ fn the_release_workflow_only_runs_on_refs_the_environment_admits() {
 
 #[test]
 fn a_repository_without_the_credentials_is_told_what_to_add_and_the_job_stays_green() {
-    let step = notice_step().unwrap_or_else(|| {
+    let step = notice_step(RELEASE).unwrap_or_else(|| {
         panic!(
             "no step of {RELEASE} names both `{CLIENT_ID_VAR}` and `{PRIVATE_KEY_SECRET}` \
              without failing. A repository whose `{ENVIRONMENT}` environment holds no \
@@ -682,7 +628,7 @@ fn a_repository_without_the_credentials_is_told_what_to_add_and_the_job_stays_gr
 
 #[test]
 fn the_notice_sends_a_maintainer_to_the_environment_and_not_to_repository_scope() {
-    let step = notice_step()
+    let step = notice_step(RELEASE)
         .unwrap_or_else(|| panic!("no step of {RELEASE} prints the missing-credentials notice"));
     // The needle is the whole click-path down to the environment's own name,
     // and not the name on its own: `notice_step` finds this step by the text
@@ -719,7 +665,7 @@ fn the_notice_sends_a_maintainer_to_the_environment_and_not_to_repository_scope(
 
 #[test]
 fn the_missing_credentials_notice_is_the_committed_record() {
-    let rendered = notice_step().map_or_else(
+    let rendered = notice_step(RELEASE).map_or_else(
         || format!("(no step of {RELEASE} names both credentials)"),
         |step| step.run.trim_end().to_owned(),
     );
@@ -791,7 +737,7 @@ fn a_half_configured_repository_is_told_which_credential_is_missing() {
 
 #[test]
 fn the_notice_script_exits_zero_under_the_shell_that_runs_it() {
-    let Some(step) = notice_step() else {
+    let Some(step) = notice_step(RELEASE) else {
         panic!("no step of {RELEASE} names both credentials");
     };
     // GitHub runs a `run:` block on Linux as `bash -e -o pipefail {0}`, so the
@@ -866,10 +812,10 @@ fn the_release_document_sends_the_credentials_to_the_environment() {
     for wrong in ["repository variable", "repository secret"] {
         assert!(
             !document.contains(wrong),
-            "docs/RELEASE.md still tells a maintainer to add a `{wrong}`. Repository scope is \
-             readable from every workflow run this repository has, including one on a pull \
-             request; the `{ENVIRONMENT}` environment's branch policy is what makes both values \
-             unreachable from anything but `main` and a `v*` tag"
+            "docs/RELEASE.md still tells a maintainer to add a `{wrong}`. A value at repository \
+             scope is handed to a job that declared nothing, with no branch policy in front of \
+             it; the `{ENVIRONMENT}` environment's values reach only a job that declares that \
+             environment, and only on `main` or a `v*` tag"
         );
     }
     // The section, and not the rest of the document behind it. `## The three

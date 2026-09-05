@@ -971,8 +971,21 @@ halves of the rule.
 
 ## Fixture policy
 
-Two kinds of fixture live under `tests/fixtures/`: `.app` files that a parser reads, and whole
-Gleam projects that a toolchain builds.
+Three kinds of fixture live under `tests/fixtures/`: `.app` files that a parser reads, whole
+Gleam projects that a toolchain builds, and — since E18 — workflows that exist to make a
+repository-reading rule fire.
+
+### `tests/fixtures/release/` — the workflows a rule has to report
+
+A rule that can only read the file it was written for has one piece of evidence that it works: it
+has never fired, which is also what a rule that *cannot* fire produces. So the rules about the
+release credentials in `tests/common/release.rs` take a workflow path, or a list of them, and this
+directory holds the workflows that break them: one with a step that wears the missing-credentials
+notice's guard while reading the private key, one with a second job that declares the release
+environment. Nothing here is run and nothing here is a workflow of this repository — the files
+live outside `.github/`, where the repository-wide scans and actionlint do not reach them — and
+each is adversarial in one named way that the test reading it asserts is still true before it
+asserts anything else. `tests/fixtures/release/README.md` is the list.
 
 ### `tests/fixtures/hello_ffi/` — the zero-dependency project
 
@@ -1166,7 +1179,8 @@ one front-matter entry that is legitimately unpacked.
 `tests/smoke_matrix.rs` and `tests/deps.rs` have no fixture: the repository is the fixture. All
 six read committed paths through `tests/common/repo.rs`, which is the one place that resolution
 lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free reader for
-`Cargo.toml` and `Cargo.lock`:
+`Cargo.toml` and `Cargo.lock`, and `tests/release_workflow.rs` adds `tests/common/release.rs`,
+described after them:
 
 - `root()` — the directory holding `Cargo.toml`, from `CARGO_MANIFEST_DIR`, so a test finds the
   same file whatever directory the run started in.
@@ -1266,6 +1280,17 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   holds every long flag found against the binary's own `--help`.
 - `yaml_files_under(dir)` / `shell_scripts_under(dir)` — every `.yml`/`.yaml`, and every `.sh`,
   under a directory, recursively and sorted, so a failure names the same file on every machine.
+
+`tests/common/release.rs` is the vocabulary of one subject rather than a reader: the two release
+credential names, the environment holding them, the two guard expressions, the selector that finds
+the missing-credentials notice, the walk that finds every site a credential is written at, and the
+two rules — which steps have to carry the guard, and which jobs may declare the environment.
+`tests/release_workflow.rs`, the E5 regression, both E17 regressions and the three E18 ones read
+it; before E18 each carried its own copy, and the rule this module exists for was wrong in two of
+them at once. Every rule in it takes the workflow path, or the list of paths, to read. That is not
+generality for its own sake: it is what lets a regression hand the rule a workflow that breaks it,
+which is the only evidence a repository-reading rule can offer that it is capable of firing at
+all. `tests/fixtures/release/` holds those workflows.
 
 `tests/common/digest.rs` is the other helper E4 added, and it is not a repository reader at all
 — it is the fixture half of `tests/digest.rs`. It holds the three published SHA-256 vectors (the

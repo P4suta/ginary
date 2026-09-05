@@ -452,3 +452,14 @@ mod e17_a_step_that_never_runs_read_as_one_that_always_does;
 mod e17_the_notice_named_the_environment_by_accident;
 #[path = "regressions/e17_the_release_credentials_were_read_outside_their_environment.rs"]
 mod e17_the_release_credentials_were_read_outside_their_environment;
+
+#[path = "regressions/e18_a_credential_reading_step_outside_the_check_job_was_not_scanned.rs"]
+mod e18_a_credential_reading_step_outside_the_check_job_was_not_scanned;
+#[path = "regressions/e18_a_step_that_was_not_the_notice_wore_the_notice_guard.rs"]
+mod e18_a_step_that_was_not_the_notice_wore_the_notice_guard;
+#[path = "regressions/e18_nothing_bounded_the_number_of_jobs_that_may_read_the_credentials.rs"]
+mod e18_nothing_bounded_the_number_of_jobs_that_may_read_the_credentials;
+#[path = "regressions/e18_the_environment_was_credited_with_keeping_other_jobs_out.rs"]
+mod e18_the_environment_was_credited_with_keeping_other_jobs_out;
+#[path = "regressions/e18_the_notice_overclaimed_what_repository_scope_exposes.rs"]
+mod e18_the_notice_overclaimed_what_repository_scope_exposes;
