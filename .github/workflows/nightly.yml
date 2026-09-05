@@ -42,7 +42,7 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cargo-mutants@27.1.0
       # A missed or timed-out mutant fails the shard: the caught-percentage gate
@@ -66,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cargo-fuzz@0.13.2
       # 30 seconds per target, seeded from the committed corpus; a crash is a
@@ -95,7 +95,7 @@ jobs:
         with:
           otp-version: "29.0.5"
           gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cross@0.2.5
       # Pinned to a manifest digest, as in ci.yml's `smoke-matrix` job and for
