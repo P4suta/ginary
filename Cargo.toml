@@ -2,7 +2,7 @@
 [package]
 name = "ginary"
 description = "Package a Gleam application and a trimmed BEAM runtime into one executable"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/P4suta/ginary"
