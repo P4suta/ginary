@@ -446,3 +446,9 @@ mod e16_a_cached_windows_runtime_was_read_by_the_elf_reader;
 mod e16_a_glibc_only_assertion_ran_under_a_linux_gate;
 #[path = "regressions/e16_a_glibc_only_expectation_was_asserted_on_any_elf_host.rs"]
 mod e16_a_glibc_only_expectation_was_asserted_on_any_elf_host;
+#[path = "regressions/e17_a_step_that_never_runs_read_as_one_that_always_does.rs"]
+mod e17_a_step_that_never_runs_read_as_one_that_always_does;
+#[path = "regressions/e17_the_notice_named_the_environment_by_accident.rs"]
+mod e17_the_notice_named_the_environment_by_accident;
+#[path = "regressions/e17_the_release_credentials_were_read_outside_their_environment.rs"]
+mod e17_the_release_credentials_were_read_outside_their_environment;

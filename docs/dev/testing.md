@@ -1192,8 +1192,9 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs` is the bug that bought this helper,
   and it holds every `.github` record to it through `yaml_files_under(".github")`.
 - `workflow_steps(path)` — every step of every job of one workflow, in file order, as
-  `WorkflowStep { workflow, job, position, name, run, uses, shell, with, env }`: the job id it
-  belongs to, its 1-based position within that job, its `name:` (or its `uses:`), its `run:`
+  `WorkflowStep { workflow, job, position, id, name, cond, run, uses, shell, with, env }`: the job
+  id it belongs to, its 1-based position within that job, its `id:` and its `if:` as written, its
+  `name:` (or its `uses:`), its `run:`
   script, and the job's `env:` overlaid with the step's own. `step.commands()` is that script as
   one command per line with backslash continuations joined and shell comments removed through
   `shell_code`, because a command wrapped for width is still one command, a cosmetic reflow must
@@ -1206,7 +1207,18 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   `pwsh -command ". '<file>'"` with `if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit
   $LASTEXITCODE }` appended, so a step that ends while `$LASTEXITCODE` is non-zero fails whatever
   its own assertions concluded — and `$LASTEXITCODE` in a `shell: bash` step is not a variable at
-  all. Neither rule can be written from the script alone.
+  all. Neither rule can be written from the script alone. E17 added `id` and `cond`, because a
+  guard that has to read a value a job's own `if:` cannot see — anything a GitHub Environment
+  holds — cannot live on the job: it becomes a first step that publishes what it found and an
+  `if:` on every step that needs it, so `steps.<id>.outputs.<name>` and the step conditions are
+  the only place the shape of the workflow is still written down. A non-string `if:` is rendered
+  rather than dropped (`if: false` reads as `"false"`), or the one step that never runs would
+  report itself as the one step that always does.
+- `workflow_steps_of(label, parsed)` / `workflow_jobs_of(label, parsed)` — the same two readers
+  over an already-parsed document instead of a committed path, so a rule about the *reader* can
+  be held against a workflow written in the test. `tests/regressions/e17_a_step_that_never_runs_read_as_one_that_always_does.rs`
+  is what they are for: a workflow whose only purpose is to be misread is not one `.github/`
+  should carry, and GitHub would try to run it.
 - `composite_action_steps(path)` — the same `WorkflowStep`s for a composite action's `runs.steps`,
   with `<composite>` as the job id, because a composite action has none: it borrows whichever job
   used it. E15 bought it. A composite action's steps carry a `shell:` of their own and are wrapped
@@ -1218,12 +1230,30 @@ lives — `tests/deps.rs` adds `tests/common/deps.rs`, its own feature-free read
   a job name, so a grep would answer a question nobody asked. E4 bought it, because every job
   had quietly pinned the MSRV and CI had therefore never once built this crate on stable.
 - `workflow_jobs(path)` — every job of one workflow as
-  `WorkflowJob { workflow, id, needs, env, commands, uses }`, with `runs(needle)` and
-  `uses_action(needle)` over the last two. `workflow_steps` merges the job's `env:` into each
+  `WorkflowJob { workflow, id, cond, environment, needs, env, commands, uses }`, with
+  `runs(needle)` and `uses_action(needle)` over the last two. `workflow_steps` merges the job's
+  `env:` into each
   step, which answers "what does this command run under"; two questions are about the job
   itself — what it `needs:`, and whether *the job* declares a variable — and neither survives
   that flattening. E6 bought it: the rule that a job may set `GINARY_REQUIRE_STUBS` exactly when
-  it obtains the stubs is a statement about jobs.
+  it obtains the stubs is a statement about jobs. E17 added `cond` and `environment`. The second
+  is the load-bearing one of that milestone: a job's `vars` and `secrets` contexts carry an
+  environment's values **only when the job declares that environment**, so which environment a
+  job names decides what its expressions expand to, and a job that names none reads the empty
+  string however the environment is filled. `environment_name` collapses both spellings GitHub
+  accepts — the scalar `environment: release` and the mapping
+  `environment: {name: release, url: ...}` — to the name, and a job that declares none to the
+  empty string, which no environment can be called.
+- `name_sites(path, needle)` / `yaml_text_occurrences(text, needle)` — every place one workflow
+  writes a string, as `NameSite { workflow, job, path, count }`, and the same count taken off the
+  file text outside whole-line comments. The first walks *every* scalar and mapping key of the
+  parsed document — a workflow-level `env:`, a job's `container.env`, a reusable call's `with:`
+  or `secrets:` — with `job` empty for a site that belongs to no job, and `path` the dotted route
+  to it (`jobs.release-please.steps[0].env.PRIVATE_KEY`). The second is its cross-check: a rule is
+  only as wide as the scan behind it, so the two counts are asserted equal and a node kind the
+  walk cannot reach fails loudly instead of passing. E17 bought both, twice over — its first scan
+  enumerated four node kinds and read one workflow, and the bug it was written for is one with no
+  symptom a green run could show.
 - `parse_ginary_command(line)` / `ginary_invocations(path)` — one shell command line, and every
   ginary invocation in one committed file, as
   `GinaryInvocation { source, site, line, path, long_flags }`. `path` is the subcommand path
