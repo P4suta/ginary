@@ -29,10 +29,19 @@ scope, and that is the point of the setup rather than a detail of it. An environ
 restrictions repository scope does not. Its variables and secrets reach a job **only when the job
 declares that environment**, so a job that does not name it is handed nothing at all; and they
 are released only on a ref the environment's own protection rules admit, which here is a
-deployment-branch policy of the `main` branch and the `v*` tags and nothing else. The App's
-private key is therefore unreachable from a pull request, from a fork, and from every other
-branch. A value at repository scope carries neither restriction: no job has to ask for it, and no
-branch policy stands in front of it.
+deployment-branch policy of the `main` branch and the `v*` tags and nothing else. A value at
+repository scope carries neither restriction: no job has to ask for it, and no branch policy
+stands in front of it.
+
+That policy is only as strong as the bypass beside it. GitHub lets a repository administrator
+force a waiting job past an environment's protection rules by default, and a job released that
+way is handed the environment's secrets like any other. The `release` environment of this
+repository therefore has **Allow administrators to bypass configured protection rules turned
+off** (`can_admins_bypass: false`), which is what lets the claim be made without a qualifier: the
+App's private key is unreachable from a pull request, from a fork, and from every branch that is
+not `main`. Turn that setting back on and the claim stops being true, so it is part of the setup
+rather than a preference — a repository restoring this environment from these notes has to set
+it.
 
 What the environment does **not** do is make the release job the only reader. Declaring an
 environment is not a privilege GitHub hands to one job: any job of any workflow in this repository

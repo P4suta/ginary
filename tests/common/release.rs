@@ -184,8 +184,21 @@ pub fn notice_step(workflow: &str) -> Option<WorkflowStep> {
             && !step
                 .commands()
                 .iter()
-                .any(|command| command.starts_with("exit ") && command != "exit 0")
+                .any(|command| fails_the_step(command))
     })
+}
+
+/// Whether one command of a `run:` script fails the step it belongs to.
+///
+/// Every `run:` in these workflows is a `bash -e` script, so a step fails when
+/// any command in it does — not only when it says `exit`. `false` is the shape
+/// that matters here: it returns non-zero, it is the idiom a refusal is written
+/// with, and it never mentions an exit code. Reading only `exit` mistook such a
+/// step for the green notice, which then excused it by position and silenced
+/// the scan for every reader after it.
+fn fails_the_step(command: &str) -> bool {
+    let command = command.trim();
+    command == "false" || (command.starts_with("exit ") && command != "exit 0")
 }
 
 /// Whether one step writes either credential name anywhere of its own.
