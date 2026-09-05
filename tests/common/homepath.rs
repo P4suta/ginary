@@ -38,7 +38,9 @@
 
 use std::path::PathBuf;
 
+use crate::common::bounded::run_bounded;
 use crate::common::repo::root;
+use crate::common::tools::{LS_FILES_BUDGET, git_command, require_git_work_tree};
 
 /// The directories whose tracked files must never name a person's home.
 ///
@@ -186,16 +188,24 @@ fn home_roots(line: &[u8]) -> Vec<(usize, &'static str)> {
 /// the tree.
 ///
 /// `None` when `git` cannot answer at all — no `git` on `PATH`, or a source
-/// tree unpacked from a tarball — which is a reported skip and never a quiet
-/// fallback to the directory read.
+/// tree unpacked from a tarball, or the copy of the tree `cargo mutants`
+/// builds in — which is a reported skip and never a quiet fallback to the
+/// directory read. Which of those it was, and how loudly it is reported, is
+/// [`require_git_work_tree`]'s single answer rather than a third copy of it.
 pub fn tracked_code_files() -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root())
-        .args(["ls-files", "-z", "--"])
-        .args(CODE_ROOTS)
-        .output()
-        .ok()?;
+    let tools = require_git_work_tree(&root())?;
+    // Through `git_command` and under a deadline, like every other child this
+    // suite starts: an inherited `GIT_DIR` would list another repository's
+    // files, and a `git` waiting on something would hang the test binary.
+    let output = run_bounded(
+        git_command(tools.path("git"))
+            .arg("-C")
+            .arg(root())
+            .args(["ls-files", "-z", "--"])
+            .args(CODE_ROOTS),
+        LS_FILES_BUDGET,
+        "git ls-files",
+    );
     if !output.status.success() {
         return None;
     }

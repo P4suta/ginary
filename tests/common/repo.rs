@@ -177,6 +177,53 @@ fn end_of_quote(bytes: &[u8], start: usize, quote: u8) -> usize {
     bytes.len()
 }
 
+/// The value a shell command line gives an option, or `None` when the line
+/// does not carry it.
+///
+/// `--opt value` and `--opt=value` both answer, because both are what a
+/// workflow author writes and a rule that read only one of them would report
+/// a correct command as a missing flag. A longer option that merely starts
+/// with the same letters is not it: `--target-dir target/cross/x` gives
+/// `--target` nothing, which matters here because this repository's cross
+/// builds write both on the same line.
+///
+/// A surrounding pair of single or double quotes is stripped from the value,
+/// so `--target 'x86_64-unknown-linux-gnu'` and the bare spelling answer
+/// alike.
+///
+/// The stated limit: the line is split on whitespace, so a quoted value that
+/// *contains* a space is read as the word up to the space. No committed
+/// workflow passes one, and half a shell lexer would be worse than a limit
+/// written down — [`shell_code`] already draws the same line for comments.
+///
+/// Intended for one command at a time, as [`WorkflowStep::commands`] yields
+/// them: continuations joined and comments already gone.
+pub fn option_value(command: &str, option: &str) -> Option<String> {
+    let mut words = command.split_whitespace();
+    while let Some(word) = words.next() {
+        let Some(rest) = word.strip_prefix(option) else {
+            continue;
+        };
+        if rest.is_empty() {
+            return words.next().map(unquoted);
+        }
+        if let Some(value) = rest.strip_prefix('=') {
+            return Some(unquoted(value));
+        }
+    }
+    None
+}
+
+/// One shell word with a surrounding pair of quotes removed.
+fn unquoted(word: &str) -> String {
+    for quote in ['\'', '"'] {
+        if word.len() >= 2 && word.starts_with(quote) && word.ends_with(quote) {
+            return word[1..word.len() - 1].to_owned();
+        }
+    }
+    word.to_owned()
+}
+
 /// The recursive half of [`yaml_files_under`] and [`shell_scripts_under`].
 fn collect_files(
     directory: &std::path::Path,
@@ -599,6 +646,25 @@ pub struct WorkflowJob {
     pub environment: String,
     /// The jobs this one waits on, in file order. Empty when it waits on none.
     pub needs: Vec<String>,
+    /// The runner labels the job asks for, in file order.
+    ///
+    /// Which runner a job is assigned decides which triple its builds are
+    /// *native* for, so a rule that pins a `--target` cannot be written
+    /// without it: `x86_64-unknown-linux-gnu` is the runner's own triple on
+    /// `ubuntu-24.04` and a cross build with no `rustup target add` behind it
+    /// on `ubuntu-24.04-arm`. A search of the file for the label cannot answer
+    /// it either, because every job of a workflow is in the same file and
+    /// `ubuntu-24.04` is a prefix of `ubuntu-24.04-arm`. See
+    /// `tests/regressions/e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs`.
+    ///
+    /// All three spellings collapse to the labels: the scalar `runs-on:
+    /// ubuntu-24.04`, the sequence `runs-on: [self-hosted, linux]` and the
+    /// mapping `runs-on: {group: g, labels: [..]}`, whose `labels` are the
+    /// labels and whose `group` is not one. An expression — `runs-on: ${{
+    /// matrix.runner }}` — is kept as written, because a job that names its
+    /// runner indirectly has to read as one that named no label rather than as
+    /// one that named `ubuntu-24.04`.
+    pub runs_on: Vec<String>,
     /// The job-level `env:` mapping, string pairs only.
     pub env: BTreeMap<String, String>,
     /// Every `run:` block of every step of the job, in file order, with `\`
@@ -674,6 +740,7 @@ pub fn workflow_jobs_of(label: &str, parsed: &YamlOwned) -> Vec<WorkflowJob> {
             cond: condition(job.as_mapping_get("if")),
             environment: environment_name(job.as_mapping_get("environment")),
             needs: string_list(job.as_mapping_get("needs")),
+            runs_on: runner_labels(job.as_mapping_get("runs-on")),
             env: env_map(job.as_mapping_get("env")),
             commands,
             uses,
@@ -846,6 +913,18 @@ fn environment_name(node: Option<&YamlOwned>) -> String {
             .or_else(|| value.as_mapping_get("name").and_then(YamlOwned::as_str))
             .unwrap_or_default()
             .to_owned(),
+    }
+}
+
+/// The labels one `runs-on:` node asks for, in file order.
+///
+/// The mapping spelling is the only one that is not a [`string_list`]: its
+/// `labels` are the labels and its `group` is a pool name rather than one, so
+/// reading the whole mapping would report a group as a runner image.
+fn runner_labels(node: Option<&YamlOwned>) -> Vec<String> {
+    match node {
+        Some(node) if node.as_mapping().is_some() => string_list(node.as_mapping_get("labels")),
+        other => string_list(other),
     }
 }
 

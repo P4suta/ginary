@@ -58,7 +58,9 @@
 
 use std::path::PathBuf;
 
+use crate::common::bounded::run_bounded;
 use crate::common::repo::root;
+use crate::common::tools::{LS_FILES_BUDGET, git_command, require_git_work_tree};
 
 /// One mention of the unix-only standard library, and whether a gate covers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,14 +208,23 @@ pub struct TrackedSources {
 /// leaves files under `tests/fixtures/` that belong to nobody's tree.
 ///
 /// `None` when `git` cannot answer, which the caller reports as a skip rather
-/// than quietly falling back to a different question.
+/// than quietly falling back to a different question. "Cannot answer" is
+/// [`require_git_work_tree`]'s question rather than this function's own: a
+/// `git` that is not installed and a directory that is not a checkout are two
+/// different reasons, they are reported differently, and they were answered
+/// separately in three places until E19 gave them one gate.
 pub fn tracked_test_sources() -> Option<TrackedSources> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root())
-        .args(["ls-files", "-z", "--", "tests"])
-        .output()
-        .ok()?;
+    let tools = require_git_work_tree(&root())?;
+    // Through `git_command` and under a deadline, for the reason
+    // `homepath::tracked_code_files` gives.
+    let output = run_bounded(
+        git_command(tools.path("git"))
+            .arg("-C")
+            .arg(root())
+            .args(["ls-files", "-z", "--", "tests"]),
+        LS_FILES_BUDGET,
+        "git ls-files",
+    );
     if !output.status.success() {
         return None;
     }

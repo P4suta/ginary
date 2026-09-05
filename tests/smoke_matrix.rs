@@ -17,10 +17,10 @@
 mod common;
 
 use std::path::PathBuf;
-use std::process::Command;
 
+use crate::common::bounded::run_bounded;
 use crate::common::repo::shell_code;
-use crate::common::tools::require_tools;
+use crate::common::tools::{LS_FILES_BUDGET, git_command, require_git_work_tree};
 
 /// The repository root.
 fn root() -> PathBuf {
@@ -160,20 +160,53 @@ fn the_two_tasks_that_produce_the_matrixs_inputs_exist() {
 
 // ------------------------------------------------------ the catalogue --
 
+/// Whether this repository ignores a path, asked of a `git` that is inside its
+/// work tree.
+///
+/// `git check-ignore -q` answers with its exit status: `0` ignored, `1` not
+/// ignored, and anything else an error. Reading "not zero" as "not ignored"
+/// is what made every mutation-testing shard of the Nightly workflow fail —
+/// outside a work tree `git` exits `128` for every path, so every question
+/// answered "not ignored". The gate above is why that cannot happen here; this
+/// match is why an error would be reported rather than counted as an answer.
+///
+/// # Panics
+///
+/// If `git` cannot be run, or answers with any status but `0` or `1`.
+fn ignored_by_git(git: &std::path::Path, relative: &str) -> bool {
+    // Through `git_command` and under a deadline, like every other child this
+    // suite starts: `-q` writes nothing, so an inherited `GIT_DIR` would make
+    // this answer about another repository in silence, and a `git` waiting on
+    // something would hang the test binary rather than fail it.
+    let status = run_bounded(
+        git_command(git)
+            .current_dir(root())
+            .args(["check-ignore", "-q", relative]),
+        LS_FILES_BUDGET,
+        "git check-ignore",
+    )
+    .status;
+    match status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!(
+            "`git check-ignore -q {relative}` answered {other:?} rather than 0 (ignored) or 1 \
+             (not ignored), so it has no answer about this repository and neither has this test"
+        ),
+    }
+}
+
 #[test]
 fn the_catalog_is_committed_and_the_tarballs_beside_it_are_not() {
-    let Some(tools) = require_tools(&["git"]) else {
+    // A question about what *this repository* ignores, so it needs a checkout
+    // rather than merely a `git`: `cargo mutants` runs this suite in a copy of
+    // the tree that carries no `.git`. See
+    // `tests/regressions/e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree.rs`.
+    let Some(tools) = require_git_work_tree(&root()) else {
         return;
     };
 
-    let ignored = |relative: &str| -> bool {
-        Command::new(tools.path("git"))
-            .current_dir(root())
-            .args(["check-ignore", "-q", relative])
-            .status()
-            .expect("run git check-ignore")
-            .success()
-    };
+    let ignored = |relative: &str| -> bool { ignored_by_git(tools.path("git"), relative) };
 
     assert!(
         !ignored("dist/otp/catalog.json"),
