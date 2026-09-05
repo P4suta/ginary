@@ -347,8 +347,28 @@ pub struct WorkflowStep {
     pub job: String,
     /// The step's position within its job, counting from one.
     pub position: usize,
+    /// The step's `id:`, empty for a step that does not carry one.
+    ///
+    /// A step's id is the only handle a later step has on what it decided:
+    /// `steps.<id>.outputs.<name>`. A rule about one step gating another
+    /// cannot be written without it.
+    pub id: String,
     /// The step's `name:`, or its `uses:`, or `<a run step>`.
     pub name: String,
+    /// The step's `if:` as written, empty for a step that always runs.
+    ///
+    /// A guard that has to read a value the job's own `if:` cannot see —
+    /// anything an environment holds — has to live on the step instead, so
+    /// which steps a workflow runs is no longer answerable from the job
+    /// conditions alone. See
+    /// `tests/regressions/e17_the_release_credentials_were_read_outside_their_environment.rs`.
+    ///
+    /// A non-string condition is rendered rather than dropped: `if: false` is
+    /// a YAML boolean, and reading it as "no condition" would report the one
+    /// step that never runs as the one that always does. See
+    /// [`condition`] and
+    /// `tests/regressions/e17_a_step_that_never_runs_read_as_one_that_always_does.rs`.
+    pub cond: String,
     /// The step's `run:` script, empty for a step that only `uses:` an action.
     pub run: String,
     /// The step's `uses:`, empty for a step that only `run:`s a script.
@@ -424,7 +444,18 @@ impl std::fmt::Display for WorkflowStep {
 /// If the file is not there or is not valid YAML: a workflow GitHub cannot
 /// parse is a workflow that never runs.
 pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
-    let parsed = yaml(relative);
+    workflow_steps_of(relative, &yaml(relative))
+}
+
+/// Every step of every job of one already-parsed workflow, in file order.
+///
+/// [`workflow_steps`] is this over a committed file. The split exists so that
+/// a rule about the *reader* can be tested against a workflow written in the
+/// test — `if: false` on a step, a job with no `steps:` — without committing
+/// a workflow to `.github/` that GitHub would then try to run. `label` is the
+/// name each step reports itself under.
+pub fn workflow_steps_of(label: &str, parsed: &YamlOwned) -> Vec<WorkflowStep> {
+    let relative = label;
     let mut out = Vec::new();
     let Some(jobs) = parsed
         .as_mapping_get("jobs")
@@ -496,7 +527,13 @@ fn push_steps(
             workflow: relative.to_owned(),
             job: job.to_owned(),
             position: index + 1,
+            id: step
+                .as_mapping_get("id")
+                .and_then(YamlOwned::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             name: label,
+            cond: condition(step.as_mapping_get("if")),
             run,
             uses: step
                 .as_mapping_get("uses")
@@ -545,6 +582,21 @@ pub struct WorkflowJob {
     pub workflow: String,
     /// The job id, the key under `jobs:`.
     pub id: String,
+    /// The job's `if:` as written, empty for a job that always runs.
+    ///
+    /// Rendered rather than dropped when it is not a string, for the reason
+    /// [`WorkflowStep::cond`] gives: `if: false` is a YAML boolean, and a job
+    /// that never runs must not read as one that always does.
+    pub cond: String,
+    /// The job's `environment:` name, empty for a job that declares none.
+    ///
+    /// Both spellings collapse to the name: the scalar `environment: release`
+    /// and the mapping `environment: {name: release, url: ...}`. Which
+    /// environment a job declares decides what its `vars` and `secrets`
+    /// contexts contain — an environment's variables and secrets are simply
+    /// absent from a job that names no environment — so it is not a
+    /// presentation detail a rule can skip.
+    pub environment: String,
     /// The jobs this one waits on, in file order. Empty when it waits on none.
     pub needs: Vec<String>,
     /// The job-level `env:` mapping, string pairs only.
@@ -576,7 +628,15 @@ impl WorkflowJob {
 ///
 /// If the file is not there or is not valid YAML.
 pub fn workflow_jobs(relative: &str) -> Vec<WorkflowJob> {
-    let parsed = yaml(relative);
+    workflow_jobs_of(relative, &yaml(relative))
+}
+
+/// Every job of one already-parsed workflow, in file order.
+///
+/// [`workflow_jobs`] is this over a committed file; see [`workflow_steps_of`]
+/// for why the split exists.
+pub fn workflow_jobs_of(label: &str, parsed: &YamlOwned) -> Vec<WorkflowJob> {
+    let relative = label;
     let mut out = Vec::new();
     let Some(jobs) = parsed
         .as_mapping_get("jobs")
@@ -611,6 +671,8 @@ pub fn workflow_jobs(relative: &str) -> Vec<WorkflowJob> {
                 .as_str()
                 .unwrap_or("<a job id that is not a string>")
                 .to_owned(),
+            cond: condition(job.as_mapping_get("if")),
+            environment: environment_name(job.as_mapping_get("environment")),
             needs: string_list(job.as_mapping_get("needs")),
             env: env_map(job.as_mapping_get("env")),
             commands,
@@ -618,6 +680,173 @@ pub fn workflow_jobs(relative: &str) -> Vec<WorkflowJob> {
         });
     }
     out
+}
+
+// ------------------------------------------------------ the name sites --
+
+/// One place in one workflow where a name is written, and the job it is in.
+///
+/// A rule of the form "this name may only be read from a job that declares an
+/// environment" has to find *every* place the name is written, and the
+/// structured readers above cannot do that: they model the node kinds the
+/// rules that bought them needed — a job's `if:` and `env:`, a step's `run:`,
+/// `if:`, `env:` and `with:` — and a workflow-level `env:`, a job's
+/// `container.env`, or a reusable-workflow call's `with:`/`secrets:` is
+/// simply invisible to them. E17's own scan enumerated four node kinds and
+/// missed three; see
+/// `tests/regressions/e17_the_release_credentials_were_read_outside_their_environment.rs`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameSite {
+    /// The workflow file, repository-relative.
+    pub workflow: String,
+    /// The job id the site sits under, empty for a workflow-level site.
+    ///
+    /// Empty is the answer that matters as much as any: a name written at
+    /// workflow level belongs to no job, and therefore to no environment.
+    pub job: String,
+    /// Where in the document the name is written, as a dotted path —
+    /// `jobs.release-please.steps[0].env.PRIVATE_KEY`, and a mapping key as
+    /// `... (as a key)`.
+    pub path: String,
+    /// How many times the name occurs in that one scalar.
+    pub count: usize,
+}
+
+/// Every place one workflow writes `needle`, whatever node kind holds it.
+///
+/// The whole parsed document is walked — every mapping key, every mapping
+/// value, every sequence element — rather than the handful of fields
+/// [`WorkflowStep`] and [`WorkflowJob`] model, because the question "is this
+/// name read from anywhere it must not be" is only answered by a scan that
+/// cannot be routed around. Comments are not nodes and so are not found; that
+/// is what [`yaml_text_occurrences`] is for.
+///
+/// # Panics
+///
+/// If the file is not there, or if YAML cannot load it.
+pub fn name_sites(relative: &str, needle: &str) -> Vec<NameSite> {
+    let parsed = yaml(relative);
+    let mut out = Vec::new();
+    walk_names(relative, &parsed, "", "", needle, &mut out);
+    out
+}
+
+/// The recursive half of [`name_sites`].
+fn walk_names(
+    workflow: &str,
+    node: &YamlOwned,
+    path: &str,
+    job: &str,
+    needle: &str,
+    out: &mut Vec<NameSite>,
+) {
+    if let Some(mapping) = node.as_mapping() {
+        for (key, value) in mapping {
+            let key_text = key.as_str().unwrap_or("<a key that is not a string>");
+            let child = if path.is_empty() {
+                key_text.to_owned()
+            } else {
+                format!("{path}.{key_text}")
+            };
+            // The one place a key is more than a name: the keys of the
+            // top-level `jobs:` mapping are the job ids everything below
+            // belongs to.
+            let child_job = if path == "jobs" { key_text } else { job };
+            let count = key_text.matches(needle).count();
+            if count > 0 {
+                out.push(NameSite {
+                    workflow: workflow.to_owned(),
+                    job: child_job.to_owned(),
+                    path: format!("{child} (as a key)"),
+                    count,
+                });
+            }
+            walk_names(workflow, value, &child, child_job, needle, out);
+        }
+        return;
+    }
+    if let Some(items) = node.as_vec() {
+        for (index, item) in items.iter().enumerate() {
+            walk_names(
+                workflow,
+                item,
+                &format!("{path}[{index}]"),
+                job,
+                needle,
+                out,
+            );
+        }
+        return;
+    }
+    let Some(text) = node.as_str() else {
+        return;
+    };
+    let count = text.matches(needle).count();
+    if count > 0 {
+        out.push(NameSite {
+            workflow: workflow.to_owned(),
+            job: job.to_owned(),
+            path: path.to_owned(),
+            count,
+        });
+    }
+}
+
+/// How many times `needle` occurs in YAML text, outside whole-line comments.
+///
+/// The cross-check behind [`name_sites`]: a structured scan can only find the
+/// node kinds the parser hands it, so a rule that trusts one alone fails
+/// silently when a name moves somewhere the walk does not reach. Comparing
+/// the two counts turns that into a loud failure. Whole-line comments are
+/// dropped because they are not nodes and would make the counts differ for a
+/// reason nobody wants reported; a `#` opening an inline comment, or a line of
+/// a block scalar that starts with one, is not distinguished — a mismatch
+/// there is a failure that says so rather than a silence.
+pub fn yaml_text_occurrences(text: &str, needle: &str) -> usize {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .map(|line| line.matches(needle).count())
+        .sum()
+}
+
+/// One `if:` node as the condition it expresses.
+///
+/// A condition is nearly always a string — `${{ ... }}`, or a bare expression
+/// — and reading one with `as_str` alone is right for those. It is not right
+/// for the other spelling YAML admits: `if: false`, the ordinary way to
+/// disable a step or a job while keeping it in the file, parses as a boolean,
+/// `as_str` answers `None`, and a plain `unwrap_or_default` then turns the one
+/// node that means "never" into the empty string every rule in this suite
+/// reads as "always". Rendering the boolean keeps `cond.is_empty()` meaning
+/// what its callers assert it means. A node that is neither — a mapping, a
+/// number — is still the empty string; GitHub does not accept one.
+fn condition(node: Option<&YamlOwned>) -> String {
+    match node {
+        None => String::new(),
+        Some(value) => value
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value.as_bool().map(|flag| flag.to_string()))
+            .unwrap_or_default(),
+    }
+}
+
+/// One `environment:` node as the environment's name.
+///
+/// GitHub accepts the scalar `environment: release` and the mapping
+/// `environment: {name: release, url: ...}`, and the two mean the same thing.
+/// A node that is neither — or absent — is the empty string, which is the
+/// answer "this job declares no environment" rather than an environment whose
+/// name happens to be empty; no environment can be called that.
+fn environment_name(node: Option<&YamlOwned>) -> String {
+    match node {
+        None => String::new(),
+        Some(value) => value
+            .as_str()
+            .or_else(|| value.as_mapping_get("name").and_then(YamlOwned::as_str))
+            .unwrap_or_default()
+            .to_owned(),
+    }
 }
 
 /// One YAML node as a list of strings: a sequence as itself, a bare scalar as

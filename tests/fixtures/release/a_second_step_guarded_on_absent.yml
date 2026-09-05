@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The release workflow with one step too many. See this directory's README.md.
+#
+# Everything here has the shape `.github/workflows/release.yml` has: one job
+# declaring the release environment, a first step that reads what the
+# environment holds and publishes `state`, a notice that runs on `absent` and
+# exits 0, and the release-please step behind `configured`. The one addition is
+# the third step, which reads the App's private key and carries the notice's
+# guard instead of its own.
+#
+# This file is never run. It lives outside `.github/`, so the repository-wide
+# workflow scans do not reach it and actionlint is not asked about it; it is
+# read only by `crate::common::repo::workflow_steps`.
+name: Release (fixture)
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Maintain the release PR and draft
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # The guard itself, at position one. Its `run:` names neither credential,
+      # so the notice below is the only step `notice_step` can find here — the
+      # fixture is about the rule, not about how the notice is located.
+      - name: Check what the release environment holds
+        id: credentials
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
+            echo "state=configured" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          fi
+      # The notice, and the one step in this file that is allowed to run on the
+      # absent state.
+      - name: Say which credentials a maintainer has to add
+        if: ${{ steps.credentials.outputs.state == 'absent' }}
+        run: |
+          echo "Add RELEASE_PLEASE_APP_CLIENT_ID and RELEASE_PLEASE_APP_PRIVATE_KEY to the release environment."
+      # The step the rule has to report: a later maintainer copies the notice's
+      # guard onto a step that reads the private key, and a credential-reading
+      # step now runs exactly when the credentials are not there. It is not the
+      # notice, it needs the credentials, and nothing about its condition says
+      # so.
+      - name: Open the follow-up issue as the App
+        if: ${{ steps.credentials.outputs.state == 'absent' }}
+        env:
+          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$PRIVATE_KEY" > app.pem
+          curl --fail --silent --key app.pem https://api.github.com/repos/P4suta/ginary/issues
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        if: ${{ steps.credentials.outputs.state == 'configured' }}
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

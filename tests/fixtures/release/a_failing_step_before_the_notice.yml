@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The release workflow whose first credential-reading step fails without ever
+# saying `exit`. See this directory's README.md.
+#
+# `notice_step` selects the credential-reading step that does not exit
+# non-zero. A step whose script ends in a bare `false` never says `exit`, and
+# yet `bash -e` fails it — so a rule that only reads `exit` codes picks this
+# step as the notice, and the guard scan then excuses the wrong one. That is
+# what this fixture holds the rule to.
+#
+# Everything else has the shape `.github/workflows/release.yml` has. This file
+# is never run: it lives outside `.github/`, so the repository-wide workflow
+# scans do not reach it and actionlint is not asked about it. It is read only
+# by `crate::common::repo::workflow_steps`.
+name: Release (fixture)
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Maintain the release PR and draft
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # The guard, at position one. Its `run:` names neither credential.
+      - name: Check what the release environment holds
+        id: credentials
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
+            echo "state=configured" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The step this fixture exists for. It reads both credential names and it
+      # fails — `false` is the last command under `bash -e` — but it never says
+      # `exit`, so a rule that reads only exit codes mistakes it for the notice.
+      # It carries no guard at all, which is what the scan must report.
+      - name: Refuse a half-configured environment
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          echo "::error::the release environment holds RELEASE_PLEASE_APP_CLIENT_ID"
+          echo "::error::without RELEASE_PLEASE_APP_PRIVATE_KEY"
+          false
+
+      # The real notice, further down: it reads both names, exits 0, and runs
+      # on the complement of the guard.
+      - name: Say what the release environment is missing
+        if: ${{ steps.credentials.outputs.state == 'absent' }}
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+        run: |
+          echo "::notice::add RELEASE_PLEASE_APP_CLIENT_ID and"
+          echo "::notice::RELEASE_PLEASE_APP_PRIVATE_KEY to the release environment"
+          exit 0

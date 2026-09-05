@@ -7,6 +7,17 @@ name: Release
 # GitHub release and the tag. Publishing the artifacts is distribute.yml's job,
 # triggered when the draft release is published. Nothing here tags or publishes
 # on its own; the release-please pull request is a human decision.
+#
+# The two App credentials live in the `release` GitHub Environment rather than
+# at repository scope, and that decides the shape of the job below. An
+# environment's variables and secrets reach a job only when the job declares
+# that environment, and a job that declares an environment the current ref may
+# not deploy to does not skip — the run fails with `Branch is not allowed to
+# deploy to release due to environment protection rules`. The environment's
+# deployment-branch policy admits the `main` branch and the `v*` tags and
+# nothing else, so this workflow triggers on a push to `main` and on nothing
+# else: a `pull_request` or a `workflow_dispatch` trigger could aim the
+# environment-bound job at a ref the policy refuses.
 on:
   push:
     branches: [main]
@@ -16,14 +27,14 @@ permissions: {}
 jobs:
   release-please:
     name: Maintain the release PR and draft
-    # Only when the App is installed. The default GITHUB_TOKEN cannot open a
-    # pull request here — `can_approve_pull_request_reviews` is false on this
-    # repository, the hardening E3 applied on purpose — so without the App
-    # credentials release-please has nothing to authenticate with. Skipping is
-    # the honest answer; `credentials-notice` below says so out loud, and a
-    # repository with no release automation configured gets a green Release
-    # workflow rather than a red one nobody in the tree can fix.
-    if: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID != '' }}
+    # The one job that reads either credential, and therefore the one job that
+    # declares the environment holding them. It carries no `if:`: a job
+    # condition is evaluated before the job's environment is bound, so it
+    # cannot see `vars.RELEASE_PLEASE_APP_CLIENT_ID` as the environment fills
+    # it — and cannot see a `secrets` context at all. The decision moves to the
+    # first step, which reads what the environment holds and publishes the
+    # answer for the later steps to be guarded on.
+    environment: release
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -33,33 +44,92 @@ jobs:
       # workflow's own GITHUB_TOKEN needs nothing it did not already have.
       contents: read
     steps:
-      # A job's `if:` can read `vars.` and cannot read `secrets.`, so the guard
-      # above proves the client id exists and can prove nothing about the
-      # private key. A repository with the variable set and the secret missing
-      # would reach `create-github-app-token` with an empty `private-key:` and
-      # fail somewhere inside JWT signing. Naming the missing credential is
-      # cheaper to read than that. This one is a failure rather than a notice:
-      # unlike a repository with no credentials at all, somebody here set the
-      # variable on purpose and the automation they asked for is not running.
-      - name: Check the App private key is present
+      # The whole decision, in one place and before anything else runs. Both
+      # values arrive through the step's `env:`, because `secrets` is not a
+      # context a shell can reach on its own and interpolating one straight
+      # into a `run:` block would write a private key into a script.
+      #
+      # Three states, two of which are survivable:
+      #
+      #   both present  -> `state=configured`, and release-please runs.
+      #   both absent   -> `state=absent`, the notice below prints what a
+      #                    maintainer has to add, and the run is green. A
+      #                    repository with no release automation configured
+      #                    gets a green Release workflow rather than a red one
+      #                    nobody in the tree can fix.
+      #   one of the two -> a failure naming the missing credential. Somebody
+      #                    added half the pair on purpose, and the automation
+      #                    they asked for is not running. Reaching
+      #                    create-github-app-token with an empty `client-id:`
+      #                    or `private-key:` would fail somewhere inside JWT
+      #                    signing instead, which is harder to read than the
+      #                    name of the credential nobody added.
+      - name: Check what the release environment holds
+        id: credentials
         env:
+          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
           PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
         run: |
-          if [ -z "$PRIVATE_KEY" ]; then
-            echo "::error title=Release automation is half-configured::RELEASE_PLEASE_APP_CLIENT_ID is set, but the RELEASE_PLEASE_APP_PRIVATE_KEY secret is empty or absent. Add it under Settings -> Secrets and variables -> Actions -> Secrets, or clear RELEASE_PLEASE_APP_CLIENT_ID to return to the skip-and-report state."
+          if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
+            echo "state=configured" >> "$GITHUB_OUTPUT"
+          elif [ -z "$CLIENT_ID" ] && [ -z "$PRIVATE_KEY" ]; then
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          elif [ -z "$PRIVATE_KEY" ]; then
+            echo "::error title=Release automation is half-configured::The release environment holds RELEASE_PLEASE_APP_CLIENT_ID but not RELEASE_PLEASE_APP_PRIVATE_KEY. Add it under Settings -> Environments -> release -> Environment secrets, or remove RELEASE_PLEASE_APP_CLIENT_ID to return to the report-and-stay-green state."
+            exit 1
+          else
+            echo "::error title=Release automation is half-configured::The release environment holds RELEASE_PLEASE_APP_PRIVATE_KEY but not RELEASE_PLEASE_APP_CLIENT_ID. Add it under Settings -> Environments -> release -> Environment variables, or remove RELEASE_PLEASE_APP_PRIVATE_KEY to return to the report-and-stay-green state."
             exit 1
           fi
+      # The other half of the guard. Installing the App and adding its two
+      # credentials needs a human with admin rights, so the workflow cannot do
+      # it and must not pretend the release automation is running when it is
+      # not. This step reports the state and exits 0: green, and specific about
+      # why. It is a step of this job rather than a job of its own because the
+      # values it reports on are only readable from a job that declares the
+      # environment.
+      - name: Say which credentials a maintainer has to add
+        if: ${{ steps.credentials.outputs.state == 'absent' }}
+        run: |
+          echo "::notice title=Release automation is not configured::release-please did not run; the release environment holds no credentials. See the job log for the two a maintainer has to add."
+          cat <<'NOTICE'
+          The release environment of this repository holds no credentials, so the
+          release-please job did nothing. Nothing is broken and nothing is pending.
+
+          To turn release automation on, a maintainer with admin rights does three things:
+
+            1. Install the release-please GitHub App on P4suta/ginary, granting it
+               contents: write, pull-requests: write and issues: write.
+            2. Add RELEASE_PLEASE_APP_CLIENT_ID, set to the App's client id, under
+               Settings -> Environments -> release -> Environment variables.
+            3. Add RELEASE_PLEASE_APP_PRIVATE_KEY, set to the App's private key, under
+               Settings -> Environments -> release -> Environment secrets.
+
+          Both belong to the release environment rather than to repository scope, which
+          applies two restrictions repository scope does not. An environment's values
+          reach a job only when that job declares the environment, so a job that does
+          not name it is handed nothing; and they are released only on a ref the
+          environment's deployment-branch policy admits, which here is the main branch
+          and the v* tags and nothing else. Neither value is therefore reachable from a
+          pull request, from a fork, or from any other branch.
+
+          The default GITHUB_TOKEN is deliberately not an alternative: this repository
+          sets can_approve_pull_request_reviews to false, so GitHub Actions may not
+          create pull requests, and that hardening stays.
+          NOTICE
       # No repository contents are needed, but the checkout keeps the token out
       # of the local git config for any later step.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.credentials.outputs.state == 'configured' }}
         with:
           persist-credentials: false
       # A repository-scoped installation token for the release-please App, the
       # same pattern the strict siblings (release-glz, beamtrace) use. An App
       # is not GitHub Actions, so the "Actions may not create pull requests"
       # rule does not apply to it, and the hardening stays as it is.
-      - id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        if: ${{ steps.credentials.outputs.state == 'configured' }}
         with:
           client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
@@ -70,6 +140,7 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        if: ${{ steps.credentials.outputs.state == 'configured' }}
         with:
           # The App token, explicitly. Without a `token:` input release-please
           # falls back to the workflow's own GITHUB_TOKEN, which is the token
@@ -81,35 +152,3 @@ jobs:
           # created release a draft, so distribute.yml runs on its publish.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-  # The other half of the guard above. Installing the App and adding its two
-  # credentials needs a human with admin rights, so the workflow cannot do it
-  # and must not pretend the release automation is running when it is not.
-  # This job reports the state and exits 0: green, and specific about why.
-  credentials-notice:
-    name: Report the missing release credentials
-    if: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID == '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Say which credentials a maintainer has to add
-        run: |
-          echo "::notice title=Release automation is not configured::release-please did not run; see the job log for the two credentials a maintainer has to add."
-          cat <<'NOTICE'
-          This repository has no release credentials, so the release-please job was
-          skipped rather than failed. Nothing is broken and nothing is pending.
-
-          To turn release automation on, a maintainer with admin rights does three things:
-
-            1. Install the release-please GitHub App on P4suta/ginary, granting it
-               contents: write, pull-requests: write and issues: write.
-            2. Add the repository variable RELEASE_PLEASE_APP_CLIENT_ID, set to the
-               App's client id.
-            3. Add the repository secret RELEASE_PLEASE_APP_PRIVATE_KEY, set to the
-               App's private key.
-
-          The default GITHUB_TOKEN is deliberately not an alternative: this repository
-          sets can_approve_pull_request_reviews to false, so GitHub Actions may not
-          create pull requests, and that hardening stays.
-          NOTICE
