@@ -1,0 +1,13 @@
+---
+source: tests/version_consistency.rs
+expression: rendered
+---
+a tag that disagrees with Cargo.toml
+exit 1
+version-consistency: tag v1.2.3-wrong declares 1.2.3-wrong, but Cargo.toml is 1.2.3; a release tag must match the package version
+a tag cut before anything was released
+exit 1
+version-consistency: .release-please-manifest.json records 0.0.0, which is how release-please says nothing has been released; the release pull request records 1.2.3 there before the tag v1.2.3 is cut
+a manifest that disagrees with Cargo.toml
+exit 1
+version-consistency: .release-please-manifest.json records 1.2.2, but Cargo.toml is 1.2.3; release-please writes both in one commit, so a disagreement is drift

@@ -1,0 +1,15 @@
+{
+  "run": "https://github.com/P4suta/ginary/actions/runs/33969332537",
+  "measured_on": "2026-09-05",
+  "baseline_minutes": 4,
+  "seconds_per_mutant": 210,
+  "modules": {
+    "appfile": 207,
+    "cache": 203,
+    "closure": 98,
+    "launch": 104,
+    "payload": 91,
+    "trailer": 28,
+    "verify": 95
+  }
+}

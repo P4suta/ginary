@@ -2000,3 +2000,177 @@ fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
         offenders.join("\n")
     );
 }
+
+// ------------------------------------------- the disk-maintenance task (E20) --
+
+/// The maintenance task that reclaims the regenerable build output.
+const CACHE_TASK: &str = "clean:cache";
+
+/// The two trees this machine cannot cheaply rebuild.
+///
+/// `target/stubs` holds the five cross-built launcher stubs: `cross`, a docker
+/// daemon and minutes per target. `dist/otp` holds the committed catalog and
+/// the runtime tarballs it names, roughly 130 MB of downloads and a repack.
+/// Between them they are what nine gated tests read, and they are three orders
+/// of magnitude smaller than the 26 GB of `target/` that a cleaner is for. A
+/// cleaner that takes them is worse than no cleaner: it turns a disk-space
+/// chore into an afternoon.
+const PRECIOUS: [&str; 2] = ["dist/otp", "target/stubs"];
+
+#[test]
+fn the_cache_cleaner_removes_the_regenerable_build_output() {
+    let Some(task) = crate::common::mise::task(CACHE_TASK) else {
+        panic!(
+            "mise.toml declares no [tasks.\"{CACHE_TASK}\"]. The machine ran out of space during \
+             this project with `target/debug/incremental` at 25 GB, and the way out of that is a \
+             task with a reviewed list of what it deletes, not an `rm -rf` typed under pressure"
+        );
+    };
+    let mut rendered = format!(
+        "mise run {CACHE_TASK}\ndescription: {}\nremoves\n",
+        task.description
+    );
+    for path in task.removed_paths() {
+        rendered.push_str(&format!("  {path}\n"));
+    }
+    rendered.push_str("keeps\n");
+    for path in PRECIOUS {
+        rendered.push_str(&format!("  {path}\n"));
+    }
+    insta::assert_snapshot!("clean_cache_plan", rendered);
+}
+
+#[test]
+fn the_cache_cleaner_never_removes_what_is_expensive_to_rebuild() {
+    let Some(task) = crate::common::mise::task(CACHE_TASK) else {
+        panic!("mise.toml declares no [tasks.\"{CACHE_TASK}\"]");
+    };
+    // The rule itself is `crate::common::mise::cleaner_violations`, so that the
+    // shell this repository does *not* carry can be handed to it as well —
+    // see `tests/regressions/e20_a_removal_the_cleaner_rule_could_not_see.rs`.
+    // Here it is asked about the task as committed.
+    let violations = crate::common::mise::cleaner_violations(&task, &PRECIOUS);
+    assert!(
+        violations.is_empty(),
+        "`mise run {CACHE_TASK}` breaks the rule a cleaner is held to:\n- {}\n\nthe task reads:\n\
+         {}",
+        violations.join("\n- "),
+        task.commands().join("\n")
+    );
+}
+
+#[test]
+fn the_cache_cleaner_is_documented_beside_the_other_tasks() {
+    let testing = read("docs/dev/testing.md");
+    let needle = format!("mise run {CACHE_TASK}");
+    assert!(
+        testing.contains(&needle),
+        "docs/dev/testing.md does not document `{needle}`. A task nobody can find is a task \
+         nobody runs, and this one exists because the alternative is deleting `target/` by hand"
+    );
+    // By lines, not by byte offset: this document is dense with em dashes, and
+    // a window cut at `at + 800` lands inside one the moment a sentence above
+    // it changes, turning a documentation-drift failure into a `byte index is
+    // not a char boundary` panic that says nothing about the documentation.
+    //
+    // And every mention, not the first: the task is named in more than one
+    // section, and which one comes first is not a property worth asserting.
+    // What has to exist is *a* passage that names the task and both trees it
+    // keeps.
+    let lines: Vec<&str> = testing.lines().collect();
+    let documented = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&needle))
+        .any(|(at, _)| {
+            let window = lines[at..lines.len().min(at + 20)].join("\n");
+            PRECIOUS.iter().all(|precious| window.contains(precious))
+        });
+    assert!(
+        documented,
+        "no passage of docs/dev/testing.md names `{needle}` and, within twenty lines of it, both \
+         `{}` and `{}` as trees it never deletes. What a cleaner keeps is the only interesting \
+         thing about it",
+        PRECIOUS[0], PRECIOUS[1]
+    );
+}
+
+// ------------------------------------- the two ways of running the fuzzers (E21) --
+
+#[test]
+fn the_two_ways_of_running_the_fuzzers_run_the_same_plan() {
+    // `.github/workflows/nightly.yml` and `mise.toml` both drive the four fuzz
+    // targets, so that what a developer runs is what CI runs. Only the parts
+    // that may not drift are compared: the toolchain is legitimately different
+    // — the workflow installs nightly with an action and names the triple its
+    // sanitizer needs, the task says `cargo +nightly` — and comparing those
+    // would fail for a reason nobody should fix.
+    //
+    // Run 33969332537 is what this is written from. All four shards reached
+    // libFuzzer and exited 1 on `The required directory "fuzz/corpus/<target>"
+    // does not exist`, because the task creates it and the workflow does not;
+    // see tests/regressions/e21_the_fuzz_smoke_never_created_the_corpus_it_passed.rs.
+    let workflow = crate::common::nightly::FuzzPlan::from_workflow();
+    let task = crate::common::nightly::FuzzPlan::from_mise();
+
+    assert_eq!(
+        workflow.render(),
+        task.render(),
+        "`{}` and `{}` disagree about how the fuzz targets are run. Two callers of one command \
+         that disagree about a precondition is the shape of defect E19 fixed twice and E21 found \
+         again, and it is invisible to a reader of either file",
+        workflow.source,
+        task.source
+    );
+    insta::assert_snapshot!("fuzz_smoke_plan", workflow.render());
+}
+
+// ------------------------------------------- the nightly mutation budget (E21) --
+
+#[test]
+fn the_mutants_job_points_at_the_record_its_budget_rests_on() {
+    let nightly = read(".github/workflows/nightly.yml");
+    let job = job_text(&nightly, "mutants").expect("the nightly workflow declares a `mutants` job");
+
+    assert!(
+        job.contains(crate::common::nightly::MEASURED_MUTANTS),
+        "a `timeout-minutes` with no measurement beside it is a number the next reader doubles. \
+         The job names `{}` — the mutant counts and the per-mutant cost measured from a real \
+         run — so that the budget and the evidence for it move together:\n{job}",
+        crate::common::nightly::MEASURED_MUTANTS
+    );
+}
+
+#[test]
+fn the_testing_document_says_what_the_nightly_mutation_pass_does_not_cover() {
+    let testing = read("docs/dev/testing.md");
+    let record = crate::common::nightly::MEASURED_MUTANTS;
+
+    // Not "the path appears somewhere": a sentence that names the fixture and
+    // says nothing about coverage would satisfy that, which is the section
+    // deleted down to a bare reference. The same twenty-line-window form
+    // `the_cache_cleaner_is_documented_beside_the_other_tasks` uses, and for
+    // the same reason — by lines rather than by byte offset, because this
+    // document is dense with em dashes and a window cut mid-character turns a
+    // documentation-drift failure into a char-boundary panic.
+    let lines: Vec<&str> = testing.lines().collect();
+    let documented = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(record))
+        .any(|(at, _)| {
+            let window = lines[at.saturating_sub(20)..lines.len().min(at + 20)].join("\n");
+            ["does not cover", "--timeout", "timeout-minutes"]
+                .iter()
+                .all(|needle| window.contains(needle))
+        });
+
+    assert!(
+        documented,
+        "docs/dev/testing.md is where a contributor learns what the assurance passes prove. A \
+         mutation pass that is divided, capped or rotated proves something narrower than \
+         \"every mutant of these modules is caught\", and no passage of the document names \
+         `{record}` and, within twenty lines of it, says what the pass `does not cover`, what \
+         `--timeout` bounds and what `timeout-minutes` the budget is"
+    );
+}

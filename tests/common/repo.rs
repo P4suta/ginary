@@ -97,6 +97,44 @@ pub fn yaml_files_under(relative: &str) -> Vec<String> {
     out
 }
 
+/// Every YAML file under `.github/` that GitHub *executes*: the workflows and
+/// the local composite actions they call, as repository-relative paths,
+/// sorted.
+///
+/// The set a rule about what CI does has to be stated over. A composite action
+/// is not a document beside the workflows: its steps run in the caller's job,
+/// on the caller's runner, with the caller's environment, so a scan that reads
+/// `.github/workflows` alone reads half of what runs. `.yaml` counts as well
+/// as `.yml` — GitHub accepts both spellings, and a rule that reads only one
+/// of them is a rule a rename switches off.
+///
+/// `.github/actionlint.yaml`, the issue forms and `dependabot.yml` are
+/// deliberately outside it: they configure GitHub rather than being run by it,
+/// and each has rules of its own.
+pub fn executed_yaml_files() -> Vec<String> {
+    let mut out = yaml_files_under(".github/workflows");
+    out.extend(yaml_files_under(".github/actions"));
+    out.sort();
+    out
+}
+
+/// Every `file:line: text` site at which something CI executes mentions
+/// `needle`, in file order.
+///
+/// One scan for the rules of the shape "no workflow may name this", so a rule
+/// that grows a second caller cannot grow a second, narrower reader with it.
+pub fn executed_yaml_mentions(needle: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for relative in executed_yaml_files() {
+        for (index, line) in read(&relative).lines().enumerate() {
+            if line.contains(needle) {
+                out.push(format!("{relative}:{}: {}", index + 1, line.trim()));
+            }
+        }
+    }
+    out
+}
+
 /// Every `.sh` file under a repository directory, recursively, as
 /// repository-relative paths, sorted.
 ///

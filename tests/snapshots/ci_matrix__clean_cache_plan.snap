@@ -1,0 +1,17 @@
+---
+source: tests/ci_matrix.rs
+expression: rendered
+---
+mise run clean:cache
+description: Remove the regenerable build caches, keeping the cross-built stubs and the OTP catalog
+removes
+  fuzz/target
+  mutants.out
+  target/cross
+  target/debug
+  target/llvm-cov-target
+  target/nextest
+  target/release
+keeps
+  dist/otp
+  target/stubs

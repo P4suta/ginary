@@ -1,0 +1,17 @@
+---
+source: tests/ci_matrix.rs
+expression: workflow.render()
+---
+targets
+  trailer_parse
+  appfile_terms
+  beam_chunks
+  payload_read_manifest
+creates before it starts
+  fuzz/corpus/<target>
+passes to cargo fuzz run
+  fuzz/corpus/<target>
+  fuzz/seeds/<target>
+libFuzzer arguments
+  -max_total_time=30
+  -rss_limit_mb=4096
