@@ -31,6 +31,7 @@ pub mod macho;
 pub mod mise;
 #[cfg(feature = "cli")]
 pub mod native;
+pub mod nightly;
 pub mod payload;
 pub mod portability;
 pub mod project;

@@ -487,3 +487,19 @@ mod e20_a_workflow_could_point_the_version_check_at_another_tree;
 mod e20_release_please_did_not_rewrite_the_unreleased_section;
 #[path = "regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs"]
 mod e20_the_cleaner_deleted_the_directory_it_was_run_from;
+#[path = "regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs"]
+mod e21_a_mutation_shard_could_not_finish_inside_its_budget;
+#[path = "regressions/e21_a_quoted_command_substitution_hid_a_removal.rs"]
+mod e21_a_quoted_command_substitution_hid_a_removal;
+#[path = "regressions/e21_a_quoted_verb_walked_around_the_cleaner_guard.rs"]
+mod e21_a_quoted_verb_walked_around_the_cleaner_guard;
+#[path = "regressions/e21_a_second_tag_reference_on_a_line_escaped_the_scan.rs"]
+mod e21_a_second_tag_reference_on_a_line_escaped_the_scan;
+#[path = "regressions/e21_an_unreadable_record_escaped_the_existence_check.rs"]
+mod e21_an_unreadable_record_escaped_the_existence_check;
+#[path = "regressions/e21_an_unreleased_heading_one_level_down_read_as_a_release.rs"]
+mod e21_an_unreleased_heading_one_level_down_read_as_a_release;
+#[path = "regressions/e21_the_fuzz_smoke_never_created_the_corpus_it_passed.rs"]
+mod e21_the_fuzz_smoke_never_created_the_corpus_it_passed;
+#[path = "regressions/e21_the_seam_scan_read_only_the_workflows_beside_it.rs"]
+mod e21_the_seam_scan_read_only_the_workflows_beside_it;

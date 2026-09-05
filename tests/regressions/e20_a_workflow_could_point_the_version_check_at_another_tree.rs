@@ -25,7 +25,7 @@
 //! no workflow mentions it, the suite asserts that, and the script's own header
 //! says that a workflow setting it is a defect rather than a knob.
 
-use crate::common::repo::{read, root};
+use crate::common::repo::{executed_yaml_mentions, read};
 use crate::common::version::ROOT_VAR;
 
 /// The script the seam lives in.
@@ -33,21 +33,12 @@ const SCRIPT: &str = "scripts/ci/version-consistency.sh";
 
 #[test]
 fn no_workflow_mentions_the_version_check_seam() {
-    let mut offenders: Vec<String> = Vec::new();
-    let directory = root().join(".github/workflows");
-    for entry in std::fs::read_dir(&directory).expect("read .github/workflows") {
-        let path = entry.expect("a workflow directory entry").path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("yml") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("read a workflow");
-        for (number, line) in text.lines().enumerate() {
-            if line.contains(ROOT_VAR) {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                offenders.push(format!("{name}:{}: {}", number + 1, line.trim()));
-            }
-        }
-    }
+    // The scan is `crate::common::repo::executed_yaml_mentions` rather than a
+    // `read_dir` of its own: what CI executes is the workflows *and* the local
+    // composite actions, in both YAML spellings, and a rule of this shape is
+    // only as wide as the file list it is stated over. See
+    // `tests/regressions/e21_the_seam_scan_read_only_the_workflows_beside_it.rs`.
+    let offenders = executed_yaml_mentions(ROOT_VAR);
     assert!(
         offenders.is_empty(),
         "{ROOT_VAR} points {SCRIPT} at a tree other than the repository it lives in. It exists \

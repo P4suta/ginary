@@ -65,18 +65,16 @@ impl MiseTask {
     /// paths like any other; reading only the first word of the whole line saw
     /// `[ -d target/stubs ] && rm -rf target/stubs` as a `[` and nothing more.
     ///
-    /// Options (`-rf`, `--recursive`) are skipped and a surrounding pair of
-    /// quotes is stripped. A word carrying a `$` is returned as it is written,
-    /// on purpose: a removal built out of a variable is one this scan cannot
-    /// resolve, and the rule over the list refuses it by name rather than
-    /// guessing what it expands to.
+    /// Options (`-rf`, `--recursive`) are skipped and the quotes are stripped
+    /// off every word by [`words_of`], the verb included. A word carrying a
+    /// `$` is returned as it is written, on purpose: a removal built out of a
+    /// variable is one this scan cannot resolve, and the rule over the list
+    /// refuses it by name rather than guessing what it expands to.
     pub fn removed_paths(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for command in self.commands() {
             for segment in segments(&command) {
-                let mut words = segment
-                    .split_whitespace()
-                    .skip_while(|word| CONTROL_WORDS.contains(word));
+                let mut words = words_of(segment);
                 if words.next() != Some("rm") {
                     continue;
                 }
@@ -84,7 +82,7 @@ impl MiseTask {
                     if word.starts_with('-') {
                         continue;
                     }
-                    out.push(unquote(word).to_owned());
+                    out.push(word.to_owned());
                 }
             }
         }
@@ -92,6 +90,24 @@ impl MiseTask {
         out.dedup();
         out
     }
+}
+
+/// One segment as the words a shell would run it with: quotes off every edge,
+/// words that were nothing but quotes dropped, and the control words that
+/// introduce a command stepped over.
+///
+/// The one normalisation both readers of this shell share. Bash strips the
+/// quotes round a command word before it looks the word up, so `'rm'` is the
+/// `rm` builtin; a reader that normalised the verb for the allowlist and not
+/// for the removal list would call `'rm' -rf target/stubs` an allowed verb
+/// deleting nothing. Two readers of one grammar have to agree on what a word
+/// is; see `tests/regressions/e21_a_quoted_verb_walked_around_the_cleaner_guard.rs`.
+fn words_of(segment: &str) -> impl Iterator<Item = &str> {
+    segment
+        .split_whitespace()
+        .map(|word| word.trim_matches(['\'', '"']))
+        .filter(|word| !word.is_empty())
+        .skip_while(|word| CONTROL_WORDS.contains(word))
 }
 
 /// A word with one surrounding pair of `'` or `"` removed.
@@ -329,46 +345,146 @@ pub fn cleaner_violations(task: &MiseTask, precious: &[&str]) -> Vec<String> {
 /// Two things are deliberately not separators. One inside `'…'` or `"…"` is
 /// text — `echo "no Cargo.toml here; nothing removed"` is one command — and an
 /// `&` immediately after a `>` or a `<` is part of a redirection, so `>&2`
-/// stays attached to the `echo` it belongs to. A `$( … )` is *not* protected:
-/// splitting inside it is what gives `before=$(du … | awk …)` both its verbs.
+/// stays attached to the `echo` it belongs to.
+///
+/// A **command substitution is read as commands wherever it appears**, and
+/// that includes inside a double-quoted argument. `$( … )` and `` ` … ` ``
+/// are executed by bash before the quoting is applied — the quotes go round
+/// the substitution's *output* — so `echo "$(rm -rf target/stubs)"` deletes a
+/// tree while looking, to a reader that stopped at the quote, like one `echo`
+/// with one text argument. Its opening and closing are therefore segment
+/// boundaries, and the quoting outside a substitution does not reach into it.
+/// That is also what gives `before=$(du … | awk …)` both of its verbs. The
+/// exceptions are a substitution inside `'…'`, which bash does not run, and
+/// `$(( … ))`, which is arithmetic and runs no command at all: it is stepped
+/// over whole.
 ///
 /// Segments that are entirely whitespace are dropped, so a caller sees one
 /// entry per command rather than one per separator character.
 fn segments(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
     let mut out: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let mut quote: Option<char> = None;
-    let mut previous = ' ';
-    for (index, character) in command.char_indices() {
-        match quote {
-            Some(open) if character == open => quote = None,
-            Some(_) => {}
-            None if character == '\'' || character == '"' => quote = Some(character),
-            None if matches!(character, '|' | ';')
-                || (character == '&' && !matches!(previous, '>' | '<')) =>
-            {
-                out.push(&command[start..index]);
-                start = index + character.len_utf8();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    let mut quote: Option<u8> = None;
+    // The substitutions open at this point, innermost last, each remembering
+    // the quoting it was entered from so that quoting resumes when it closes.
+    let mut open: Vec<Substitution> = Vec::new();
+    let mut previous = b' ';
+
+    while index < bytes.len() {
+        let character = bytes[index];
+        // Every delimiter this reader knows is ASCII, so a multi-byte
+        // character's continuation bytes match nothing and every slice
+        // boundary below falls between characters.
+        let mut width = 1usize;
+
+        if quote == Some(b'\'') {
+            // A single-quoted string is literal, substitutions included.
+            if character == b'\'' {
+                quote = None;
             }
-            None => {}
+        } else if character == b'$' && bytes.get(index + 1) == Some(&b'(') {
+            if bytes.get(index + 2) == Some(&b'(') {
+                // `$(( … ))` is arithmetic. Nothing in it is a command, and
+                // the committed cleaner reports what it reclaimed with one.
+                width = arithmetic_width(bytes, index);
+            } else {
+                out.push(&command[start..index]);
+                open.push(Substitution::Paren(quote));
+                quote = None;
+                width = 2;
+                start = index + width;
+            }
+        } else if character == b'`' {
+            if matches!(open.last(), Some(Substitution::Backtick(_))) {
+                out.push(&command[start..index]);
+                if let Some(Substitution::Backtick(outer)) = open.pop() {
+                    quote = outer;
+                }
+            } else {
+                out.push(&command[start..index]);
+                open.push(Substitution::Backtick(quote));
+                quote = None;
+            }
+            start = index + 1;
+        } else if let Some(opened) = quote {
+            if character == opened {
+                quote = None;
+            }
+        } else if character == b'\'' || character == b'"' {
+            quote = Some(character);
+        } else if character == b')' && matches!(open.last(), Some(Substitution::Paren(_))) {
+            out.push(&command[start..index]);
+            if let Some(Substitution::Paren(outer)) = open.pop() {
+                quote = outer;
+            }
+            start = index + 1;
+        } else if matches!(character, b'|' | b';')
+            || (character == b'&' && !matches!(previous, b'>' | b'<'))
+        {
+            out.push(&command[start..index]);
+            start = index + 1;
         }
-        previous = character;
+
+        previous = bytes[index + width - 1];
+        index += width;
     }
+
     out.push(&command[start..]);
     out.retain(|segment| !segment.trim().is_empty());
     out
+}
+
+/// A command substitution that is open, and the quoting it was entered from.
+#[derive(Clone, Copy, Debug)]
+enum Substitution {
+    /// `$( … )`, closed by the matching `)`.
+    Paren(Option<u8>),
+    /// `` ` … ` ``, closed by the next backtick.
+    Backtick(Option<u8>),
+}
+
+/// How many bytes the `$(( … ))` starting at `at` occupies.
+///
+/// Counted by parenthesis depth rather than by looking for `))`, because the
+/// committed cleaner's own arithmetic — `$(( (before - after) / 1024 ))` —
+/// nests one. An expansion nobody closed runs to the end of the command, which
+/// is what an unbalanced one is worth.
+fn arithmetic_width(bytes: &[u8], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = at + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1 - at;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len() - at
 }
 
 /// The verb of every segment of `command`.
 ///
 /// An assignment is unwrapped to the command inside its `$( … )`, if it has
 /// one, so `before=$(du …)` is a `du` and `kept=$(rm …)` is an `rm`.
+///
+/// The words are normalised by [`words_of`], which is also what
+/// [`MiseTask::removed_paths`] reads with: the quote characters left on the
+/// edges of a word are dropped, and a word that was nothing but quotes is not
+/// a verb. Splitting a substitution out of the argument it was written inside
+/// leaves the two halves of that argument behind — `echo "$(rm …)"` leaves
+/// `echo "` and `"` — and the trailing half runs nothing.
 fn verbs(command: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for segment in segments(command) {
-        let mut words = segment
-            .split_whitespace()
-            .skip_while(|word| CONTROL_WORDS.contains(word));
+        let mut words = words_of(segment);
         let Some(word) = words.next() else {
             continue;
         };

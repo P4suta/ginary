@@ -181,8 +181,21 @@ fn is_version_header(line: &str) -> bool {
 pub fn released_section_headings(text: &str) -> Vec<String> {
     version_header_lines(text)
         .into_iter()
-        .filter(|line| !line.starts_with("## [Unreleased]"))
+        .filter(|line| !names_the_unreleased_section(line))
         .collect()
+}
+
+/// Whether a version heading is the living section rather than a release.
+///
+/// Stated over the same shape [`is_version_header`] matches, at both heading
+/// levels. `version_header_lines` recognises `##` and `###` because
+/// release-please's own insertion regex does, and an exclusion written for one
+/// of the two levels reports the other as a released version — a heading that
+/// claims nothing at all read as the loudest claim there is.
+fn names_the_unreleased_section(line: &str) -> bool {
+    line.trim_start_matches('#')
+        .trim_start()
+        .starts_with("[Unreleased]")
 }
 
 /// Every reference in a changelog to a git tag, whatever version it names.
@@ -194,27 +207,57 @@ pub fn tag_references(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
         for needle in ["releases/tag/", "compare/"] {
-            let Some(at) = line.find(needle) else {
-                continue;
-            };
-            let reference: String = line[at..]
-                .chars()
-                .take_while(|character| !character.is_whitespace() && *character != ')')
-                .collect();
-            // `compare/` also spells a branch range, which names no tag. Only a
-            // `v` followed by a digit is a reference to one.
-            let names_a_tag = needle == "releases/tag/"
-                || reference.split(['/', '.']).any(|part| {
-                    part.starts_with('v') && part[1..].starts_with(|c: char| c.is_ascii_digit())
-                });
-            if names_a_tag {
-                out.push(reference);
+            // Every occurrence, not the first. `str::find` answers once, and a
+            // line carrying two references — a reflow, a hand edit, a sentence
+            // naming two comparisons — hid everything after it. It hid it in
+            // the direction that passes, and worst for `compare/`, whose first
+            // occurrence on the changelog's link-reference line is the
+            // `[Unreleased]` branch range this check deliberately ignores.
+            for (at, _) in line.match_indices(needle) {
+                let reference: String = line[at..]
+                    .chars()
+                    .take_while(|character| !character.is_whitespace() && *character != ')')
+                    .collect();
+                // `compare/` also spells a branch range, which names no tag. Only a
+                // `v` followed by a digit is a reference to one.
+                let names_a_tag = needle == "releases/tag/"
+                    || reference.split(['/', '.']).any(|part| {
+                        part.starts_with('v') && part[1..].starts_with(|c: char| c.is_ascii_digit())
+                    });
+                if names_a_tag {
+                    out.push(reference);
+                }
             }
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether a file with no permission bits set is unreadable on this machine.
+///
+/// It is not, for root: the mode bits are advisory to a process that holds
+/// `CAP_DAC_OVERRIDE`, so a suite run as root would drive
+/// [`VersionRoot::unreadable`] over a file it can still read and assert the
+/// wrong thing. Measured rather than assumed — the answer is a `geteuid` this
+/// crate has no dependency to ask — by writing a file, clearing its bits and
+/// trying it.
+#[cfg(unix)]
+pub fn files_can_be_made_unreadable() -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(dir) = TempDir::new() else {
+        return false;
+    };
+    let path = dir.path().join("probe");
+    if std::fs::write(&path, b"probe").is_err() {
+        return false;
+    }
+    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).is_err() {
+        return false;
+    }
+    std::fs::read(&path).is_err()
 }
 
 /// A throwaway tree carrying the two files the version check reads.
@@ -275,6 +318,30 @@ impl VersionRoot {
     pub fn without(self, relative: &str) -> Self {
         std::fs::remove_file(self.path().join(relative))
             .unwrap_or_else(|error| panic!("remove {relative} from the fixture tree: {error}"));
+        self
+    }
+
+    /// The same tree with one of its files left in place and made unreadable.
+    ///
+    /// The other half of [`VersionRoot::without`]. A record that is *there* and
+    /// cannot be opened is a different state from a record that is gone, and it
+    /// is the state a `-f` test answers `true` for: the guard passes, the read
+    /// fails, and whatever the reading tool says in the runner's locale becomes
+    /// the whole diagnostic. Only the owner's bits are cleared, so the fixture
+    /// can still be removed when the [`TempDir`] goes.
+    ///
+    /// # Panics
+    ///
+    /// If the file is not there to change, or if the mode cannot be set.
+    /// Callers guard with [`files_can_be_made_unreadable`], because a suite run
+    /// as root can read a file whatever its mode says.
+    #[cfg(unix)]
+    pub fn unreadable(self, relative: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = self.path().join(relative);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .unwrap_or_else(|error| panic!("make {relative} unreadable in the fixture: {error}"));
         self
     }
 

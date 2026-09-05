@@ -2094,3 +2094,83 @@ fn the_cache_cleaner_is_documented_beside_the_other_tasks() {
         PRECIOUS[0], PRECIOUS[1]
     );
 }
+
+// ------------------------------------- the two ways of running the fuzzers (E21) --
+
+#[test]
+fn the_two_ways_of_running_the_fuzzers_run_the_same_plan() {
+    // `.github/workflows/nightly.yml` and `mise.toml` both drive the four fuzz
+    // targets, so that what a developer runs is what CI runs. Only the parts
+    // that may not drift are compared: the toolchain is legitimately different
+    // — the workflow installs nightly with an action and names the triple its
+    // sanitizer needs, the task says `cargo +nightly` — and comparing those
+    // would fail for a reason nobody should fix.
+    //
+    // Run 33969332537 is what this is written from. All four shards reached
+    // libFuzzer and exited 1 on `The required directory "fuzz/corpus/<target>"
+    // does not exist`, because the task creates it and the workflow does not;
+    // see tests/regressions/e21_the_fuzz_smoke_never_created_the_corpus_it_passed.rs.
+    let workflow = crate::common::nightly::FuzzPlan::from_workflow();
+    let task = crate::common::nightly::FuzzPlan::from_mise();
+
+    assert_eq!(
+        workflow.render(),
+        task.render(),
+        "`{}` and `{}` disagree about how the fuzz targets are run. Two callers of one command \
+         that disagree about a precondition is the shape of defect E19 fixed twice and E21 found \
+         again, and it is invisible to a reader of either file",
+        workflow.source,
+        task.source
+    );
+    insta::assert_snapshot!("fuzz_smoke_plan", workflow.render());
+}
+
+// ------------------------------------------- the nightly mutation budget (E21) --
+
+#[test]
+fn the_mutants_job_points_at_the_record_its_budget_rests_on() {
+    let nightly = read(".github/workflows/nightly.yml");
+    let job = job_text(&nightly, "mutants").expect("the nightly workflow declares a `mutants` job");
+
+    assert!(
+        job.contains(crate::common::nightly::MEASURED_MUTANTS),
+        "a `timeout-minutes` with no measurement beside it is a number the next reader doubles. \
+         The job names `{}` — the mutant counts and the per-mutant cost measured from a real \
+         run — so that the budget and the evidence for it move together:\n{job}",
+        crate::common::nightly::MEASURED_MUTANTS
+    );
+}
+
+#[test]
+fn the_testing_document_says_what_the_nightly_mutation_pass_does_not_cover() {
+    let testing = read("docs/dev/testing.md");
+    let record = crate::common::nightly::MEASURED_MUTANTS;
+
+    // Not "the path appears somewhere": a sentence that names the fixture and
+    // says nothing about coverage would satisfy that, which is the section
+    // deleted down to a bare reference. The same twenty-line-window form
+    // `the_cache_cleaner_is_documented_beside_the_other_tasks` uses, and for
+    // the same reason — by lines rather than by byte offset, because this
+    // document is dense with em dashes and a window cut mid-character turns a
+    // documentation-drift failure into a char-boundary panic.
+    let lines: Vec<&str> = testing.lines().collect();
+    let documented = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(record))
+        .any(|(at, _)| {
+            let window = lines[at.saturating_sub(20)..lines.len().min(at + 20)].join("\n");
+            ["does not cover", "--timeout", "timeout-minutes"]
+                .iter()
+                .all(|needle| window.contains(needle))
+        });
+
+    assert!(
+        documented,
+        "docs/dev/testing.md is where a contributor learns what the assurance passes prove. A \
+         mutation pass that is divided, capped or rotated proves something narrower than \
+         \"every mutant of these modules is caught\", and no passage of the document names \
+         `{record}` and, within twenty lines of it, says what the pass `does not cover`, what \
+         `--timeout` bounds and what `timeout-minutes` the budget is"
+    );
+}

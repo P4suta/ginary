@@ -63,6 +63,16 @@ if [ ! -f "$root/Cargo.toml" ]; then
   exit 2
 fi
 
+# `-r` as well as `-f`, because a record that is there and cannot be opened is a
+# different state from one that is gone, and `-f` answers true for it. Without
+# this the guard's whole point is lost in the case it was added for: the read
+# below fails and `sed`'s message, written in the runner's locale and naming
+# neither the record nor what it is for, becomes the entire diagnostic.
+if [ ! -r "$root/Cargo.toml" ]; then
+  echo "version-consistency: Cargo.toml in $root cannot be read; check its permissions and the user this job runs as" >&2
+  exit 2
+fi
+
 cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
 if [ -z "$cargo_version" ]; then
   echo "version-consistency: Cargo.toml carries no version = \"...\" line" >&2
@@ -71,6 +81,16 @@ fi
 
 if [ ! -f "$root/$manifest_file" ]; then
   echo "version-consistency: $manifest_file is not in $root; release-please reads it as the last released version and this check reads it with it" >&2
+  exit 2
+fi
+
+# The same `-r`, and here it matters more than a leaked message. The read below
+# is wrapped in `|| true`, so a read that failed and a manifest with no `"."`
+# entry both end in an empty `manifest_version` — and the second is reported.
+# That tells a maintainer release-please has never seen this package, about a
+# file the script never managed to open.
+if [ ! -r "$root/$manifest_file" ]; then
+  echo "version-consistency: $manifest_file in $root cannot be read; check its permissions and the user this job runs as" >&2
   exit 2
 fi
 
