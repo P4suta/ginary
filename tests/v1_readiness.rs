@@ -6,7 +6,8 @@
 //! enumerates every phase with its acceptance evidence, an honest `## Known
 //! limitations` section, and a one-paragraph `## What v1 delivers`. Around it
 //! sit the documents a first release needs — `docs/RELEASE.md`, the README's
-//! status matrix and badges, the CHANGELOG's 0.1.0 entry — and the ADR index,
+//! status matrix and badges, and the CHANGELOG, which documents the phases
+//! under `[Unreleased]` until a release is actually cut — and the ADR index,
 //! which has to name every decision including the last one. This file pins that
 //! each of those exists and says what the milestone promised, so "v1 is ready"
 //! is a claim backed by a document rather than a feeling.
@@ -19,6 +20,10 @@
 mod common;
 
 use crate::common::repo::{read, root};
+use crate::common::version::{
+    NO_RELEASE_YET, RELEASE_DOC, nothing_has_been_released, released_section_headings,
+    tag_references,
+};
 
 // -------------------------------------------- docs/dev/v1-readiness.md --
 
@@ -241,21 +246,110 @@ fn the_readme_carries_the_one_paragraph_v1_summary() {
 
 // ---------------------------------------------------------- CHANGELOG --
 
+/// The `## [Unreleased]` section of `text`, up to the next `## ` heading.
+///
+/// The heading line itself is not included, so a caller asking what the
+/// section *holds* cannot be answered by the heading.
+fn unreleased_section(text: &str) -> String {
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("## [Unreleased]"));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with("## "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// The two changelog scanners live in `crate::common::version`: they are stated
+// over the shape release-please's own `versionHeaderRegex` uses rather than
+// over one spelling, so `## 0.2.0 - 2026-09-02` and a link to any tag are seen
+// as well. See
+// `tests/regressions/e20_a_dangling_changelog_link_was_pinned_by_its_tag.rs`.
+
 #[test]
-fn the_changelog_summarizes_phase_a_through_e_for_the_first_release() {
+fn the_changelog_documents_the_phases_and_what_v1_delivers() {
+    // Re-aimed in E20: what matters is that the work is documented, not that it
+    // sits under a version heading. Before the first release the same content
+    // belongs under `[Unreleased]`; release-please moves it under a dated
+    // heading when a release is actually cut. Either way the phases and the
+    // headline capabilities have to be there.
     let changelog = read("CHANGELOG.md");
-    assert!(
-        changelog.contains("0.1.0"),
-        "the CHANGELOG has a 0.1.0 entry for the first release, not only `[Unreleased]`"
-    );
-    // The release note names each phase's headline capability rather than a
-    // bare version bump.
+    for phase in ["Phase A", "Phase B", "Phase C", "Phase D", "Phase E"] {
+        assert!(
+            changelog.contains(phase),
+            "the changelog does not account for `{phase}`"
+        );
+    }
     for capability in ["launcher", "cache", "catalog", "cross", "verify"] {
         assert!(
             changelog.to_lowercase().contains(capability),
-            "the 0.1.0 note does not mention the `{capability}` work"
+            "the changelog does not mention the `{capability}` work"
         );
     }
+}
+
+#[test]
+fn the_work_that_is_done_and_not_released_sits_under_unreleased() {
+    // Where that content lives is decided by whether a release has been cut.
+    // While none has, `[Unreleased]` is the only section there can be, and an
+    // empty one beside a dated section that describes the same work is the
+    // repository claiming a release it never made.
+    if !nothing_has_been_released() {
+        return;
+    }
+    let changelog = read("CHANGELOG.md");
+    let unreleased = unreleased_section(&changelog);
+    for phase in ["Phase A", "Phase B", "Phase C", "Phase D", "Phase E"] {
+        assert!(
+            unreleased.contains(phase),
+            "{RELEASE_DOC} says `{NO_RELEASE_YET}`, so the phase summary describes work that is \
+             done and unreleased and belongs under `## [Unreleased]`; `{phase}` is not there"
+        );
+    }
+    for section in ["### Added", "### Changed"] {
+        assert!(
+            unreleased.contains(section),
+            "the `{section}` entries describe unreleased work and belong under \
+             `## [Unreleased]` until release-please moves them"
+        );
+    }
+}
+
+#[test]
+fn the_changelog_claims_no_release_that_has_not_been_cut() {
+    if !nothing_has_been_released() {
+        return;
+    }
+    let changelog = read("CHANGELOG.md");
+    let headings = released_section_headings(&changelog);
+    assert!(
+        headings.is_empty(),
+        "{RELEASE_DOC} says `{NO_RELEASE_YET}` and neither `git tag` nor `gh release list` has \
+         anything in it, but the changelog carries a dated release section: {headings:?}. A \
+         version heading is release-please's output when a release is cut, and a hand-written \
+         one with a date on it is the same false claim `.release-please-manifest.json` was \
+         making"
+    );
+}
+
+#[test]
+fn the_changelog_links_no_tag_that_does_not_exist() {
+    if !nothing_has_been_released() {
+        return;
+    }
+    let changelog = read("CHANGELOG.md");
+    let dangling = tag_references(&changelog);
+    assert!(
+        dangling.is_empty(),
+        "the changelog links {dangling:?}, and no tag exists at all; a reader following one gets \
+         a 404 from the project's own release notes"
+    );
+    assert!(
+        changelog.contains("[Unreleased]: https://github.com/P4suta/ginary/commits/main"),
+        "with no release to compare against, `[Unreleased]` points at the commit history rather \
+         than at a comparison with a tag nobody cut"
+    );
 }
 
 // --------------------------------------------------------- the ADR index --

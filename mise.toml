@@ -368,6 +368,62 @@ docker run --rm -v "$root":/w -w /w -e CARGO_TARGET_DIR=/tmp/t ginary-wincheck:1
   cargo check --all-targets --locked --keep-going --target x86_64-pc-windows-gnu
 """
 
+[tasks."clean:cache"]
+description = "Remove the regenerable build caches, keeping the cross-built stubs and the OTP catalog"
+# The disk task. This machine ran out of space during E19 with
+# `target/debug/incremental` at 25 GB, and the way out of that is a reviewed
+# list of what goes rather than an `rm -rf` typed under pressure.
+#
+# Every removal below is regenerable by a plain `cargo` or `cargo mutants` run.
+# Two trees inside the same directories are **not**, and neither is named here:
+#
+#   target/stubs   the five cross-built launcher stubs — `cross`, a docker
+#                  daemon and minutes per target
+#   dist/otp       the committed catalog and the runtime tarballs it names —
+#                  roughly 130 MB of downloads and a repack
+#
+# Nine gated tests read those two, and between them they are three orders of
+# magnitude smaller than what this task reclaims. That is also why the task
+# does not run `cargo clean`: it would empty the whole of `target/`,
+# `target/stubs` included.
+#
+# The paths are literal and relative, so what this deletes can be read off the
+# diff. What makes that safe is the root check below rather than the `cd`
+# alone: `MISE_PROJECT_ROOT` is set by `mise` and by nothing else, so a run
+# block extracted and run by hand — which is how a disk chore actually gets
+# done once the disk is full — would fall back to `$PWD` and delete the
+# `target/debug` of whatever directory the caller was in. So the task refuses
+# rather than guesses. `tests/ci_matrix.rs` holds the list and the rule, and
+# `tests/regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs`
+# runs this block over a throwaway tree.
+run = '''
+set -eu
+root="${MISE_PROJECT_ROOT:-$PWD}"
+if [ ! -f "$root/Cargo.toml" ] || [ ! -f "$root/mise.toml" ]; then
+  echo "clean:cache: $root is not a project root (no Cargo.toml beside a mise.toml); nothing removed" >&2
+  exit 1
+fi
+if ! grep -q '^name = "ginary"$' "$root/Cargo.toml"; then
+  echo "clean:cache: $root is not ginary's checkout; nothing removed" >&2
+  exit 1
+fi
+cd "$root"
+
+before=$(du -sk target fuzz/target mutants.out 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')
+
+rm -rf fuzz/target
+rm -rf mutants.out
+rm -rf target/cross
+rm -rf target/debug
+rm -rf target/llvm-cov-target
+rm -rf target/nextest
+rm -rf target/release
+
+after=$(du -sk target fuzz/target mutants.out 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')
+echo "clean:cache: reclaimed $(( (before - after) / 1024 )) MiB"
+echo "clean:cache: kept target/stubs (mise run stubs:build) and dist/otp (mise run otp:repack)"
+'''
+
 [tasks.check]
 description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc and deny"
 run = [

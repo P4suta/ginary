@@ -8,10 +8,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-02
+The first release is prepared and has not been cut: everything below is done, committed and
+unreleased. release-please inserts the section it generates *above* this `## [Unreleased]`
+heading and leaves what is under it alone, so clearing this section is a step the maintainer
+performs by hand while reviewing the release pull request — `docs/RELEASE.md` says where.
 
-The first release. ginary turns a Gleam application into one self-contained executable that runs
-on a machine with no Erlang installation. Five phases, A through E, built it:
+ginary turns a Gleam application into one self-contained executable that runs on a machine with
+no Erlang installation. Five phases, A through E, built it:
 
 - **Phase A — the build pipeline and the launcher.** `ginary build` reads a Gleam project, runs
   `gleam export erlang-shipment`, resolves the application closure against an OTP installation,
@@ -52,14 +55,6 @@ on a machine with no Erlang installation. Five phases, A through E, built it:
   not compile yet because the launcher path is Unix-only, and the task reports it and exits
   non-zero rather than dropping it. macOS stubs cannot be built on Linux and come from the
   release build.
-
-### Changed
-
-- A build for a target other than the host is no longer refused outright. What it needs now is a
-  stub, which can be built, and a runtime, which still has to be named:
-  `[tools.ginary.target.<name>] erts = "dir:..."`. A cross target with no runtime named for it is
-  refused before the project is exported, quoting the table to write.
-
 - `ginary build`: a Gleam project in, one executable out. It reads `[tools.ginary]` from
   `gleam.toml`, runs `gleam export erlang-shipment`, resolves the application closure against
   the host OTP installation, stages a trimmed runtime, strips it, packs a deterministic
@@ -93,9 +88,12 @@ on a machine with no Erlang installation. Five phases, A through E, built it:
 
 ### Changed
 
+- A build for a target other than the host is no longer refused outright. What it needs now is a
+  stub, which can be built, and a runtime, which still has to be named:
+  `[tools.ginary.target.<name>] erts = "dir:..."`. A cross target with no runtime named for it is
+  refused before the project is exported, quoting the table to write.
 - The payload's compressor is flushed after `ginary.json` and `ginary.index.json`, so the two
   entries every reader takes on their own decode without the rest of the stream. `ginary inspect`
   can therefore still say what a damaged artifact was supposed to be.
 
-[Unreleased]: https://github.com/P4suta/ginary/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/P4suta/ginary/releases/tag/v0.1.0
+[Unreleased]: https://github.com/P4suta/ginary/commits/main

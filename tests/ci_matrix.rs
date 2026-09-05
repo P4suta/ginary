@@ -2000,3 +2000,97 @@ fn every_tool_ci_installs_is_pinned_to_an_exact_version() {
         offenders.join("\n")
     );
 }
+
+// ------------------------------------------- the disk-maintenance task (E20) --
+
+/// The maintenance task that reclaims the regenerable build output.
+const CACHE_TASK: &str = "clean:cache";
+
+/// The two trees this machine cannot cheaply rebuild.
+///
+/// `target/stubs` holds the five cross-built launcher stubs: `cross`, a docker
+/// daemon and minutes per target. `dist/otp` holds the committed catalog and
+/// the runtime tarballs it names, roughly 130 MB of downloads and a repack.
+/// Between them they are what nine gated tests read, and they are three orders
+/// of magnitude smaller than the 26 GB of `target/` that a cleaner is for. A
+/// cleaner that takes them is worse than no cleaner: it turns a disk-space
+/// chore into an afternoon.
+const PRECIOUS: [&str; 2] = ["dist/otp", "target/stubs"];
+
+#[test]
+fn the_cache_cleaner_removes_the_regenerable_build_output() {
+    let Some(task) = crate::common::mise::task(CACHE_TASK) else {
+        panic!(
+            "mise.toml declares no [tasks.\"{CACHE_TASK}\"]. The machine ran out of space during \
+             this project with `target/debug/incremental` at 25 GB, and the way out of that is a \
+             task with a reviewed list of what it deletes, not an `rm -rf` typed under pressure"
+        );
+    };
+    let mut rendered = format!(
+        "mise run {CACHE_TASK}\ndescription: {}\nremoves\n",
+        task.description
+    );
+    for path in task.removed_paths() {
+        rendered.push_str(&format!("  {path}\n"));
+    }
+    rendered.push_str("keeps\n");
+    for path in PRECIOUS {
+        rendered.push_str(&format!("  {path}\n"));
+    }
+    insta::assert_snapshot!("clean_cache_plan", rendered);
+}
+
+#[test]
+fn the_cache_cleaner_never_removes_what_is_expensive_to_rebuild() {
+    let Some(task) = crate::common::mise::task(CACHE_TASK) else {
+        panic!("mise.toml declares no [tasks.\"{CACHE_TASK}\"]");
+    };
+    // The rule itself is `crate::common::mise::cleaner_violations`, so that the
+    // shell this repository does *not* carry can be handed to it as well —
+    // see `tests/regressions/e20_a_removal_the_cleaner_rule_could_not_see.rs`.
+    // Here it is asked about the task as committed.
+    let violations = crate::common::mise::cleaner_violations(&task, &PRECIOUS);
+    assert!(
+        violations.is_empty(),
+        "`mise run {CACHE_TASK}` breaks the rule a cleaner is held to:\n- {}\n\nthe task reads:\n\
+         {}",
+        violations.join("\n- "),
+        task.commands().join("\n")
+    );
+}
+
+#[test]
+fn the_cache_cleaner_is_documented_beside_the_other_tasks() {
+    let testing = read("docs/dev/testing.md");
+    let needle = format!("mise run {CACHE_TASK}");
+    assert!(
+        testing.contains(&needle),
+        "docs/dev/testing.md does not document `{needle}`. A task nobody can find is a task \
+         nobody runs, and this one exists because the alternative is deleting `target/` by hand"
+    );
+    // By lines, not by byte offset: this document is dense with em dashes, and
+    // a window cut at `at + 800` lands inside one the moment a sentence above
+    // it changes, turning a documentation-drift failure into a `byte index is
+    // not a char boundary` panic that says nothing about the documentation.
+    //
+    // And every mention, not the first: the task is named in more than one
+    // section, and which one comes first is not a property worth asserting.
+    // What has to exist is *a* passage that names the task and both trees it
+    // keeps.
+    let lines: Vec<&str> = testing.lines().collect();
+    let documented = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&needle))
+        .any(|(at, _)| {
+            let window = lines[at..lines.len().min(at + 20)].join("\n");
+            PRECIOUS.iter().all(|precious| window.contains(precious))
+        });
+    assert!(
+        documented,
+        "no passage of docs/dev/testing.md names `{needle}` and, within twenty lines of it, both \
+         `{}` and `{}` as trees it never deletes. What a cleaner keeps is the only interesting \
+         thing about it",
+        PRECIOUS[0], PRECIOUS[1]
+    );
+}

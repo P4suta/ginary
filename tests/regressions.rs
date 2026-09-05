@@ -472,3 +472,18 @@ mod e18_the_notice_overclaimed_what_repository_scope_exposes;
 mod e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree;
 #[path = "regressions/e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs"]
 mod e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for;
+
+#[path = "regressions/e20_a_compact_manifest_read_as_one_with_no_entry.rs"]
+mod e20_a_compact_manifest_read_as_one_with_no_entry;
+#[path = "regressions/e20_a_dangling_changelog_link_was_pinned_by_its_tag.rs"]
+mod e20_a_dangling_changelog_link_was_pinned_by_its_tag;
+#[path = "regressions/e20_a_missing_cargo_toml_reported_a_libc_error.rs"]
+mod e20_a_missing_cargo_toml_reported_a_libc_error;
+#[path = "regressions/e20_a_removal_the_cleaner_rule_could_not_see.rs"]
+mod e20_a_removal_the_cleaner_rule_could_not_see;
+#[path = "regressions/e20_a_workflow_could_point_the_version_check_at_another_tree.rs"]
+mod e20_a_workflow_could_point_the_version_check_at_another_tree;
+#[path = "regressions/e20_release_please_did_not_rewrite_the_unreleased_section.rs"]
+mod e20_release_please_did_not_rewrite_the_unreleased_section;
+#[path = "regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs"]
+mod e20_the_cleaner_deleted_the_directory_it_was_run_from;
