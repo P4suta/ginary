@@ -1,0 +1,5 @@
+---
+source: tests/regressions/e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree.rs
+expression: rendered
+---
+skipping: /tmp/cargo-mutants-ginary-XcVxbW.tmp is not the top of a git work tree of its own, so what this repository tracks or ignores cannot be asked here. `cargo mutants` runs the suite in a copy of the tree that carries no `.git`; this claim is made from a checkout.

@@ -22,8 +22,9 @@ use serde_json::Value;
 
 use crate::common::deps::{Version, rust_version};
 use crate::common::repo::{
-    ToolchainSite, WorkflowStep, exists, parse_yaml, read, read_opt, read_or_missing, root,
-    rust_toolchain_sites, shell_code, shell_scripts_under, workflow_steps,
+    NameSite, ToolchainSite, WorkflowStep, exists, name_sites, option_value, parse_yaml, read,
+    read_opt, read_or_missing, root, rust_toolchain_sites, shell_code, shell_scripts_under,
+    workflow_steps,
 };
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
@@ -766,6 +767,183 @@ fn the_nightly_workflow_runs_mutants_fuzz_and_the_full_smoke_matrix() {
             "the mutants shard list is missing the high-value module `{module}`"
         );
     }
+}
+
+/// The Rust target the fuzz smoke builds for.
+///
+/// `cargo fuzz` builds with AddressSanitizer, and a sanitizer cannot be
+/// combined with a statically linked libc. The triple therefore has to be a
+/// gnu one, and it has to be *named*: cargo-fuzz's own default target is the
+/// triple the cargo-fuzz binary was built for, which is not the triple the
+/// job builds on. See
+/// `tests/regressions/e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs`.
+const FUZZ_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+/// Every `cargo fuzz` command the nightly workflow runs.
+///
+/// Read through [`WorkflowStep::commands`] rather than off the file, so a flag
+/// on a continuation line counts and a flag inside a comment does not.
+fn fuzz_commands() -> Vec<String> {
+    workflow_steps(".github/workflows/nightly.yml")
+        .iter()
+        .flat_map(WorkflowStep::commands)
+        .filter(|command| command.starts_with("cargo fuzz"))
+        .collect()
+}
+
+#[test]
+fn the_fuzz_smoke_names_the_triple_it_builds_the_sanitizer_for() {
+    let named: Vec<Option<String>> = fuzz_commands()
+        .iter()
+        .map(|command| option_value(command, "--target"))
+        .collect();
+
+    assert_eq!(
+        named,
+        vec![Some(FUZZ_TRIPLE.to_owned())],
+        "the fuzz smoke has to say which triple it builds for. cargo-fuzz's default target is \
+         the triple *its own binary* was compiled for, and this job installs cargo-fuzz from a \
+         prebuilt musl archive, so the default is `x86_64-unknown-linux-musl`; musl implies \
+         `+crt-static`, and rustc refuses a sanitizer against a statically linked libc. Every \
+         run of this job has failed on it:\n{:#?}",
+        fuzz_commands()
+    );
+}
+
+#[test]
+fn nothing_in_the_fuzz_smoke_asks_a_sanitizer_build_for_a_static_libc() {
+    for command in fuzz_commands() {
+        let target = option_value(&command, "--target").unwrap_or_default();
+        assert!(
+            !target.contains("musl"),
+            "`{target}` is a musl triple, and musl defaults to `+crt-static`. Installing the \
+             target would turn the first of the two errors into the second, not into a build: \
+             `sanitizer is incompatible with statically linked libc`. The fix is a gnu triple, \
+             not a target added:\n{command}"
+        );
+        assert!(
+            !command.contains("+crt-static"),
+            "a sanitizer build cannot ask for a statically linked libc:\n{command}"
+        );
+    }
+}
+
+#[test]
+fn nothing_the_fuzz_smoke_runs_under_can_put_a_static_libc_back() {
+    // A `--target` on the command line settles which triple is built for; it
+    // settles nothing about the flags that build runs under. `RUSTFLAGS` set
+    // on the workflow or on this job reaches the same rustc — cargo-fuzz
+    // appends its sanitizer flags to whatever it inherits — so
+    // `RUSTFLAGS: -Ctarget-feature=+crt-static` reproduces the original
+    // failure with every command-line assertion above still green. A site is
+    // dangerous when it is written at workflow level, which every job
+    // inherits, or in the `fuzz` job itself; the parsed document is scanned
+    // rather than the file, so the explanatory comment beside the `--target`
+    // (which names `crt-static` on purpose) is prose rather than a site.
+    let reachable = |site: &NameSite| site.job.is_empty() || site.job == "fuzz";
+
+    let static_libc: Vec<String> = name_sites(NIGHTLY_JOB.0, "crt-static")
+        .iter()
+        .filter(|site| reachable(site))
+        .map(|site| site.path.clone())
+        .collect();
+    assert_eq!(
+        static_libc,
+        Vec::<String>::new(),
+        "rustc refuses a sanitizer against a statically linked libc, and these are values the \
+         fuzz smoke runs under rather than comments about it"
+    );
+
+    let flags: Vec<String> = name_sites(NIGHTLY_JOB.0, "RUSTFLAGS")
+        .iter()
+        .filter(|site| reachable(site))
+        .map(|site| site.path.clone())
+        .collect();
+    assert_eq!(
+        flags,
+        Vec::<String>::new(),
+        "and the fuzz smoke names no `RUSTFLAGS` at all. cargo-fuzz builds its own — \
+         `-Cpasses=sancov-module -Zsanitizer=address` and the rest — on top of what it inherits, \
+         so a flag set here is a flag inside the sanitizer build. Whatever a future job needs \
+         from `RUSTFLAGS`, it does not need it in the one job whose build rustc will refuse"
+    );
+}
+
+#[test]
+fn the_fuzz_job_writes_down_why_it_pins_the_triple() {
+    let nightly = read(".github/workflows/nightly.yml");
+    let job = job_text(&nightly, "fuzz").expect("the nightly workflow declares a `fuzz` job");
+
+    for needle in ["sanitizer", "crt-static"] {
+        assert!(
+            job.contains(needle),
+            "a `--target` with no reason beside it is a flag the next reader deletes. The job \
+             says what breaks without it, and the word `{needle}` is half of that \
+             sentence:\n{job}"
+        );
+    }
+}
+
+#[test]
+fn an_option_value_is_read_in_both_spellings_and_not_off_a_longer_option() {
+    assert_eq!(
+        option_value(
+            "cargo fuzz run t --target x86_64-unknown-linux-gnu -- -x",
+            "--target"
+        ),
+        Some("x86_64-unknown-linux-gnu".to_owned()),
+        "the separated spelling"
+    );
+    assert_eq!(
+        option_value(
+            "cargo build --target=aarch64-unknown-linux-musl",
+            "--target"
+        ),
+        Some("aarch64-unknown-linux-musl".to_owned()),
+        "and the joined one"
+    );
+    assert_eq!(
+        option_value(
+            "cargo build --target-dir target/cross/x --release",
+            "--target"
+        ),
+        None,
+        "`--target-dir` is a different option, and this repository writes both"
+    );
+
+    // A separated value that is itself an option is not a value. `--target`
+    // with nothing after it, followed by another flag, means the triple was
+    // never named — and the assurance check over the fuzz job only asks
+    // whether a value is there, so answering `Some("--release")` would let a
+    // `cargo fuzz run --target --release` through as if it had named a triple.
+    assert_eq!(
+        option_value("cargo fuzz run t --target --release", "--target"),
+        None,
+        "an option is not the value of the option before it"
+    );
+    assert_eq!(
+        option_value("cargo fuzz run t --target", "--target"),
+        None,
+        "and neither is the end of the line"
+    );
+    assert_eq!(
+        option_value(
+            "cargo fuzz run t --target 'x86_64-unknown-linux-gnu'",
+            "--target"
+        ),
+        Some("x86_64-unknown-linux-gnu".to_owned()),
+        "a quoted value is the value, not the quotes"
+    );
+    assert_eq!(
+        option_value("cargo build --release", "--target"),
+        None,
+        "an option the line does not carry"
+    );
+    assert_eq!(
+        option_value("cargo build --target", "--target"),
+        None,
+        "and an option with nothing after it names no value"
+    );
 }
 
 // ------------------------------------------ the freshness exception --

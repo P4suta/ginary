@@ -134,7 +134,8 @@ reason:
 | `tests/doctor.rs`, `tests/verify.rs` | the host OTP's `crypto` NIF, and one real `ginary build` verified end to end | both gated on `require_tools`; `tests/verify.rs` also reads a shipment named by `GINARY_TEST_ARTIFACT` when one is set, and reports a skip when it is not |
 | `tests/strip.rs`, `tests/elf.rs` | the one `strip` run and the two `beam.smp` reads | both gated on `require_tools`; everything else in the two files runs against the test binary, a temporary tree, or a stub `erl` written by the builder |
 | `tests/e2e_cross.rs` | the real `gleam` and `erl` through `ginary build --target`, and `docker run` for three images | gated four ways, each absence a printed skip naming the task that produces it: `require_tools(&["gleam", "erl", "docker"])`, `dist/otp/catalog.json` (`mise run otp:repack`), a cross-built stub (`mise run stubs:build`), and for the aarch64 row a `docker run --platform linux/arm64` probe. The build runs under `BUILD_BUDGET` (900 s) and each container under `RUN_BUDGET` (180 s), with `--network none` so an artifact that fetched anything at run time would fail rather than pass |
-| `tests/smoke_matrix.rs` | `git check-ignore`, and nothing else | gated on `require_tools(&["git"])`; every other test in the file reads committed files |
+| `tests/smoke_matrix.rs` | `git check-ignore`, and nothing else | gated on `require_git_work_tree(&root())` — a question about what *this* repository ignores needs a checkout and not merely a `git` — and the child runs through `tools::git_command` under `LS_FILES_BUDGET` (120 s); every other test in the file reads committed files |
+| `tests/common/portability.rs`, `tests/common/homepath.rs` | one `git ls-files` each, behind `tracked_test_sources()` and `tracked_code_files()`, which every cross-file scan in the suite reads the tree through | the same `require_git_work_tree` gate, the same `git_command` and the same budget; `None` is a reported skip and never a directory walk, because the claim is about what the repository tracks |
 | `tests/stub.rs` | one gated test runs the real `gleam` and `erl` and needs a cross-built stub | gated on `require_tools(&["gleam", "erl"])` *and* on `stubfile::cross_stub`, which looks in `$GINARY_STUB_DIR` and then `target/stubs` and reports `skipping: no ginary-stub-<version>-<target>` when there is none; `GINARY_REQUIRE_STUBS=1` turns that skip into a failure, and `GINARY_REQUIRE_TOOLCHAIN` deliberately does not. Every other test in the file runs `ginary build` with `GINARY_STUB_DIR` and `GINARY_CACHE_DIR` pointed at empty directories the test owns, so a stub on the developer's machine cannot change the answer |
 | `tests/e2e_native.rs`, `tests/regressions/c2_the_artifact_never_had_to_use_the_stub.rs` | five more tests that need a cross-built stub | the same `stubfile::cross_stub` gate as the row above, for `linux-aarch64-musl`, `linux-x86_64-gnu` and `Target::host()`; they are named here because they are the five that ran in no CI job while the `smoke-matrix` step listed only two files. The workflow derives the list from the tree now: `tests/regressions/e6_five_stub_gated_tests_ran_in_no_ci_job.rs` |
 
@@ -316,12 +317,47 @@ when that fails. It escalates under no variable, for `require_elf_stripper`'s re
 not part of the toolchain an artifact is built with, and the two hosted runners that ship one,
 `ubuntu-24.04` and `windows-2022`, run the measurement without being told to.
 
-The rule the six gates share is worth stating once. A gate is a claim somebody has to be able to
+E19 adds a seventh, and it is `require_elf_stripper`'s kind again with a new subject:
+`require_git_work_tree` gates the tests that ask `git` a question about **this repository** —
+what it tracks, what it ignores. Two conditions, and they escalate differently on purpose. `git`
+has to be on `PATH` *and* to start, which is the ordinary gate and escalates under
+`GINARY_REQUIRE_TOOLCHAIN`, because a job that promises a toolchain and has no working `git` is
+broken. And the directory has to be the top of a git work tree of its own, which escalates under
+**no** variable, because nobody can install being a checkout: `cargo mutants` builds and tests
+inside a copy of the tree that carries no `.git`, and that copy is exactly where the variable is
+set. Every mutation-testing shard of the Nightly workflow died there on
+`git check-ignore` — outside a work tree it exits `128` for every path, so every question
+answered "not ignored" — and the baseline failing meant no mutant was ever run. The skip says
+which directory could not answer and why (`work_tree_skip_message`, held to a snapshot), and a
+`git` that is on `PATH` and will not start is reported as *the program* with the operating
+system's own words rather than as a directory that is not a checkout. So is a `git` that ran and
+*refused* to look — the `safe.directory` ownership refusal a bind-mounted checkout gets, a typo in
+`~/.gitconfig` that reaches every `git` child alike. `git` exits `128` for that and for `not a git
+repository` both, so the probe tells them apart by what `git` said (`git_command` pins `LC_ALL=C`
+so there is one thing to read), quotes it in the skip, and escalates it under
+`GINARY_REQUIRE_TOOLCHAIN`: nobody can install being a checkout, but one
+`git config --global --add safe.directory` in a job undoes a refusal.
+
+The probe is `git -C <dir> rev-parse --show-toplevel` compared against `<dir>`, not
+`--is-inside-work-tree`: being inside a work tree is not being one, and a copy unpacked under
+any directory that is itself a checkout — `TMPDIR` is nobody's promise — is inside a work tree
+that knows nothing about it, where `ls-files` lists nothing and succeeds and `check-ignore`
+answers about the enclosing repository. The stated cost is that a checkout of this repository
+nested inside a larger one stands down out loud instead of answering from its parent. Three
+tracked sources go through the gate — `tests/smoke_matrix.rs`, `tests/common/portability.rs` and
+`tests/common/homepath.rs` — and `tests/regressions/e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree.rs`
+scans every tracked test source to keep a fourth from carrying its own answer. Every `git` the
+suite starts goes through `tools::git_command`, which removes the six variables that change the
+answer whatever `-C` says (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and three more, listed as
+`GIT_REDIRECTING_VARS`), so the caller's shell cannot point a question about this repository at
+another one.
+
+The rule the seven gates share is worth stating once. A gate is a claim somebody has to be able to
 make true, so it belongs to whichever job installs the thing it is about:
 `GINARY_REQUIRE_TOOLCHAIN` to the jobs that install Erlang, Gleam and a POSIX shell,
 `GINARY_REQUIRE_STUBS` to the jobs that build or download the cross stubs,
-`GINARY_REQUIRE_ACTIONLINT` to the job that installs actionlint. A sixth variable is warranted
-exactly when a sixth kind of thing is promised by a different job — and *no* variable is
+`GINARY_REQUIRE_ACTIONLINT` to the job that installs actionlint. A fourth variable is warranted
+exactly when a new kind of thing is promised by a different job — and *no* variable is
 warranted when the thing is a property of the platform, because then there is no job that could
 set it honestly.
 
@@ -1200,6 +1236,12 @@ described after them:
   flag and does not pass it, and a commented-out `docker run --privileged` runs nothing. Use it in
   any rule that reads a `run:` block or a committed script as commands; a `split_once('#')` per
   scanner is the copy that drifts.
+- `option_value(command, option)` — the value one shell command line gives a long option, in
+  both spellings (`--target x` and `--target=x`), quotes stripped, and `None` for an option the
+  line does not carry or carries with nothing after it. `--target-dir` is a different option and
+  reads as one, which the naive `contains` does not. E19 bought it: the fuzz smoke has to *name*
+  the triple it builds the sanitizer for, because cargo-fuzz's own default is the triple its
+  prebuilt binary was compiled for.
 - `parse_yaml(text)` / `yaml(path)` — the document as YAML, through `saphyr`. GitHub loads the
   issue forms, `dependabot.yml` and every workflow with a YAML reader, and a substring assertion
   is just as happy with a file no reader will accept; parsing first makes that a test failure.
@@ -1244,7 +1286,7 @@ described after them:
   a job name, so a grep would answer a question nobody asked. E4 bought it, because every job
   had quietly pinned the MSRV and CI had therefore never once built this crate on stable.
 - `workflow_jobs(path)` — every job of one workflow as
-  `WorkflowJob { workflow, id, cond, environment, needs, env, commands, uses }`, with
+  `WorkflowJob { workflow, id, cond, environment, needs, runs_on, env, commands, uses }`, with
   `runs(needle)` and `uses_action(needle)` over the last two. `workflow_steps` merges the job's
   `env:` into each
   step, which answers "what does this command run under"; two questions are about the job
@@ -1257,7 +1299,13 @@ described after them:
   string however the environment is filled. `environment_name` collapses both spellings GitHub
   accepts — the scalar `environment: release` and the mapping
   `environment: {name: release, url: ...}` — to the name, and a job that declares none to the
-  empty string, which no environment can be called.
+  empty string, which no environment can be called. E19 added `runs_on`, the labels the job asks
+  for, collapsing all three spellings (`runs-on: <label>`, a sequence, and a mapping whose
+  `labels` are the labels and whose `group` is not one) and keeping a `${{ .. }}` as written. A
+  rule that pins a `--target` cannot be written without it: the triple is native on `ubuntu-24.04`
+  and a cross build on `ubuntu-24.04-arm`, every job of a workflow is in one file, and the first
+  label is a prefix of the second, so a search of the text answers about whichever job happens to
+  match.
 - `name_sites(path, needle)` / `yaml_text_occurrences(text, needle)` — every place one workflow
   writes a string, as `NameSite { workflow, job, path, count }`, and the same count taken off the
   file text outside whole-line comments. The first walks *every* scalar and mapping key of the

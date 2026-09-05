@@ -71,8 +71,22 @@ jobs:
           tool: cargo-fuzz@0.13.2
       # 30 seconds per target, seeded from the committed corpus; a crash is a
       # failed job with the reproducer in the log.
+      #
+      # --target is named rather than defaulted. cargo-fuzz with no --target
+      # builds for the triple its own binary was compiled for, and the install
+      # step above downloads a prebuilt archive built for
+      # x86_64-unknown-linux-musl; musl links libc statically, and rustc
+      # refuses a sanitizer against a statically linked libc:
+      #   error: sanitizer is incompatible with statically linked libc,
+      #   disable it using `-C target-feature=-crt-static`
+      # Every run of this job failed on that until 2026-09-05. Adding the musl
+      # target would silence only the second, consequential error ("can't find
+      # crate for `core`") and leave the first standing; this runner's own
+      # triple is a gnu one and links libc dynamically, so naming it is the
+      # fix. Pinned by tests/ci_matrix.rs and tests/regressions/
+      # e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs.
       - run: |
-          cargo fuzz run "${{ matrix.target }}" \
+          cargo fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" \
             fuzz/corpus/"${{ matrix.target }}" fuzz/seeds/"${{ matrix.target }}" \
             -- -max_total_time=30 -rss_limit_mb=4096
 

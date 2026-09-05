@@ -467,3 +467,8 @@ mod e18_the_branch_policy_was_claimed_without_the_bypass_beside_it;
 mod e18_the_environment_was_credited_with_keeping_other_jobs_out;
 #[path = "regressions/e18_the_notice_overclaimed_what_repository_scope_exposes.rs"]
 mod e18_the_notice_overclaimed_what_repository_scope_exposes;
+
+#[path = "regressions/e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree.rs"]
+mod e19_a_repository_property_test_could_not_answer_in_a_copy_of_the_tree;
+#[path = "regressions/e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs"]
+mod e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for;
