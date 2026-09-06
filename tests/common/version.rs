@@ -251,22 +251,33 @@ pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 ///
 /// The digits are read up to the first character that is neither a digit nor a
 /// dot, and then what *ends* them decides. A version ends at the end of the
-/// text, at a space, at a `]` or a `)` — and, for a `compare/` range, at the
-/// `...` the run itself swallowed. What it does not end at is a letter, a
-/// digit, a `-` or a `+`: `-` and `+` are semantic versioning's pre-release and
-/// build metadata, and `1.2.3-rc.1` names something other than the release
-/// whose digits it carries. Reading it as `1.2.3` would find a candidate
-/// nobody cut to be covered by the release that follows it; see
+/// text, at a space, at a `]` or a `)`. What it does not end at is a letter, a
+/// digit, a `-` or a `+`: the last two are semantic versioning's pre-release
+/// and build metadata, and `1.2.3-rc.1` names something other than the release
+/// whose digits it carries.
+///
+/// A dot is the one character that has to be argued twice. `compare/v0.1.0...HEAD`
+/// puts a version in front of a `...` separator, so a version may end with
+/// exactly three trailing dots and nothing else may follow from them: `1.2.3.`
+/// and `1.2.3.foo` are not `1.2.3`. Both halves of the rule are pinned by
 /// `tests/regressions/e22_a_prerelease_heading_read_as_the_release_it_precedes.rs`.
 fn version_at(text: &str) -> Option<(u64, u64, u64)> {
+    /// The separator a `compare/` range writes between two versions.
+    const RANGE: &str = "...";
+
     let rest = text.strip_prefix('v').unwrap_or(text);
     let run = rest
         .find(|character: char| !character.is_ascii_digit() && character != '.')
         .map_or(rest, |end| &rest[..end]);
     let digits = run.trim_end_matches('.');
-    let ends_the_version = !rest[digits.len()..].starts_with(|character: char| {
-        character.is_ascii_alphanumeric() || character == '-' || character == '+'
-    });
+    let dots = &run[digits.len()..];
+    let ends_the_version = if dots.is_empty() {
+        !rest[run.len()..].starts_with(|character: char| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '+'
+        })
+    } else {
+        dots == RANGE
+    };
     ends_the_version.then(|| parse_version(digits)).flatten()
 }
 

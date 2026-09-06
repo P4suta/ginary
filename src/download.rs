@@ -20,7 +20,8 @@
 //! The token goes to the API and nowhere else. [`get_text`] attaches it only
 //! for a URL under [`GITHUB_API_BASE`] — decided before the base override, so a
 //! mirror of the API is still the API and a catalogue document `ginary otp
-//! update` was pointed at is still not — [`fetch`] attaches none at all, since
+//! update` was pointed at is still not, and neither is a host whose name merely
+//! begins with the base — [`fetch`] attaches none at all, since
 //! the asset bytes come from a release download URL that redirects to a storage
 //! host, and the client is configured so that a redirect does not carry an
 //! `Authorization` header onward. What it buys is the rate limit: an
@@ -481,10 +482,7 @@ pub fn get_text(url: &str, net: &Net) -> Result<String, DownloadError> {
     // than what it is: a mirror of the GitHub API is still the GitHub API, and
     // a catalogue document `ginary otp update` was pointed at is not, whatever
     // host either sits on.
-    let authorization = net
-        .token
-        .as_ref()
-        .filter(|_| url.starts_with(GITHUB_API_BASE));
+    let authorization = net.token.as_ref().filter(|_| names_the_github_api(url));
     let url = net.rewrite(url);
     if net.offline {
         return Err(DownloadError::Offline {
@@ -555,6 +553,22 @@ const READ_LIMIT: u64 = MAX_TEXT_BYTES + 1;
 /// compresses everything sends for a body that will not compress. Twice is far
 /// past every such expansion and still a bound.
 const TRANSFER_LIMIT: u64 = 2 * READ_LIMIT;
+
+/// Whether `url` names the GitHub API itself.
+///
+/// The base has to be the whole **origin**, not a prefix of the text.
+/// `https://api.github.com` is a prefix of `https://api.github.com.evil.test`,
+/// which is a host somebody else registered, and of
+/// `https://api.github.com@evil.test`, where everything before the `@` is a
+/// username and the host is `evil.test` — the oldest phishing URL there is. A
+/// port is part of an origin too. So the URL is the base exactly, or the base
+/// followed by the one of `/`, `?` or `#` that starts a path, a query or a
+/// fragment; see
+/// `tests/regressions/e22_a_host_that_began_with_the_api_base_was_handed_the_token.rs`.
+fn names_the_github_api(url: &str) -> bool {
+    url.strip_prefix(GITHUB_API_BASE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+}
 
 /// What a non-2xx answer means, read from its headers as well as its status.
 ///
