@@ -211,10 +211,12 @@ description = "Cross-build both flavors of ginary for x86_64-pc-windows-gnu and 
 # `cross`, not `cargo`: `zstd-sys` is C, and building it for this triple needs
 # the mingw toolchain that lives in the cross image and not on this host.
 #
-# What this task does *not* prove is that any of it runs. There is no Windows
-# machine and no `erl.exe` here, so the launcher's spawn, its job object and
-# its console handler are compiled and nothing more. See `docs/dev/log/D2.md`
-# and the `## Windows` section of `README.md`.
+# What this task does *not* prove is that any of it runs: it is a cross build
+# from Linux, and a cross build starts nothing. Where a Windows host is
+# available the suite itself answers that question — `tests/launcher.rs` runs
+# there and exercises the spawn, the exit code, the share-mode lock and the job
+# object — and a real `erl.exe` is the `windows` job's. See
+# `docs/dev/log/E23.md` and the `## Windows` section of `README.md`.
 run = '''
 set -eu
 root="${MISE_PROJECT_ROOT:-$PWD}"

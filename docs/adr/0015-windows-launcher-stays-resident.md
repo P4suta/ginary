@@ -129,19 +129,37 @@ Most of the above is **compiled and not run**. `mise run build:windows` builds b
 `target::Target::host`, `selfexe::open_self`'s `current_exe` route and `trailer::read_from`'s
 `seek_read` loop. Nothing beyond that runs on a Linux machine.
 
-The `windows` job of `.github/workflows/ci.yml` runs the suite natively, and what that job
-reaches of this decision is **two of its mechanisms and not four**: the share-mode lock, through
-the `cfg(windows)` regression tests that take `SharedLock` twice over one entry, and
-`win32::process_is_alive`, through `cache::sweep`'s. **The spawn, the job object and the console
-handler have still never run**, anywhere: the job builds both flavors, runs `cargo test` and
-probes `erl.exe`, and it starts no packaged artifact, while no test in the tree constructs a
-`LaunchPlan` and calls `launch_windows::run` — the one call site is `launcher::start`, reached by
-a launching artifact and by nothing else. The pure rules underneath all of them — the cache root,
-the `\\?\` prefix, the two share modes, the exit-code mapping, the launch program and the Windows
-launch plan — are unit-tested on Linux precisely because that is all a Linux machine can honestly
-check.
+Three of the four mechanisms now run. E23 was written on the first Windows development host this
+project has had, and it removed the reason the launcher's own suite could not run there: the
+fixture's `erlexec` was a `#!/bin/sh` script, which Windows starts no more than it starts a text
+file, so `tests/launcher.rs` was `#![cfg(unix)]` in its entirety. It stages a real program there
+now — `examples/ginary_test_erlexec.rs` — and **the spawn runs**: every one of that file's claims
+about a launching artifact goes through `launch_windows::run` on a Windows host, including the
+exit code the artifact leaves, the shared lock the resident launcher holds for the runtime's
+lifetime, and the cache the run extracts. **The job object runs too**, and is asserted rather than
+inferred: `a_killed_launcher_takes_its_runtime_with_it` kills the resident launcher while the
+runtime is mid-nap and requires the runtime to go with it, with the probe's own ability to tell
+the two states apart asserted first. Together with the share-mode lock and
+`win32::process_is_alive`, which the `cfg(windows)` regression tests already reached, that is
+every part of this decision except one.
+
+**The console control handler has still never been given an event.** `ignore_console_ctrl` is
+called on every Windows launch and its answer is recorded, so the *installation* runs; what has
+never happened is a Ctrl-C arriving at a launcher that installed it. Driving one needs
+`GenerateConsoleCtrlEvent` against a process group the test owns, which is a Win32 call with no
+safe counterpart — a second `#[allow(unsafe_code)]`, in the test tree, which `CLAUDE.md` says
+needs an ADR of its own. E23 recorded that as a declined item rather than faking it or leaving it
+unsaid.
+
+The `windows` job of `.github/workflows/ci.yml` reaches the half no development host can: a real
+`erl.exe`. Until E23 it built both flavors, ran `cargo test` and probed `erl.exe` directly,
+starting no packaged artifact at all; it now packages the `hello_ffi` fixture against the runtime
+`setup-beam` installs, runs the artifact, and requires `halt(3)` to reach `%ERRORLEVEL%` as 3 —
+cold and then warm. The pure rules underneath all of it — the cache root, the `\\?\` prefix, the
+two share modes, the exit-code mapping, the launch program and the Windows launch plan — remain
+unit-tested on Linux, because that is what a Linux machine can honestly check.
 `tests/regressions/e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran.rs` derives
-both premises from the tree rather than trusting this paragraph.
+these premises from the tree rather than trusting this paragraph.
 
 One of the platform facts `docs/dev/log/D2.md` left to a real Windows host is now **measured**
 rather than assumed — and the measurement is an inference from silence, not a number printed in a
@@ -163,8 +181,36 @@ step now captures the code, prints it and ends on a verdict of its own, so the n
 job records the number directly and this citation is to be replaced by that one.
 `docs/dev/log/E15.md` records the diagnosis, and
 `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs` holds every `pwsh` step to
-ending on a status of its own. What that milestone still owes is the `otp_win64_<version>.zip`
-layout and the end-to-end run of a real artifact, on the same runner.
+ending on a status of its own.
+
+**That citation is now superseded, as it said it would be.** E23 rewrote the job to package the
+`hello_ffi` fixture against the runtime `setup-beam` installs and start the *artifact*, so the
+number is printed rather than inferred from silence. Run
+[34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195), job
+[101460035482](https://github.com/P4suta/ginary/actions/runs/34023412195/job/101460035482),
+`windows-2022`:
+
+```text
+probing D:\a\_temp\.setup-beam\otp\bin\erl.exe
+erl -noshell -eval halt(3) left exit code 3
+the artifact left exit code 0 for '0 hello world'
+the artifact left exit code 3 for halt(3)
+the second, warm run left exit code 3
+```
+
+Four facts, in the order they have to be read. The bare `erl` is the platform precondition, kept
+so that a runner where the emulator itself cannot report a code is a different failure. The three
+after it are this ADR's own subject: `run` spawned `erl.exe` inside a packaged application,
+assigned it to the job object, waited, and mirrored what it left — `0` on a cold cache with
+arguments, `3` for `halt(3)`, and `3` again on the warm cache. So the `otp_win64_<version>.zip`
+layout and **the end-to-end run of a real artifact** — the two things this paragraph recorded as
+still owing — are both discharged, on the runner it named.
+
+What is still owed is one mechanism, and only one: a console control **event**. `run` installs
+the handler on every launch, so `SetConsoleCtrlHandler` is called and its return is checked; no
+Ctrl-C has ever been delivered to a launcher that installed one. E23 declined to drive it rather
+than fake it, because `GenerateConsoleCtrlEvent` needs a second `#[allow(unsafe_code)]` and this
+repository requires an ADR of its own for that.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows

@@ -2,35 +2,50 @@
 //! The launcher contract, asserted on real processes and no Erlang.
 //!
 //! Every test here runs a hand-assembled artifact — this test run's own
-//! `ginary` binary with a payload and a trailer appended — whose `erlexec` is
-//! a shell script that prints the environment it was given and its own
-//! arguments before exiting 7. What the launcher decides is therefore visible
-//! on standard output, and what it decides is the whole subject: the argument
-//! vector, the environment difference, the cache, the exit code and the five
-//! numbered failures.
+//! `ginary` binary with a payload and a trailer appended — whose runtime is a
+//! stub that prints the environment it was given and its own arguments before
+//! exiting 7. What the launcher decides is therefore visible on standard
+//! output, and what it decides is the whole subject: the argument vector, the
+//! environment difference, the cache, the exit code and the five numbered
+//! failures.
 //!
 //! The environment of every run is cleared first. A launcher test that read
 //! the developer's `HOME` or their real cache would pass on one machine.
-
-// A unix file. Every test here starts a real process out of a hand-assembled
-// artifact whose `erlexec` is a `#!/bin/sh` script, and asserts what `execve`
-// did with it: none of that exists on Windows, where the launcher spawns and
-// waits instead. `tests/windows.rs` is the other half, and holds every rule of
-// the Windows launcher a Linux machine can honestly check. See
-// tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs.
-#![cfg(unix)]
+//!
+//! # Which claims run where
+//!
+//! This file was `#![cfg(unix)]` in its entirety until E23, because its
+//! fixture's `erlexec` was a `#!/bin/sh` script and Windows starts no such
+//! thing. `common::artifact` now stages a real program there instead, so the
+//! file runs on both platforms and each *claim* says which one it is about:
+//!
+//! > A launcher claim runs on every platform when it is about the payload, the
+//! > cache, the manifest, the launch plan, `GINARY_CMD` or the exit code. It
+//! > stays `#[cfg(unix)]` when it is about `execve`, mode bits, `flock`
+//! > semantics or signals — things the Windows launcher does not do, and
+//! > `docs/adr/0015-windows-launcher-stays-resident.md` says why.
+//!
+//! Each gated test carries its own reason. `tests/windows.rs` holds the other
+//! half: the rules of the resident launcher, including the ones this file's
+//! `execve` claims have no counterpart for. See
+//! tests/regressions/e6_the_test_helpers_did_not_compile_on_windows.rs for the
+//! gate this replaced.
 
 mod common;
 
 use std::path::{Path, PathBuf};
-#[cfg(feature = "fault-injection")]
+#[cfg(any(feature = "fault-injection", windows))]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use common::artifact::SIGNAL_ARG;
 use common::artifact::{
-    APP, ArtifactOptions, DUMP_ARG, ERTS_VSN, EXIT_ARG, RUN_BUDGET, Run, SIGNAL_ARG, SLEEP_ARG,
-    STUB_EXIT, STUB_SLOGAN, SyntheticArtifact, canonical_manifest, names_in, read_trace,
+    APP, ArtifactOptions, DUMP_ARG, ERTS_VSN, EXIT_ARG, RUN_BUDGET, Run, SLEEP_ARG, STUB_EXIT,
+    STUB_SLOGAN, SyntheticArtifact, bindir_path, emulator_name, extracted_path, host_manifest,
+    names_in, os_bytes, read_trace,
 };
 use common::cachefs::{DAY, HeldLock, is_unlocked, lock_path, plant_entry, wait_until_unlocked};
+use common::hostpath::names_the_same_directory;
 use common::tools::require_tools;
 
 use ginary::cache::Env;
@@ -71,10 +86,11 @@ fn ginary_lines(run: &Run) -> Vec<String> {
 /// Waits until `predicate` holds, or fails after five seconds.
 ///
 /// The `fault-injection` tests are the ones that pause a run long enough to
-/// have something to wait for. The lock proof waits too, on
-/// `cachefs::wait_until_unlocked`, because what it waits for is a lock rather
-/// than a file.
-#[cfg(feature = "fault-injection")]
+/// have something to wait for, and the Windows job-object proof is the other:
+/// it watches a runtime that is mid-nap stop being one. The lock proof waits
+/// too, on `cachefs::wait_until_unlocked`, because what it waits for is a lock
+/// rather than a file.
+#[cfg(any(feature = "fault-injection", windows))]
 fn wait_for(what: &str, mut predicate: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -98,7 +114,7 @@ fn runtime_artifact(
     files: &[(&str, &[u8])],
     change: impl FnOnce(&mut LaunchSpec),
 ) -> SyntheticArtifact {
-    let mut launch = canonical_manifest().launch;
+    let mut launch = host_manifest().launch;
     change(&mut launch);
     SyntheticArtifact::build_with(
         dir.path(),
@@ -234,16 +250,26 @@ fn the_runtime_starts_in_the_callers_working_directory() {
     let artifact = artifact(&dir);
     let run = artifact.run().output();
     ok(&run);
-    assert_eq!(
-        run.cwd().as_deref(),
-        Some(
-            std::fs::canonicalize(artifact.dir())
-                .expect("canonicalise")
-                .display()
-                .to_string()
-                .as_str()
-        ),
-        "the launcher must not chdir: a relative path in a user argument is the user's"
+    // Two spellings of one directory are one directory, and this claim is
+    // about which directory the runtime started in rather than about how it
+    // is written. `names_the_same_directory` is the rule E12 wrote for
+    // `tests/e2e_hello.rs` after the same comparison was made as text: it
+    // reconciles the verbatim `\\?\` prefix, the drive-letter case, the
+    // separators, a `/tmp` that is a symlink on macOS, and the 8.3 short name
+    // a Windows `%TEMP%` carries when the user name is long enough to have one
+    // — `C:\Users\RUNNER~1\…` on a GitHub runner, whose long form is
+    // `C:\Users\runneradmin\…`.
+    let reported = run.cwd().unwrap_or_else(|| {
+        panic!(
+            "the runtime printed no working directory:\n{}",
+            run.stdout_text()
+        )
+    });
+    assert!(
+        names_the_same_directory(&reported, artifact.dir()),
+        "the launcher must not chdir: a relative path in a user argument is the user's.\n\
+         reported {reported}\nexpected {}",
+        artifact.dir().display()
     );
 }
 
@@ -262,7 +288,7 @@ fn the_argument_vector_is_the_one_the_plan_built() {
     ];
     let plan = ginary::launch::plan(
         &artifact.key_dir(),
-        &canonical_manifest(),
+        &host_manifest(),
         &user,
         &Env::from_pairs([(
             std::ffi::OsString::from("HOME"),
@@ -271,15 +297,12 @@ fn the_argument_vector_is_the_one_the_plan_built() {
         &artifact.app_dir(),
         artifact.path(),
     )
-    .expect("the canonical manifest must produce a plan");
+    .expect("the host manifest must produce a plan");
 
     let expected: Vec<Vec<u8>> = plan
         .args
         .iter()
-        .map(|argument| {
-            use std::os::unix::ffi::OsStrExt as _;
-            argument.as_bytes().to_vec()
-        })
+        .map(|argument| os_bytes(argument))
         .collect();
     assert_eq!(
         run.argv(),
@@ -289,6 +312,10 @@ fn the_argument_vector_is_the_one_the_plan_built() {
     );
 }
 
+// An argument is bytes on unix and UTF-16 on Windows, so "a byte sequence
+// that is not valid UTF-8" is not a thing a Windows caller can type. There is
+// nothing here for the other platform to be right or wrong about.
+#[cfg(unix)]
 #[test]
 fn a_user_argument_that_is_not_valid_utf8_reaches_the_runtime_unchanged() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -357,8 +384,13 @@ fn supervise_mirrors_the_exit_code_too() {
 
 /// The signal the stub kills itself with, and the code the shell convention
 /// turns it into.
+#[cfg(unix)]
 const SIGKILL: i32 = 9;
 
+// Windows has no signals, so there is no `128 + signo` for a launcher to
+// report there: a terminated child leaves an exit code and nothing else. See
+// `docs/adr/0015-windows-launcher-stays-resident.md`.
+#[cfg(unix)]
 #[test]
 fn a_supervised_child_killed_by_a_signal_exits_128_plus_the_signal() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -545,6 +577,12 @@ fn ginary_cache_dir_is_honoured() {
     );
 }
 
+// The fixture makes a directory unwritable with a mode word, which Windows
+// does not have: access there is an ACL, and `cache::prepare` reads the
+// platform's own refusal rather than a bit. The rule itself — a refused root
+// falls back and says so once — is asserted for the Windows spelling by
+// `tests/windows.rs`.
+#[cfg(unix)]
 #[test]
 fn a_read_only_cache_root_falls_back_with_one_warning() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -751,6 +789,15 @@ fn a_process_killed_mid_extraction_is_swept_by_the_next_run() {
     });
     child.kill().expect("kill the paused extraction");
     let _ = child.wait();
+    // Reaped *and* released. Killing a process on Windows does not retire its
+    // id: the process object outlives it for as long as anybody holds a handle,
+    // and `std::process::Child` holds one until it is dropped. So
+    // `cache::sweep`'s `OpenProcess` probe answered "still extracting" about a
+    // process this test had just killed, and the tree was kept rather than
+    // swept — the launcher being conservative about exactly the right thing,
+    // asked a question the fixture had not finished making true. On unix
+    // `wait` is the whole of the reaping and this line changes nothing.
+    drop(child);
 
     let residue: Vec<String> = names_in(&app_dir);
     assert!(
@@ -868,6 +915,13 @@ fn a_panic_on_the_launcher_path_is_one_line_and_121() {
 
 // ---------------------------------------------- (m) a runtime that will not start --
 
+// The hint under test is glibc's: `execve` answers `ENOENT` for a program
+// that is on disk when the *loader* it names is not, and the launcher turns
+// that into a sentence. Windows has no such confusion — a spawn that cannot
+// find a DLL says `ERROR_MOD_NOT_FOUND` — and `launch::hint_for` there
+// deliberately returns nothing rather than inventing advice; see its doc
+// comment.
+#[cfg(unix)]
 #[test]
 fn a_runtime_whose_interpreter_is_missing_exits_125_with_a_hint() {
     // `execve` answers `ENOENT` for a program that is on disk when the *loader*
@@ -913,6 +967,7 @@ fn a_runtime_whose_interpreter_is_missing_exits_125_with_a_hint() {
 }
 
 /// Gives a file mode 0755.
+#[cfg(unix)]
 fn set_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
@@ -1083,16 +1138,19 @@ fn the_trace_records_a_launch_that_can_be_reproduced() {
         .rfind(|record| record.phase == "exec")
         .expect("the plan must be recorded immediately before execve");
 
+    // The launch program this host's artifact carries — `erlexec`, or
+    // `erl.exe` on Windows — under the spelling the extraction wrote it: the
+    // trace records the plan, and the plan names the path the launcher is
+    // about to hand to `execve` or `CreateProcess`.
+    let program = extracted_path(&bindir_path(
+        &artifact.key_dir(),
+        host_manifest().target.launch_program(),
+    ))
+    .display()
+    .to_string();
     assert_eq!(
         exec.kv.get("program").map(String::as_str),
-        Some(
-            artifact
-                .key_dir()
-                .join(format!("erts-{ERTS_VSN}/bin/erlexec"))
-                .display()
-                .to_string()
-                .as_str()
-        )
+        Some(program.as_str())
     );
 
     let argv: Vec<String> = serde_json::from_str(
@@ -1102,7 +1160,7 @@ fn the_trace_records_a_launch_that_can_be_reproduced() {
             .as_str(),
     )
     .expect("`argv` must be a JSON array of strings");
-    for entry in &canonical_manifest().launch.pa {
+    for entry in &host_manifest().launch.pa {
         let expected = artifact.key_dir().join(entry).display().to_string();
         assert!(
             argv.contains(&expected),
@@ -1132,7 +1190,7 @@ fn a_damaged_entry_is_extracted_again() {
 
     let beam = artifact
         .key_dir()
-        .join(format!("erts-{ERTS_VSN}/bin/beam.smp"));
+        .join(format!("erts-{ERTS_VSN}/bin/{}", emulator_name()));
     std::fs::remove_file(&beam).expect("damage the entry");
 
     let trace = dir.path().join("repair.jsonl");
@@ -1156,7 +1214,7 @@ fn a_payload_that_cannot_pass_preflight_exits_124_after_one_retry() {
     let artifact = SyntheticArtifact::build_with(
         dir.path(),
         &ArtifactOptions {
-            omit: vec![format!("erts-{ERTS_VSN}/bin/beam.smp")],
+            omit: vec![format!("erts-{ERTS_VSN}/bin/{}", emulator_name())],
             ..ArtifactOptions::default()
         },
     );
@@ -1375,20 +1433,26 @@ fn heart_bundles_its_program_and_names_the_artifact_in_heart_command() {
     let run = artifact.run().arg("--name").arg("world").output();
     ok(&run);
 
-    assert!(
-        artifact
-            .key_dir()
-            .join(format!("erts-{ERTS_VSN}/bin/heart"))
-            .is_file()
-    );
+    assert!(bindir_path(&artifact.key_dir(), "heart").is_file());
     assert!(
         run.argv_text().iter().any(|argument| argument == "-heart"),
         "the runtime must be told to start heart, and it got {:?}",
         run.argv_text()
     );
+    // Two quoting rules for two parsers, and `launch::shell_word` picks by
+    // platform: `/bin/sh` on unix, where a path of safe characters is left
+    // bare, and `CommandLineToArgvW` on Windows, where `heart` restarts the
+    // emulator through `CreateProcess` and a path carrying separators is
+    // wrapped in double quotes. This is the first run that has ever exercised
+    // the second one.
+    let artifact_word = if cfg!(windows) {
+        format!("\"{}\"", artifact.path().display())
+    } else {
+        artifact.path().display().to_string()
+    };
     assert_eq!(
         run.env().get("HEART_COMMAND").map(String::as_str),
-        Some(format!("{} --name world", artifact.path().display()).as_str()),
+        Some(format!("{artifact_word} --name world").as_str()),
         "heart restarts the application by re-running the artifact with its own arguments"
     );
 }
@@ -1521,10 +1585,15 @@ fn an_old_sibling_is_pruned_by_the_next_run_and_the_new_entry_is_not() {
         .kv
         .get("removed_paths")
         .expect("the prune record must name what it removed");
+    // A JSON array, read as one rather than searched as text: a Windows path's
+    // separators are escaped inside the string, so `\` in the record is `\\`
+    // and a substring match against the path itself never succeeds.
+    let removed: Vec<String> =
+        serde_json::from_str(removed).expect("`removed_paths` must be a JSON array of strings");
     assert!(
         removed.contains(&old.display().to_string()),
         "a count explains nothing: the record must name the entry that vanished, and it says \
-         {removed}"
+         {removed:?}"
     );
 }
 
@@ -1621,6 +1690,12 @@ fn ginary_prune_days_zero_turns_pruning_off_for_a_run() {
     );
 }
 
+// The fixture makes the prune fail by taking write permission off the app
+// directory with a mode word, which Windows has none of. That a prune which
+// cannot remove an entry is recorded and never fatal is asserted platform-free
+// by `cache::prune_app`'s own unit tests; what needs a mode bit is *this* way
+// of making one fail.
+#[cfg(unix)]
 #[test]
 fn a_failing_prune_never_fails_the_launch() {
     // An application directory whose entries cannot be removed is a
@@ -1840,7 +1915,7 @@ fn a_selftest_of_a_runtime_that_cannot_start_fails_the_step_and_exits_one() {
     let artifact = SyntheticArtifact::build_with(
         dir.path(),
         &ArtifactOptions {
-            omit: vec![format!("erts-{ERTS_VSN}/bin/beam.smp")],
+            omit: vec![format!("erts-{ERTS_VSN}/bin/{}", emulator_name())],
             ..ArtifactOptions::default()
         },
     );
@@ -1874,4 +1949,69 @@ fn the_usage_line_names_all_five_commands() {
         CMD_USAGE,
         "usage: GINARY_CMD=directory|extract-only|inspect|selftest|uninstall"
     );
+}
+
+// ------------------------------- (p) the job object, on Windows only --
+
+/// How long the job-object proof's runtime is asked to stay alive.
+///
+/// Long enough that nothing but the job could have ended it inside the window
+/// the assertion waits in, and short enough that a test which somehow fails to
+/// kill it does not leave a process behind for half a minute.
+#[cfg(windows)]
+const JOB_NAP: &str = "20";
+
+/// A launcher that is killed takes the runtime with it.
+///
+/// The first test of `launch_windows::win32`'s job object, and the reason it
+/// carries the crate's only `#[allow(unsafe_code)]`. Windows has no `execve`,
+/// so the launcher stays resident and the runtime is a *child*: a launcher
+/// that is killed without one would leave an orphaned emulator holding the
+/// cache entry open forever, which is the failure
+/// `docs/adr/0015-windows-launcher-stays-resident.md` argues the
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` limit away. Until this test there was
+/// no evidence it did: `tests/windows.rs` says in its own header that the job
+/// object is "not here, and cannot be", and the CI job that was supposed to
+/// close the gap probed `erl.exe` directly and never started a ginary artifact
+/// at all.
+///
+/// The probe is deletion, because Windows will not unlink the image of a
+/// running program: while the runtime is alive its own file cannot be removed,
+/// and once the job has taken it the file goes. That the probe can tell the
+/// two apart is asserted here rather than assumed — a removal that succeeded
+/// while the runtime ran would make the second half of the test pass for no
+/// reason.
+#[cfg(windows)]
+#[test]
+fn a_killed_launcher_takes_its_runtime_with_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+
+    // `--dump` writes the crash dump before the nap, so the file appearing is
+    // the runtime saying "I am running" — and it is the runtime saying it,
+    // rather than the launcher, which is what the rest of this test is about.
+    let mut launcher = artifact
+        .run()
+        .arg(DUMP_ARG)
+        .arg(SLEEP_ARG)
+        .arg(JOB_NAP)
+        .spawn();
+    let dump = artifact.app_dir().join("erl_crash.dump");
+    wait_for("the runtime to start", || dump.is_file());
+
+    let program = bindir_path(&artifact.key_dir(), host_manifest().target.launch_program());
+    assert!(
+        std::fs::remove_file(&program).is_err(),
+        "the probe is worthless unless a running program's image cannot be removed, and {} \
+         was removed while the runtime was still in its nap",
+        program.display()
+    );
+
+    launcher.kill().expect("kill the resident launcher");
+    let _ = launcher.wait();
+    drop(launcher);
+
+    wait_for("the runtime to be taken down with its launcher", || {
+        std::fs::remove_file(&program).is_ok()
+    });
 }

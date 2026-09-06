@@ -33,6 +33,7 @@ pub mod mise;
 #[cfg(feature = "cli")]
 pub mod native;
 pub mod nightly;
+pub mod oserror;
 pub mod payload;
 pub mod portability;
 pub mod project;

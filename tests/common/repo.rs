@@ -540,6 +540,142 @@ pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
     workflow_steps_of(relative, &yaml(relative))
 }
 
+/// A `pwsh` script's executable lines, lower-cased, comments removed.
+///
+/// Two things every rule below needs and none of them should repeat. `#` opens
+/// a comment in PowerShell as it does in `sh`, so [`shell_code`] is the same
+/// reader; and PowerShell folds case in variable names, operator names and
+/// keywords, so `$Halted -NE 3` and `$halted -ne 3` are one comparison. A rule
+/// that read either differently would be a rule about how a step was typed.
+///
+/// What this does not do is parse PowerShell. A path inside a quoted string is
+/// still matched, deliberately: `Join-Path $work "build/ginary/app.exe"` names
+/// the artifact and a rule that skipped quoted text would miss every step that
+/// does it that way.
+fn pwsh_code_lines(script: &str) -> Vec<String> {
+    script
+        .lines()
+        .map(|line| shell_code(line).trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// Every variable a `pwsh` script fills from `$LASTEXITCODE`, lower-cased.
+///
+/// A step captures the code rather than testing it in place, because the next
+/// external command rewrites the automatic variable — a `Write-Host` between
+/// the run and the comparison is enough to lose it, which is the lesson E15
+/// paid for. So the comparison names a variable of the step's own choosing and
+/// a rule about the comparison has to find that name first.
+pub fn captured_exit_codes(script: &str) -> Vec<String> {
+    pwsh_code_lines(script)
+        .iter()
+        .filter_map(|line| captured_exit_code(line))
+        .collect()
+}
+
+/// The variable one line fills from `$LASTEXITCODE`, if it is such a line.
+///
+/// The line is already lower-cased and comment-free; see [`pwsh_code_lines`].
+fn captured_exit_code(line: &str) -> Option<String> {
+    let (left, right) = line.split_once('=')?;
+    if right.trim() != "$lastexitcode" {
+        return None;
+    }
+    let name = left.trim();
+    let bare = name.strip_prefix('$')?;
+    (!bare.is_empty()
+        && bare != "lastexitcode"
+        && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    .then(|| name.to_owned())
+}
+
+/// Whether a script names `path`, in either separator spelling.
+///
+/// A `pwsh` step writes `build\ginary` as readily as `build/ginary`, and both
+/// name the same directory to Windows. A rule that reads only one of them is a
+/// rule about how the step was typed rather than about what it runs, and it
+/// fails the day someone rewrites the step in the other dialect.
+///
+/// Comments are not a mention: a step that only *discusses* a directory does
+/// not run anything in it.
+pub fn names_path(script: &str, path: &str) -> bool {
+    let wanted = path.replace('\\', "/").to_ascii_lowercase();
+    pwsh_code_lines(script)
+        .iter()
+        .any(|line| line.replace('\\', "/").contains(&wanted))
+}
+
+/// Whether a `pwsh` script compares a captured exit code against `code`.
+///
+/// A comparison, and not a mention. `contains("3")` — or `contains("halt(3)")`
+/// — is satisfied by a version number, a path, or a comment *about* the number,
+/// and E23 found exactly that: the rule that was supposed to prove an exit code
+/// crossed the Windows launcher passed over a step that ran `erl.exe` directly,
+/// and would pass again over a step that only mentions the code in a comment.
+/// A rule about a number a job checks reads the check.
+pub fn compares_a_captured_exit_code(script: &str, code: i32) -> bool {
+    let lines = pwsh_code_lines(script);
+    let names: Vec<String> = lines
+        .iter()
+        .filter_map(|line| captured_exit_code(line))
+        .collect();
+    lines
+        .iter()
+        .any(|line| names.iter().any(|name| compares(line, name, code)))
+}
+
+/// Whether one lower-cased line compares `name` against `code`.
+fn compares(line: &str, name: &str, code: i32) -> bool {
+    line.contains(&format!("{name} -ne {code}")) || line.contains(&format!("{name} -eq {code}"))
+}
+
+/// Whether a `pwsh` script starts a program under `path` and checks *that*
+/// program's exit code against `code`.
+///
+/// The three facts a step has to carry, tied to one command rather than found
+/// separately anywhere in the text. A step that names `build/ginary`, runs
+/// `erl.exe`, captures `erl.exe`'s code and compares it to 3 satisfies "names
+/// the directory" and "compares a captured code" and proves nothing about the
+/// launcher — which is the defect E23 is named for, reappearing one level up.
+///
+/// So: the variable an invocation names has to hold a path under `path`, the
+/// capture has to be the next executable line after that invocation — anything
+/// in between has already overwritten `$LASTEXITCODE` — and the comparison has
+/// to be against the variable that capture filled.
+pub fn runs_and_checks(script: &str, path: &str, code: i32) -> bool {
+    let lines = pwsh_code_lines(script);
+    let wanted = path.replace('\\', "/").to_ascii_lowercase();
+
+    // The variables holding a path under `path`, from their assignments.
+    let holders: Vec<String> = lines
+        .iter()
+        .filter_map(|line| {
+            let (left, right) = line.split_once('=')?;
+            let name = left.trim();
+            name.strip_prefix('$')
+                .filter(|bare| bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))?;
+            right
+                .replace('\\', "/")
+                .contains(&wanted)
+                .then(|| name.to_owned())
+        })
+        .collect();
+
+    let executable: Vec<&String> = lines.iter().filter(|line| !line.is_empty()).collect();
+    executable.windows(2).any(|pair| {
+        let (invocation, capture) = (pair[0], pair[1]);
+        // `& $artifact 3`, or the path written out in full.
+        let starts_it = holders
+            .iter()
+            .any(|held| invocation.starts_with(&format!("& {held}")))
+            || invocation.replace('\\', "/").contains(&wanted);
+        let Some(captured) = captured_exit_code(capture) else {
+            return false;
+        };
+        starts_it && lines.iter().any(|line| compares(line, &captured, code))
+    })
+}
+
 /// Every step of every job of one already-parsed workflow, in file order.
 ///
 /// [`workflow_steps`] is this over a committed file. The split exists so that

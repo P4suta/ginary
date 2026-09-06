@@ -36,7 +36,7 @@
 | `src/bundle.rs` unit tests | the three rules of a build with no seam an integration test can reach: the programs `distribution` and `heart` add to the ERTS bin set, the warning a distributed build with no `-name` earns, and the two ways a file `[tools.ginary]` names can fail to be read |
 | `tests/launch.rs` | the pure plan: the argument vector in order, `GINARY_ERL_FLAGS`, non-UTF-8 arguments, the six set variables, the removal list and its `ERL_OTP*_FLAGS` family, the two refusals, and every preflight shape |
 | `tests/cache.rs` | resolution and creation, the fallback warning, the ten extraction steps against a real payload, the sweep's three pid cases, and `clean` |
-| `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts, the runtime settings, pruning on launch and the fault points |
+| `tests/launcher.rs` | the launcher contract on real processes: the environment, the argv, the exit code, the cache, the five failures, `GINARY_CMD`, `GINARY_DEBUG`, `GINARY_TRACE`, eight concurrent cold starts, the runtime settings, pruning on launch and the fault points. Runs on Windows as well as unix since E23, one claim at a time by the rule its header states, plus the job object a killed launcher closes |
 | `tests/cache_lock.rs` | the two locks against util-linux `flock(1)`: a shared lock does not exclude a second shared lock and does exclude an exclusive one, `try_exclusive` answers `None` for an entry somebody holds, and the descriptor a `SharedLock` carries is not close-on-exec |
 | `tests/artifact_real.rs` | toolchain-gated: one real artifact, assembled by hand out of the fixture and run with a cleared environment |
 | `tests/config.rs` | `[tools.ginary]`: the defaults, every key, the five rules serde cannot state, the merge of the CLI flags over the table, the four shapes a `--out` can take, and the C4 native settings — a `[tools.ginary.native.<package>]` table read back against its package, and a target's own `native` map beside its hooks |
@@ -170,6 +170,31 @@ built from `payload::pack`, `manifest::Index` and the staging *listing* types, a
 items `assemble.rs` keeps outside its own `cli` gate, so the whole launcher contract — the
 argument vector, the environment difference, the cache, the lock, the five numbered exit codes —
 is asserted against the stub build as well as the full one.
+
+## The suite has a Windows-native flavor
+
+Both flavors above run on Windows, and since E23 `tests/launcher.rs` runs there too: it carried a
+file-level `#![cfg(unix)]` until then, so the launcher's entire behavioural surface compiled to
+nothing on the platform where it is resident and `unsafe`. The rule it states in its own header
+decides each claim one at a time — a claim runs everywhere when it is about the payload, the
+cache, the manifest, the launch plan, `GINARY_CMD` or the exit code, and stays `#[cfg(unix)]`
+when it is about `execve`, mode bits, `flock` semantics or signals, which the Windows launcher
+does not do and [ADR 0015](../adr/0015-windows-launcher-stays-resident.md) says why. Five claims
+stay gated and each names its reason in the source. A sixth test is Windows-only: the job object
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` sets up, driven by killing the launcher and watching the
+runtime go with it.
+
+What that buys is the first execution of the `\\?\` extraction, the two-open share-mode lock, the
+`OpenProcess` probe `cache::sweep` uses, and the spawn-and-wait of `launch_windows::run` — every
+one of which had a test before and no machine to run it on. What it does not buy is a runtime:
+this is still a suite that runs with no Erlang installed, so `halt(3)` reaching `%ERRORLEVEL%`
+through a *real* `erl.exe` remains the CI `windows` job's to prove.
+
+A Windows contributor should expect the toolchain-gated tests to skip (no `gleam`, no `erl`, no
+ELF `strip`) and must not set `GINARY_REQUIRE_TOOLCHAIN=1` there — the skips are honest on that
+host and CI asserts them where they are not. `mise run <task>` cannot provision a Windows host at
+all, because `mise.toml` pins an `erlang` that mise builds from source through kerl; run the
+`cargo` command line each task wraps instead.
 
 **A test that differs between the flavors asserts both branches rather than one.**
 `tests/stub_flavor.rs` is the pattern: the sentence a payloadless stub prints lives in
@@ -387,6 +412,17 @@ to `erl.exe`, because nothing there reads a shebang — `CreateProcess` looks fo
 `#!`, and refuses the file, which is how thirty-six targets failed on the first Windows runner
 inside the fixture builder itself. The shim reads its steps from `<program>.steps` and writes
 `<program>.argv`, and `shim_sidecar` is the one naming rule both forms use for those files.
+
+E23 applied the same two-form rule to the *launcher* fixture, which is a separate program:
+`tests/common/artifact.rs`'s `erlexec_form` chooses between the `/bin/sh` body and the compiled
+`examples/ginary_test_erlexec.rs`. There are therefore two compiled fixture programs and they are
+not interchangeable — the shim runs a closed list of `ShimStep`s from a sidecar, the erlexec
+fixture answers command-line arguments (`--exit`, `--signal`, `--sleep`, `--dump`) because that
+is what a launcher hands its runtime. What it must not do is spell any of the launch contract
+twice: it reads every variable name, argument spelling and dump line from a `<program>.contract`
+sidecar that `erlexec_contract_text` writes, so the shell body and the compiled body cannot drift
+apart. The shell body itself is generated by `erlexec_shell_body` from the same lists, which is
+why one rendering can be regenerated on a host that cannot run the other.
 `tests/common/snapshot.rs` is the fourth helper, and exists because those
 trees live in a `tempfile` directory whose name changes on every run: `scrub` replaces each root
 with a placeholder, longest path first, and respells every separator as `/` through
@@ -438,17 +474,26 @@ boots what assembly wrote. `tests/common/bounded.rs` is what both of them spawn 
 neither can hang the suite; it is the test-side counterpart of `src/process.rs`, which it cannot
 call because that function takes neither an environment nor a working directory.
 `tests/common/artifact.rs` is what A3b added, and it is the only helper that builds a whole
-*artifact*: a staging root whose `erts-<vsn>/bin` programs are `/bin/sh` scripts, the real
-`payload::pack` over it, and this test run's own `ginary` binary with that payload and a real
-trailer appended. The launch program's stub prints one `env:<NAME>=<VALUE>` line for every
-variable the launch contract names — `<unset>` for one that is absent, so an absent `ERL_LIBS`
-cannot be confused with a stub that never ran — then one `argv:` line per argument, and exits 7.
+*artifact*: a staging root whose `erts-<vsn>/bin` programs are `/bin/sh` scripts on unix and
+copies of the compiled `examples/ginary_test_erlexec.rs` on Windows (E23; see the two-form rule
+below), the real `payload::pack` over it, and this test run's own `ginary` binary with that
+payload and a real trailer appended. The manifest it writes follows the host — `erl.exe` and the
+Windows row of `target::ALL` there — because a launcher only starts a program its own manifest
+names. The reader fixtures do not want that: `verify`, `sbom` and `inspect` assert against a
+fixed tree rather than the host's, so `tests/common/repack.rs` asks for the canonical unix
+manifest and a placeholder runtime explicitly. The launch program's stub prints one
+`env:<NAME>=<VALUE>` line for every variable the launch contract names — `<unset>` for one that
+is absent, so an absent `ERL_LIBS` cannot be confused with a stub that never ran — then one
+`argv:` line per argument, and exits 7.
 Seven is not zero on purpose: "the exit code is mirrored" has to be a claim about a number
 nothing else in the system produces. The stub also answers `--exit N`, `--signal N` (it kills
 itself, so a supervised run has a signal to turn into `128 + signo`), `--dump` (it writes
 `$ERL_CRASH_DUMP` with a `Slogan:` line in it, which is all `launch::supervise` reads) and
-`--sleep N` (it runs `sleep N` as a separate process, which is what gives ADR 0010's proof a
-runtime to observe and a grandchild to inherit the lock). It exits 0 rather than 7 when its
+`--sleep N` (the shell rendering runs `sleep N` as a separate process — so a test that uses it
+must put a real `PATH` on the child — while the compiled one sleeps in its own; either way the
+point is a runtime that is still running when the test looks, which is what gives ADR 0010's
+proof a runtime to observe and, on unix, a grandchild to inherit the lock). It exits 0 rather
+than 7 when its
 `-eval` is `erlang:halt(0)`, so that `GINARY_CMD=selftest` exercises the whole path on a machine
 with no Erlang, and the `env:` lines it prints cover `HEART_COMMAND` and the manifest's own
 `launch.env` names alongside the six the launch contract fixes. Everything the launcher decides is

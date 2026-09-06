@@ -3,8 +3,10 @@
 //! and wait for it.
 //!
 //! Windows has no `execve`, so the launcher cannot hand its process over to
-//! `erl.exe` the way [`crate::launch::exec`] hands it to `erlexec`. It stays
-//! resident instead, which changes three things and nothing else:
+//! `erl.exe` the way [`crate::launch`]'s `exec` hands it to `erlexec` — a
+//! function that is `#[cfg(unix)]`, and therefore not a link this module can
+//! carry when the documentation is built for the platform the module is about.
+//! It stays resident instead, which changes three things and nothing else:
 //!
 //! - the shared lock on the cache entry is held by *this* process for the
 //!   child's lifetime, rather than being inherited across an exec;

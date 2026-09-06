@@ -22,6 +22,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::fake_otp::FakeOtp;
+use common::repo::shell_code;
 
 use ginary::assemble::{
     self, AssembleError, WINDOWS_EMULATOR_DLL, WINDOWS_ERL_INI, WINDOWS_LAUNCH_BINARY,
@@ -235,11 +236,26 @@ fn the_windows_build_task_builds_both_flavors_for_the_windows_triple() {
             "`build:windows` has to run the cross build with {needle}; it holds: {task}"
         );
     }
+    // Counted over the task's *code* rather than over its text. A `#` comment
+    // in a mise task is prose, and prose that happens to say `cross build`
+    // used to count as a build: rewording the paragraph above the task took
+    // this assertion from 2 to 4 without a line of it changing. A rule about
+    // what a task runs has to read what it runs. See `repo::shell_code`.
+    let builds = task
+        .lines()
+        .map(shell_code)
+        .filter(|code| code.contains("cross build"))
+        .count();
     assert_eq!(
-        task.matches("cross build").count(),
+        builds,
         2,
         "both flavors are built: the launcher-only stub and the full command line tool, because \
-         a cfg split that only compiles one of them is half a split"
+         a cfg split that only compiles one of them is half a split. The task's code holds: {}",
+        task.lines()
+            .map(shell_code)
+            .filter(|code| !code.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 

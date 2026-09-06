@@ -468,13 +468,43 @@ jobs:
       # Both flavors, and the launcher-side unit tests natively (the wine gap
       # from D2 — a real Rust test binary cannot start under the cross image's
       # wine, so these run nowhere until a real Windows runner does it).
-      - run: cargo build --no-default-features --release --locked
+      #
+      # The stub goes into a target directory of its own, the way the macOS job
+      # builds its darwin stub, so that the full build below does not overwrite
+      # the launcher-only binary the packaging step needs.
+      - run: cargo build --no-default-features --release --locked --target-dir target/stub
       - run: cargo build --release --locked
+      # `ginary build` looks a stub up as `$GINARY_STUB_DIR/ginary-stub-<version>-<target>`,
+      # with no suffix on any platform: it reads the bytes rather than starting
+      # the file. See `src/stub.rs`.
+      - name: Name the stub the builder looks up
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target/stubs | Out-Null
+          $line = Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' |
+            Select-Object -First 1
+          if (-not $line) {
+            Write-Host "::error::no version line in Cargo.toml"
+            exit 1
+          }
+          $version = $line.Matches[0].Groups[1].Value
+          Copy-Item target/stub/release/ginary.exe `
+            "target/stubs/ginary-stub-$version-windows-x86_64"
+          Write-Host "stub: ginary-stub-$version-windows-x86_64"
+          exit 0
       # `--no-fail-fast` for the reason the `test` job gives: cargo abandons
       # every target after the first that fails, so the seven library failures
       # this job reported on the first Windows-native run were the first slice
       # of a report rather than the whole of one.
       - run: cargo test --locked --no-fail-fast
+      # Rustdoc, here as well as in `lint`, because an intra-doc link to a
+      # `#[cfg(unix)]` item resolves on Linux and is a hard error on Windows —
+      # and the `lint` job documents only Linux. Three such links were in the
+      # tree when a Windows host first ran this command; see docs/dev/log/E23.md.
+      - name: Documentation, with rustdoc warnings denied
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc --locked --no-deps
       # Prove an exit code crosses the launcher: erl halt(3) reaches the parent,
       # which is the platform fact `launch_windows::run` rests on and the one
       # D2 recorded as needing a real Windows host. ADR 0015 cites the run.
@@ -524,6 +554,90 @@ jobs:
           Write-Host "erl -noshell -eval halt(3) left exit code $code"
           if ($code -ne 3) {
             Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
+            exit 1
+          }
+          exit 0
+      # The claim the readiness checklist books against this job, and until E23
+      # the job did not make it. The step above starts `erl.exe`; this one
+      # packages an application, starts the *artifact*, and reads the code the
+      # launcher left — which is `launch_windows::run` spawning a real runtime,
+      # waiting for it and mirroring what it exited with.
+      #
+      # The same shape as the macOS job's `Package, run and verify a hello_ffi
+      # artifact`, including the two things that job paid for: the ERTS source
+      # is a `gleam.toml` setting rather than a flag `ginary build` does not
+      # have, and it is appended to a *copy* of the fixture and never to the
+      # committed one.
+      #
+      # E15's lesson applies to every line below: the step captures the code,
+      # prints it, compares it, and exits on its own verdict. See
+      # tests/regressions/e23_the_windows_job_proved_erlang_rather_than_the_launcher.rs.
+      - name: Package a hello_ffi artifact, run it and read its exit code
+        shell: pwsh
+        env:
+          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+        run: |
+          $otp = $env:INSTALL_DIR_FOR_OTP
+          if (-not $otp -or -not (Test-Path -LiteralPath $otp)) {
+            Write-Host "::error::INSTALL_DIR_FOR_OTP names no directory: '$otp'"
+            exit 1
+          }
+          $work = Join-Path $env:RUNNER_TEMP "hello_ffi"
+          Copy-Item -Recurse -Force tests/fixtures/hello_ffi $work
+          $root = $otp -replace '\\', '/'
+          Add-Content -Path (Join-Path $work "gleam.toml") -Value @"
+
+          [tools.ginary.target."windows-x86_64"]
+          erts = "dir:$root"
+          "@
+          $ginary = Join-Path $env:GITHUB_WORKSPACE "target/release/ginary.exe"
+          Push-Location $work
+          & $ginary build --target windows-x86_64
+          $built = $LASTEXITCODE
+          Pop-Location
+          if ($built -ne 0) {
+            Write-Host "::error::ginary build left exit code $built"
+            exit 1
+          }
+          $artifact = Join-Path $work "build/ginary/hello_ffi-windows-x86_64.exe"
+          if (-not (Test-Path -LiteralPath $artifact)) {
+            Write-Host "::error::no artifact at $artifact"
+            Get-ChildItem -Recurse (Join-Path $work "build/ginary") | ForEach-Object {
+              Write-Host $_.FullName
+            }
+            exit 1
+          }
+          # Exit 0 first, with arguments, so a failure here is about starting at
+          # all rather than about the number.
+          & $artifact 0 hello world
+          $ran = $LASTEXITCODE
+          # Single quotes around the arguments, not backticks: a backtick is
+          # PowerShell's escape character, so a trailing one escapes the closing
+          # quote and the string runs on to the next one. That is a parse error
+          # for the whole step, which is why this one ran nothing at all on its
+          # first runner — and why `actionlint` did not see it, since it checks
+          # workflow structure and `bash`, not embedded `pwsh`.
+          Write-Host "the artifact left exit code $ran for '0 hello world'"
+          if ($ran -ne 0) {
+            Write-Host "::error::expected 0 from the artifact, got $ran"
+            exit 1
+          }
+          # And then the number the whole row is about: halt(3) inside a
+          # packaged application, through the launcher, into %ERRORLEVEL%.
+          & $artifact 3
+          $halted = $LASTEXITCODE
+          Write-Host "the artifact left exit code $halted for halt(3)"
+          if ($halted -ne 3) {
+            Write-Host "::error::expected 3 through the launcher, got $halted"
+            exit 1
+          }
+          # The second run is a warm cache hit, which is the other half of what
+          # a user does. Its code has to be the same.
+          & $artifact 3
+          $again = $LASTEXITCODE
+          Write-Host "the second, warm run left exit code $again"
+          if ($again -ne 3) {
+            Write-Host "::error::expected 3 from the warm run, got $again"
             exit 1
           }
           exit 0

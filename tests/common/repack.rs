@@ -220,8 +220,21 @@ impl Repacked {
 /// rather than a property of the machine.
 pub fn build(dir: &Path, options: &RepackOptions) -> Repacked {
     let staging = dir.join("staging");
-    let listing = super::artifact::stage(&staging, &options.artifact);
+    // Nothing built here is ever started: these fixtures are read by
+    // `inspect`, `verify` and `sbom`. They are held to what the tree
+    // *contains*, so the launch program stays a placeholder rather than
+    // becoming a real program — and therefore a native object — on a platform
+    // that needs one to be startable.
+    let artifact = super::artifact::ArtifactOptions {
+        placeholder_runtime: true,
+        ..options.artifact.clone()
+    };
+    let listing = super::artifact::stage(&staging, &artifact);
 
+    // The canonical unix manifest, which is what `placeholder_runtime` above
+    // asked `stage` for: these fixtures plant Linux ELF objects on purpose and
+    // are held to what the verifier makes of them, so the tree and the
+    // manifest have to name one platform on every host.
     let mut manifest = super::artifact::canonical_manifest();
     if let Some(target) = options.target {
         manifest.target = target;

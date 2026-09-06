@@ -21,9 +21,14 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// `HookCtx` belongs to the hook tests, which are `#[cfg(unix)]`: a hook is a
+// `/bin/sh` command line and Windows has none to run. Imported separately so
+// the other platform does not carry an unused name.
+#[cfg(unix)]
+use ginary::native::HookCtx;
 use ginary::native::{
-    self, HookCtx, NativeArtifact, NativeError, NativeKind, ObjectFacts, ObjectFormat,
-    ReconcileCtx, Replacement, ReplacementSource, TargetNativeCfg, Verdict,
+    self, NativeArtifact, NativeError, NativeKind, ObjectFacts, ObjectFormat, ReconcileCtx,
+    Replacement, ReplacementSource, TargetNativeCfg, Verdict,
 };
 use ginary::target::{Arch, Libc, Linkage, Os, Target};
 
@@ -646,6 +651,7 @@ fn an_override_that_is_not_there_is_refused_before_anything_is_built() {
 /// `NAME=VALUE` line each, with `<unset>` for a variable that is not set — so
 /// that an absent `ERL_INTERFACE_INCLUDE_DIR` cannot be confused with a script
 /// that never looked.
+#[cfg(unix)]
 fn hook_script(project: &Path, produces: Option<&str>) -> String {
     let body = produces.map_or_else(String::new, |rel_path| {
         format!(
@@ -672,6 +678,7 @@ fn hook_script(project: &Path, produces: Option<&str>) -> String {
 /// A `make`-style hook: the second run decides its output is up to date and
 /// exits zero having written nothing. Whether that is caught is the whole
 /// claim of the test that uses it.
+#[cfg(unix)]
 fn once_only_hook_script(project: &Path, rel_path: &str) -> String {
     let script = format!(
         "#!/bin/sh\nif [ -e \"$PWD/already-built\" ]; then exit 0; fi\ntouch \
@@ -683,6 +690,7 @@ fn once_only_hook_script(project: &Path, rel_path: &str) -> String {
 }
 
 /// The `NAME=VALUE` lines a hook script recorded.
+#[cfg(unix)]
 fn recorded(out_dir: &Path) -> BTreeMap<String, String> {
     let path = out_dir.join("env.txt");
     let text = std::fs::read_to_string(&path)

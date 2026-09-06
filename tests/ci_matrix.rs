@@ -23,10 +23,18 @@ use serde_json::Value;
 use crate::common::deps::{Version, rust_version};
 use crate::common::github::TOKEN_VARS;
 use crate::common::repo::{
-    NameSite, ToolchainSite, WorkflowStep, exists, name_sites, option_value, parse_yaml, read,
-    read_opt, read_or_missing, root, rust_toolchain_sites, shell_code, shell_scripts_under,
-    workflow_steps,
+    NameSite, ToolchainSite, WorkflowStep, exists, name_sites, names_path, option_value,
+    parse_yaml, read, read_opt, read_or_missing, root, runs_and_checks, rust_toolchain_sites,
+    shell_code, shell_scripts_under, workflow_steps,
 };
+
+/// The directory `ginary build` writes an artifact into, and therefore the only
+/// path a step that runs a packaged application can name.
+const ARTIFACT_DIR: &str = "build/ginary";
+
+/// The code the packaged `hello_ffi` fixture asks for when the Windows job runs
+/// it, and therefore the number that job's `%ERRORLEVEL%` check agrees with.
+const HALT_CODE: i32 = 3;
 
 /// Every workflow and composite-action file under `.github/`, as (path, text).
 fn action_yaml() -> Vec<(String, String)> {
@@ -262,19 +270,33 @@ fn the_windows_job_asserts_exit_code_propagation() {
         job.contains("windows-2022"),
         "the windows job runs on windows-2022"
     );
+    let crossing: Vec<WorkflowStep> = workflow_steps(".github/workflows/ci.yml")
+        .into_iter()
+        .filter(|step| step.job == "windows" && runs_and_checks(&step.run, ARTIFACT_DIR, HALT_CODE))
+        .collect();
     assert!(
-        job.contains("halt(3)") || job.contains("ERRORLEVEL") || job.contains("exit-code"),
-        "the windows job proves an exit code crosses the launcher, the wine gap from D2:\n{job}"
+        !crossing.is_empty(),
+        "the windows job proves an exit code crosses the launcher, the wine gap from D2 — so one \
+         of its steps has to start a packaged artifact out of `{ARTIFACT_DIR}` and compare the \
+         code *that* program left against {HALT_CODE}. Until E23 this rule was three `contains` \
+         over the job's whole text, and the step it passed over ran `erl.exe` directly. The three \
+         facts have to be about one command: a step that names the directory, runs `erl.exe` and \
+         checks Erlang's own code says nothing about `launch_windows::run`:\n{job}"
     );
 }
 
 /// The Windows job's exit-code probe.
 ///
-/// The one step in this repository that checks the Windows exit-code contract
-/// end to end: D2 recorded `halt(N)` propagation as a platform fact needing a
-/// real Windows host, and `launch_windows::run` mirrors what `erl.exe` leaves
-/// behind. Looked up by what it does rather than by its name, so renaming the
-/// step keeps the rules and deleting it fails them.
+/// D2 recorded `halt(N)` propagation as a platform fact needing a real Windows
+/// host, and this step is where the runtime is asked for it directly. Until E23
+/// it was described here as the one end-to-end check of the Windows exit-code
+/// contract, which it never was: it runs `erl.exe` and no launcher. The step
+/// that packages an artifact and reads what `launch_windows::run` left is the
+/// end-to-end one, and this is its precondition — worth keeping, because a
+/// runner where the runtime itself cannot report a code is a different failure
+/// and the log should say which one happened. Looked up by what it does rather
+/// than by its name, so renaming the step keeps the rules and deleting it fails
+/// them.
 ///
 /// # Panics
 ///
@@ -282,10 +304,19 @@ fn the_windows_job_asserts_exit_code_propagation() {
 fn exit_code_probe() -> WorkflowStep {
     workflow_steps(".github/workflows/ci.yml")
         .into_iter()
-        .find(|step| step.job == "windows" && step.run.contains("halt(3)"))
+        // Two steps of that job name `halt(3)` since E23 — this one, and the
+        // step that packages an artifact and asks the launcher for the same
+        // number. `build/ginary` is what tells them apart, and picking by file
+        // order would make these rules depend on which came first.
+        .find(|step| {
+            step.job == "windows"
+                && step.run.contains("halt(3)")
+                && !names_path(&step.run, ARTIFACT_DIR)
+        })
         .expect(
-            "the windows job has to keep a step that runs the runtime and reads the code it left: \
-             it is the only end-to-end check of the Windows exit-code contract there is",
+            "the windows job has to keep the step that asks the runtime itself for an exit code: \
+             it is the precondition the launcher's own check rests on, and a runner where it \
+             fails is a different failure worth telling apart in the log",
         )
 }
 

@@ -36,13 +36,15 @@ matrix below.
 | `linux-aarch64-musl` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
 | `macos-x86_64` | no (needs a Mac) | no | yes (macos-15-intel) |
 | `macos-aarch64` | no (needs a Mac) | no | yes (macos-14) |
-| `windows-x86_64` | yes (stub, cross) | no | yes (windows-2022) |
+| `windows-x86_64` | yes (stub, cross) | yes (host, E23) | yes (windows-2022) |
 
-"builds here" and "runs here" are what this development machine (Linux x86_64) can do today;
-"runs on CI" is the job that runs it once the workflows have a remote to run on. The macOS and
-Windows launches, the catalog publishing and the provenance attestations are authored as CI jobs
-and run when the repository is published — see [docs/dev/v1-readiness.md](docs/dev/v1-readiness.md)
-for the phase-by-phase evidence and [CHANGELOG.md](CHANGELOG.md) for the release notes.
+"builds here" and "runs here" are what a development machine can do today — Linux x86_64 for
+every row but the last, which E23 measured on a Windows host, the first this project has had.
+"runs on CI" is the job that runs it once the workflows have a remote to run on. The macOS
+launch, the Windows launch *with a real `erl.exe`*, the catalog publishing and the provenance
+attestations are authored as CI jobs and run when the repository is published — see
+[docs/dev/v1-readiness.md](docs/dev/v1-readiness.md) for the phase-by-phase evidence and
+[CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 ## Quickstart
 
@@ -566,10 +568,13 @@ forwarding, and the application receives its arguments exactly as typed.
   source names. A target other than the host with no `erts` named for it is refused, quoting the
   table to write. Prebuilt runtime downloads and the musl variants are Phase C of
   [the roadmap](docs/dev/log/).
-- **Windows is built but not run.** `mise run stubs:build` produces the `windows-x86_64` stub
-  and `mise run build:windows` builds both flavors, but no Windows machine has ever started a
-  packaged application; see [Windows](#windows). No macOS stub can be built on Linux at all; the
-  two of them come from the release build on a macOS runner.
+- **Windows runs a stub runtime, not a real one.** `mise run stubs:build` produces the
+  `windows-x86_64` stub and `mise run build:windows` builds both flavors; a Windows host now
+  starts packaged applications and the launcher's whole contract is asserted there, but the
+  runtime those artifacts carry is a test stub, because the development machine has no Erlang.
+  A real `erl.exe` inside a real artifact is the CI job's; see [Windows](#windows). No macOS
+  stub can be built on Linux at all; the two of them come from the release build on a macOS
+  runner.
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,
@@ -628,17 +633,44 @@ What works, and is checked on every run of the suite:
   the two flavours a tree is gets read off the tree — "does `erts-<vsn>/bin` hold `erl.exe`?" —
   in one place, so the resolver, `inspect_root` and assembly cannot disagree about it.
 
-What is **untested**, and is the GitHub Actions milestone on a `windows-latest` runner:
+What the launcher **does** on Windows is now tested there. E23 was worked on a Windows host, and
+`tests/launcher.rs` — which had been `#![cfg(unix)]` in its entirety, because the fixture's
+`erlexec` was a `#!/bin/sh` script — runs natively: the spawn, the wait, the exit code, the
+share-mode lock, the `\\?\` extraction, the cache, the argument vector, the environment
+difference, the five numbered failures, the `GINARY_CMD` commands, pruning and uninstalling. The
+job object has its own test: kill the resident launcher mid-run and the runtime goes with it.
 
-- **`erl.exe` has never been started by this launcher.** The spawn, the wait, the job object
-  that keeps a killed launcher from orphaning a runtime, the console control handler and the
-  share-mode lock are compiled and nothing more.
-- **No exit code has been propagated.** `halt(3)` reaching `%ERRORLEVEL%` as 3 is a claim this
-  repository states and does not yet check.
-- **No Windows artifact has been built end to end.** There is no `otp_win64_<version>.zip` on
-  the development machine to point `erts = "dir:…"` at, so what is covered is that such a tree
-  *resolves* — over a fabricated tree carrying real PE headers. `ginary build --target
-  windows-x86_64` over a real unpacked zip is the Actions run.
+What the GitHub Actions `windows-2022` runner proved, in run
+[34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195):
+
+```text
+erl -noshell -eval halt(3) left exit code 3
+the artifact left exit code 0 for '0 hello world'
+the artifact left exit code 3 for halt(3)
+the second, warm run left exit code 3
+```
+
+A real `erl.exe`, started by this launcher, inside a `hello_ffi` artifact packaged against the OTP
+`setup-beam` installs — cold, then warm, with `halt(3)` arriving as `%ERRORLEVEL%` 3. That
+discharges the exit-code contract end to end, the `otp_win64_<version>.zip` layout the
+required-file probe was written data-driven against, and `ginary build --target windows-x86_64`
+over a real unpacked runtime. Until E23 the job it replaced ran `erl.exe` directly and packaged
+nothing, so this row of `docs/dev/v1-readiness.md` had been booking a proof against a step that
+did not perform it.
+
+What is still **untested**:
+
+- **No console control event has ever reached the launcher.** `SetConsoleCtrlHandler` is called
+  on every launch, so the handler is installed and its return is checked; what has never happened
+  is an event arriving. Delivering a Ctrl-C to a process group a test owns needs
+  `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and a new
+  `#[allow(unsafe_code)]` needs an ADR of its own — so E23 recorded it as declined rather than
+  faking it. It is the one mechanism of ADR 0015 still resting on argument.
+- **No Windows artifact has been built end to end on a development machine.** There is no
+  `otp_win64_<version>.zip` to point `erts = "dir:…"` at there, so what the local suite covers is
+  that such a tree *resolves* — over a fabricated tree carrying real PE headers — and what the
+  suite starts is a stub runtime, which is what makes the launcher's own behaviour observable
+  with no Erlang installed. The real build is the runner's, above.
 - **The `otp_win64_<version>.zip` layout is an assumption.** The required-file probe is
   data-driven for exactly that reason, and the DLL the emulator is named as — `beam.smp.dll` —
   is what the documentation says rather than what a real zip was read for.
@@ -651,13 +683,8 @@ What is **untested**, and is the GitHub Actions milestone on a `windows-latest` 
 - **Nothing runs under a real wine either.** The image's wine has no `bcryptprimitives.dll`,
   which every Rust *test* binary imports through `std`, so `cross test` cannot start one; the
   stub, which imports only `kernel32`, `ntdll` and `msvcrt`, does.
-- **No ginary test target compiles for `x86_64-pc-windows-gnu` at all.** `tests/common` is
-  unix-only — `std::os::unix`, `Permissions::from_mode`, `OsStrExt::as_bytes` — and every test
-  target pulls it in, so porting it is the first thing the Actions milestone has to do.
-- **The two lock opens and the `\\?\` extraction are Windows-only code paths.** Their tests
-  are `#[cfg(windows)]` and run nowhere yet; they are type-checked on Linux by lifting the
-  `cfg` for one compile. What they claim: that two launchers of one entry both take the shared
-  lock, and that a prune can rename the entry it holds.
+- **The `MAX_PATH` limit above is still unmeasured.** Nothing has built an entry long enough to
+  reach it, on any host.
 
 One stated limitation, rather than a gap: **a Linux or macOS artifact cross-built *on* Windows
 records 0o644 for every file.** There is no mode word to read there, and the launcher repairs
