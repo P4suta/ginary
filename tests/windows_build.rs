@@ -330,7 +330,16 @@ fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
         "34018931746",
         "101447799420",
         // The layout that used to be an assumption, now read off a real tree.
-        "beam.smp.dll",
+        // Its *measured size*, not its name: `beam.smp.dll` appears three
+        // times in this ADR — the design says what the emulator is, and the
+        // required-files paragraph names it — so a needle spelled that way is
+        // satisfied by an ADR whose evidence section has been deleted. The
+        // byte count exists only in the transcript.
+        "5660672",
+        // And the cache root the same run measured, for the same reason: it
+        // is printed by the `uninstall` that empties the entry, and nothing
+        // else in this repository has ever observed it.
+        "AppData\\Local\\ginary",
     ] {
         assert!(
             adr.contains(needle),
