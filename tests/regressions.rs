@@ -519,6 +519,8 @@ mod e23_a_backtick_in_a_pwsh_step_ran_the_whole_step_nowhere;
 mod e23_a_reported_working_directory_was_compared_as_text_again;
 #[path = "regressions/e23_a_test_expected_the_operating_systems_words_in_english.rs"]
 mod e23_a_test_expected_the_operating_systems_words_in_english;
+#[path = "regressions/e23_the_deferred_list_carried_an_item_it_said_was_not_deferred.rs"]
+mod e23_the_deferred_list_carried_an_item_it_said_was_not_deferred;
 #[cfg(feature = "cli")]
 #[path = "regressions/e23_the_help_text_denied_the_targets_the_tool_supports.rs"]
 mod e23_the_help_text_denied_the_targets_the_tool_supports;
