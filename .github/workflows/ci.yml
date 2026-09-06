@@ -623,7 +623,18 @@ jobs:
               ForEach-Object { Write-Host $_.FullName }
             exit 1
           }
+          # `inspect` reads the finished artifact back with the command line
+          # tool: the trailer, the manifest and the geometry of a *Windows*
+          # container, which no other step checks. Its code is asserted rather
+          # than ignored — `$ErrorActionPreference` does not apply to a native
+          # program's exit status, so an unchecked failure here would be a
+          # silent one.
           & $ginary inspect $artifact
+          $inspected = $LASTEXITCODE
+          if ($inspected -ne 0) {
+            Write-Host "::error::ginary inspect exited $inspected on its own artifact"
+            exit 1
+          }
 
           # The launcher's own diagnostic first: extract, preflight, and start
           # the runtime on a no-op halt, each step reported PASS or FAIL. When
@@ -637,7 +648,22 @@ jobs:
             exit 1
           }
 
-          # Cold cache: this extracts the runtime and is the first spawn.
+          # And then throw the cache away again, because the selftest above
+          # filled it. Without this the "cold cache" run below is a warm one
+          # and the job never exercises a real launch that has to extract
+          # before it can spawn — the very first thing a user's machine does.
+          # `uninstall` is the documented way to remove this application's
+          # entries, and running it here covers it on Windows as well.
+          $env:GINARY_CMD = 'uninstall'
+          & $artifact
+          $uninstalled = $LASTEXITCODE
+          Remove-Item Env:\GINARY_CMD
+          if ($uninstalled -ne 0) {
+            Write-Host "::error::GINARY_CMD=uninstall exited $uninstalled"
+            exit 1
+          }
+
+          # Cold cache, for real: this extracts the runtime and then spawns.
           $output = (& $artifact 0 hello world 2>&1 | Out-String)
           $code = $LASTEXITCODE
           Write-Host $output

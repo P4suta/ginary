@@ -112,7 +112,8 @@ do. The `macos` job packages a `hello_ffi` artifact on `macos-15-intel` and `mac
 `codesign --verify --strict` over ginary's own output, starts the artifact, asserts its arguments
 and its exit code, and verifies the signature again afterwards. The `windows` job does the same on
 `windows-2022`: it packages against the runtime `setup-beam` installs, then starts the artifact as
-a `GINARY_CMD=selftest`, on a cold cache, on a warm one, and on `halt(3)` — which is the exit-code
+a `GINARY_CMD=selftest`, then — after `GINARY_CMD=uninstall` has thrown away the entry that
+filled — on a genuinely cold cache, on a warm one, and on `halt(3)` — which is the exit-code
 contract, the code reaching `%ERRORLEVEL%` through ginary's own spawn-and-wait launcher rather
 than through a bare `erl`. That closes the D2 wine gap and the D3 "awaits a Mac runner" gap, and
 it is the first and only execution `launch_windows::run` — the spawn, the job object and the
@@ -182,14 +183,18 @@ failure.
 - **There is no Windows runtime in the catalog, so a Windows artifact is built on Windows.**
   `ginary otp repack` produces the Linux and macOS catalog tarballs and no `windows-x86_64` one,
   and `distribute.yml` therefore publishes none: the upstream a Windows entry would be repacked
-  from is `otp_win64_<version>.zip`, a different shape from the tarballs the other targets take,
-  and reading it is a milestone of its own rather than a line of this one. What that costs is
-  cross-building *to* Windows from Linux or macOS: a `windows-x86_64` build needs
-  `erts = 'dir:…'` naming an unpacked Windows runtime, which in practice means building on a
-  Windows machine — where a Gleam developer already has Erlang installed, because `gleam` needs
-  it. The `windows` job does exactly that on every push. This is a stated boundary of v1 and not
-  a defect: the build refuses by name rather than producing an artifact with the wrong runtime in
-  it.
+  from is `otp_win64_<version>.zip`, a different shape from the tarballs the other targets take
+  (Linux comes from `gleam-community/erlang-linux-builds`, macOS from `erlef/otp_builds`), and
+  reading it is a milestone of its own rather than a line of this one. What that costs is
+  `erts = "catalog"` for Windows and nothing else. **Cross-building to Windows still works**: a
+  `windows-x86_64` build takes `erts = 'dir:…'` naming a tree somebody unpacked from
+  `otp_win64_<version>.zip`, and that tree may sit on a Linux or macOS build machine — assembly
+  reads the required files off the tree rather than off the host, and
+  `tests/windows_build.rs::a_windows_build_may_only_take_its_runtime_from_a_directory` proves the
+  refusal is about the *source kind* rather than about the machine. What the `windows` CI job
+  covers is the native path, which is the one a Gleam developer on Windows takes because `gleam`
+  already needs Erlang there. This is a stated boundary of v1 and not a defect: a Windows build
+  that names no runtime is refused by name rather than given the wrong one.
 - **The host OTP major version must match.** A runtime is read for its own target, linkage and
   libc, but ginary does not rewrite BEAM across OTP major versions: an artifact's bundled runtime
   and the modules in it are one OTP major, and a catalog entry whose `otp_release` differs from

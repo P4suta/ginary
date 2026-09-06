@@ -616,8 +616,9 @@ forwarding, and the application receives its arguments exactly as typed.
 Windows support is **packaged, launched and exit-code-checked on a real Windows host, on every
 push.** The `windows` job of `.github/workflows/ci.yml` builds both flavors natively on
 `windows-2022`, runs the suite, then packages the `hello_ffi` fixture against the runtime
-`setup-beam` installs and starts the artifact it produced — as a `GINARY_CMD=selftest`, on a cold
-cache, on a warm one, and on `halt(3)`. That last one is the exit-code contract: the code the
+`setup-beam` installs and starts the artifact it produced — as a `GINARY_CMD=selftest`, then
+(after `GINARY_CMD=uninstall` has thrown the cache away again) on a genuinely cold cache, on a warm
+one, and on `halt(3)`. That last one is the exit-code contract: the code the
 application halts with reaches `%ERRORLEVEL%` through ginary's own spawn-and-wait launcher.
 Everything below says where the line still falls.
 

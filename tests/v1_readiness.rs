@@ -122,10 +122,21 @@ fn the_only_deferred_item_left_is_the_one_nothing_has_run() {
              workflow:\n{entries:#?}"
         );
     }
+    // Exactly one, because the section's own first word is "One". A new
+    // deferred item is a real thing to add — but adding it silently under a
+    // sentence that counts them is how a checklist starts disagreeing with
+    // itself, and this is the document where that matters most.
+    assert_eq!(
+        entries.len(),
+        1,
+        "the deferred section opens by saying **one** kind of work is CI-gated, and lists \
+         {}. The count and the sentence move together:\n{entries:#?}",
+        entries.len()
+    );
     assert!(
-        entries.iter().any(|entry| entry.contains("provenance")),
-        "the release provenance has to be an entry of the list rather than a mention in its \
-         prose:\n{entries:#?}"
+        entries[0].contains("provenance"),
+        "the one deferred entry has to be the release provenance, the one thing that has never \
+         executed:\n{entries:#?}"
     );
 }
 

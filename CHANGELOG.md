@@ -114,7 +114,8 @@ no Erlang installation. Five phases, A through E, built it:
   built both flavors, ran the suite and probed a bare `erl.exe`, so the Windows launcher — the
   spawn, the job object and the console control handler — had never executed anywhere. It now
   builds an artifact against the runtime `setup-beam` installs and runs it as a
-  `GINARY_CMD=selftest`, on a cold cache, on a warm one, and on `halt(3)`: the exit code reaches
+  `GINARY_CMD=selftest`, then — after `GINARY_CMD=uninstall` empties the cache the selftest
+  filled — on a genuinely cold cache, on a warm one, and on `halt(3)`: the exit code reaches
   `%ERRORLEVEL%` through ginary's own launcher rather than through the emulator alone. Both
   probes are kept, because a failure that could be either is a failure nobody can read.
 - The documents say what the runners prove. `README.md` and `docs/dev/v1-readiness.md` described

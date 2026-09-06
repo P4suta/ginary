@@ -138,8 +138,10 @@ entry, and `win32::process_is_alive`, through `cache::sweep`'s. The other three 
 job object and the console control handler** — are reached by one thing only, a real Windows
 artifact starting a real runtime, and that is what the job's `Package, run and verify a hello_ffi
 artifact` step now does: it packages the `hello_ffi` fixture against the runtime `setup-beam`
-installs and starts it four times, once as `GINARY_CMD=selftest`, once on a cold cache, once on a
-warm one, and once on `halt(3)`. The one call site of `launch_windows::run` is `launcher::start`,
+installs and starts it four times: once as `GINARY_CMD=selftest`, then — after
+`GINARY_CMD=uninstall` has removed the entry the selftest just filled, so that the next start
+really does have to extract before it can spawn — once on a cold cache, once on a warm one, and
+once on `halt(3)`. The one call site of `launch_windows::run` is `launcher::start`,
 reached by a launching artifact and by nothing else, so no test constructs a `LaunchPlan` and none
 needs to: the artifact is the test. The pure rules underneath all of them — the cache root, the
 `\\?\` prefix, the two share modes, the exit-code mapping, the launch program and the Windows launch

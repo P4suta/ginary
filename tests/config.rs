@@ -1611,20 +1611,28 @@ fn a_windows_runtime_path_survives_a_toml_literal_string() {
     );
 
     // And the part that is a property of the *build machine* rather than of
-    // TOML, stated here because a reader of the line above would otherwise
-    // assume the opposite. "Is this path absolute?" is answered by the host's
-    // own rules, and `C:\…` is not absolute to a Linux one, so a Windows path
-    // written into a manifest that a Linux machine builds is joined onto the
-    // project root. It is diagnosable rather than silent — the runtime is then
-    // looked for at the joined path and the refusal prints it — and it does
-    // not reach the mainline case, where a Windows tree unpacked on a Linux
-    // build machine is named by a Linux path. On a Windows host the same
-    // manifest is absolute and nothing is joined.
+    // TOML, asserted per platform because it is a different claim on each and
+    // `Path::join` hides that: joining an absolute path discards the base, so
+    // a single `root.join(..)` assertion passes on both hosts while meaning
+    // something only on one. The suite runs natively on `windows-2022`, so
+    // writing it once would have been a rule that quietly stops testing
+    // anything there.
+    #[cfg(windows)]
+    assert_eq!(
+        path,
+        PathBuf::from("C:\\Users\\you\\otp"),
+        "on a Windows build machine the path is absolute and nothing is joined onto it: {}",
+        path.display()
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         path,
         root.join("C:\\Users\\you\\otp"),
-        "on a unix build machine a drive-absolute path is relative, because `Path::is_absolute` \
-         answers for the host: {}",
+        "on a unix build machine a drive-absolute path is *relative*, because \
+         `Path::is_absolute` answers for the host, so it is joined onto the project root like \
+         any other relative path. That is diagnosable rather than silent — the build prints the \
+         joined path when it cannot find the runtime — and it does not reach the mainline case, \
+         where a Windows tree unpacked on a Linux build machine is named by a Linux path: {}",
         path.display()
     );
 }
