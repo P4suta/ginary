@@ -48,12 +48,24 @@ const HEADING: &str = "## The deferred items, restated plainly";
 /// Not a spell-check of one wording: each of these is a phrase that only makes
 /// sense written *about* a deferred item by someone who has just discovered it
 /// is not one.
+/// `not deferred` bare rather than `is not deferred`, because
+/// `— not deferred.` is the shorter way to write the same admission and the
+/// longer phrase contains it anyway.
 const NOT_DEFERRED: [&str; 4] = [
     "no longer deferred",
-    "is not deferred",
+    "not deferred",
     "already done",
     "now done",
 ];
+
+/// The lines of the deferred section, between its heading and the next one.
+fn deferred_section() -> String {
+    let sweep = read(SWEEP);
+    let section = sweep.split(HEADING).nth(1).unwrap_or_else(|| {
+        panic!("{SWEEP} has no `{HEADING}` section, so this rule has no subject")
+    });
+    section.split("\n## ").next().unwrap_or(section).to_owned()
+}
 
 /// The bullets of the deferred section, each flattened to one line.
 ///
@@ -61,30 +73,42 @@ const NOT_DEFERRED: [&str; 4] = [
 /// this rule looks for is routinely split across two lines and a scan that read
 /// the lines as they fall would miss it — which is how a rule about prose
 /// quietly stops matching.
+///
+/// A continuation line is an *indented* one, which is what markdown requires of
+/// text belonging to a bullet. The distinction is not pedantry: the list is
+/// followed by a closing paragraph at the left margin, and a reader that took
+/// every non-empty line would append that paragraph to the last entry and then
+/// answer questions about the list using prose that is not in it.
 fn deferred_entries() -> Vec<String> {
-    let sweep = read(SWEEP);
-    let section = sweep.split(HEADING).nth(1).unwrap_or_else(|| {
-        panic!("{SWEEP} has no `{HEADING}` section, so this rule has no subject")
-    });
-    let section = section.split("\n## ").next().unwrap_or(section);
-
     let mut entries: Vec<String> = Vec::new();
-    for line in section.lines() {
+    for line in deferred_section().lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("- ") {
             entries.push(rest.to_owned());
-        } else if !trimmed.is_empty()
-            && let Some(last) = entries.last_mut()
-        {
-            last.push(' ');
-            last.push_str(trimmed);
+            continue;
         }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(last) = entries.last_mut() else {
+            // Prose before the first bullet: the paragraph introducing the
+            // list, which is not in it. The rule below reads entries, and this
+            // introduction has to be able to state the rule it governs.
+            continue;
+        };
+        if !line.starts_with([' ', '\t']) {
+            // Unindented and not a bullet: the list has ended.
+            break;
+        }
+        last.push(' ');
+        last.push_str(trimmed);
     }
     entries
 }
 
 #[test]
 fn the_rule_this_file_applies_reads_a_bullet_that_spans_two_lines() {
+    let section = deferred_section();
     let entries = deferred_entries();
     assert!(
         entries.len() >= 2,
@@ -93,10 +117,49 @@ fn the_rule_this_file_applies_reads_a_bullet_that_spans_two_lines() {
     );
     assert!(
         entries.iter().all(|entry| entry.starts_with("**")),
-        "every entry of the deferred list names its subject in bold, and this rule reads the \
-         whole of each entry rather than its first line:\n{}",
+        "every entry of the deferred list names its subject in bold:\n{}",
         entries.join("\n")
     );
+
+    // The flattening is the point, so prove it happened rather than assume it:
+    // no entry can be longer than the longest bullet *line* unless lines were
+    // joined. A reader that stopped at the first physical line would fail here
+    // and go on passing every other assertion in this file, which is how a
+    // phrase split across a wrap would slip through the rule below.
+    let longest_line = section
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- "))
+        .map(str::len)
+        .max()
+        .expect("the deferred section has bullets");
+    assert!(
+        entries.iter().any(|entry| entry.len() > longest_line),
+        "every entry is at most one line long ({longest_line} characters), so nothing was joined \
+         and a forbidden phrase broken across a wrap would not be seen"
+    );
+
+    // And the closing paragraph after the list is not part of the last entry.
+    // *After* the list: the paragraph introducing it is unindented too, and a
+    // guard that found that one instead would be asserting something no parser
+    // could get wrong.
+    let closing = section
+        .lines()
+        .skip_while(|line| !line.trim().starts_with("- "))
+        .find(|line| {
+            let trimmed = line.trim();
+            !line.starts_with([' ', '\t'])
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("- ")
+                && trimmed.len() > 40
+        })
+        .map(str::trim);
+    if let Some(closing) = closing {
+        assert!(
+            !entries.iter().any(|entry| entry.contains(closing)),
+            "the prose at the left margin after the list was appended to an entry, so this rule \
+             would answer about the list using text that is not in it:\n{closing}"
+        );
+    }
 }
 
 #[test]
