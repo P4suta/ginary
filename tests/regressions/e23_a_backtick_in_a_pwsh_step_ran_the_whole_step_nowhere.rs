@@ -66,6 +66,17 @@ fn pwsh_steps() -> Vec<WorkflowStep> {
     steps
 }
 
+/// One string as a PowerShell single-quoted literal, apostrophes and all.
+///
+/// A single-quoted string is PowerShell's verbatim one: nothing expands inside
+/// it and the only character with a meaning is `'`, which ends it — and which
+/// is written `''` to mean itself. So this is the whole of the escaping rule,
+/// and using it is the difference between a probe that reads a path and a
+/// probe that fails on somebody's home directory.
+fn single_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
 /// The parse errors `pwsh` reports for one script, or `None` when there is no
 /// usable PowerShell to ask.
 ///
@@ -77,7 +88,15 @@ fn pwsh_steps() -> Vec<WorkflowStep> {
 fn parse_errors(script: &str) -> Option<String> {
     let pwsh = require_working_pwsh()?;
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let file = dir.path().join("step.ps1");
+    // A path with an apostrophe in it, because that is the character this
+    // probe embeds a path *inside*. Reviewed on the pull request and correct:
+    // a raw path would end the single-quoted literal early and fail before
+    // parsing anything, which is this file's own subject — mis-escaping into a
+    // PowerShell string — in the file written to catch it. A home directory
+    // belonging to someone called O'Brien is all it takes.
+    let awkward = dir.path().join("o'brien");
+    std::fs::create_dir(&awkward).expect("a directory whose name needs escaping");
+    let file = awkward.join("step.ps1");
     std::fs::write(&file, script).expect("write the step");
 
     // `ParseFile` fills `$errors` and returns the tree; an empty `$errors` is
@@ -86,10 +105,10 @@ fn parse_errors(script: &str) -> Option<String> {
     // hang.
     let probe = format!(
         "$errors = $null; \
-         [System.Management.Automation.Language.Parser]::ParseFile('{}', [ref]$null, [ref]$errors) \
+         [System.Management.Automation.Language.Parser]::ParseFile({}, [ref]$null, [ref]$errors) \
          | Out-Null; \
          if ($errors.Count) {{ $errors | ForEach-Object {{ $_.Message }} }}",
-        file.display()
+        single_quoted(&file.display().to_string())
     );
     let mut command = std::process::Command::new(pwsh);
     command.args(["-NoProfile", "-NonInteractive", "-Command", &probe]);
