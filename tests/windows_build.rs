@@ -315,7 +315,9 @@ fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
         "33864729638",
         "100996872499",
         "halt(3)",
-        // And E23's, which is a different claim about the same three digits.
+        // And E23's — both of them, the first execution and the one that
+        // followed review by making the cold-cache launch genuinely cold.
+        // These are a different claim about the same three digits.
         // The run above proved a *platform* fact — a bare `erl.exe` leaves 3
         // behind for its parent. This one proved ginary's: a packaged artifact
         // carried that code across the spawn `launch_windows::run` owns, which
@@ -325,6 +327,8 @@ fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
         // crediting the emulator with the launcher's work.
         "34015391532",
         "101438136143",
+        "34018931746",
+        "101447799420",
         // The layout that used to be an assumption, now read off a real tree.
         "beam.smp.dll",
     ] {

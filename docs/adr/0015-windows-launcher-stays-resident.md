@@ -175,18 +175,21 @@ ending on a status of its own.
 
 **Both debts that milestone left are paid, and here is the run that paid them.** It owed the
 `otp_win64_<version>.zip` layout and the end-to-end run of a real artifact on the same runner, and
-E23 is both at once. The first execution — run
+E23 is both at once. The first execution was run
 [34015391532](https://github.com/P4suta/ginary/actions/runs/34015391532), job
-[101438136143](https://github.com/P4suta/ginary/actions/runs/34015391532/job/101438136143),
-`windows-2022`, OTP 29.0.5 / erts-17.0.5 — is green, and it printed what it did rather than
-leaving it to be inferred:
+[101438136143](https://github.com/P4suta/ginary/actions/runs/34015391532/job/101438136143); the
+run cited below is [34018931746](https://github.com/P4suta/ginary/actions/runs/34018931746), job
+[101447799420](https://github.com/P4suta/ginary/actions/runs/34018931746/job/101447799420), which
+is the same job after review made its cold-cache launch genuinely cold. Both are green on
+`windows-2022`, OTP 29.0.5 / erts-17.0.5, and both printed what they did rather than leaving it to
+be inferred:
 
 ```text
 == the erts source this build was given ==
 [tools.ginary.target."windows-x86_64"]
 erts = 'dir:D:\a\_temp\.setup-beam\otp'
 
-artifact: …\hello_ffi-windows-x86_64.exe (7170048 stub + 3881941 payload + 64 trailer)
+size: 11052039 bytes = 7170048 stub + 3881927 payload + 64 trailer
 5660672  erts-17.0.5/bin/beam.smp.dll
  185856  erts-17.0.5/bin/erlexec.dll
  138752  erts-17.0.5/bin/erl.exe
@@ -194,6 +197,8 @@ artifact: …\hello_ffi-windows-x86_64.exe (7170048 stub + 3881941 payload + 64 
 extract: PASS
 preflight: PASS
 run: PASS
+removed C:\Users\runneradmin\AppData\Local\ginary\hello_ffi\9e364e28cb42d1c4
+total: 1 removed, 0 kept
 args=0 hello world
 hello from priv
 cwd=d:/a/ginary/ginary
@@ -202,12 +207,15 @@ the artifact exited 0 on its second, warm-cache run
 halt(3) through the launcher left exit code 3
 ```
 
-So: **`beam.smp.dll` is the name**, measured off a real tree rather than taken from
-documentation, and it sits beside `erl.exe` and `inet_gethost.exe` where `otp.rs` looks for them.
-The artifact extracted, preflighted, started, printed its arguments and its `priv` file, ran a
-second time out of a warm cache, and left `3` behind for `%ERRORLEVEL%` — through `run`'s own
-spawn-and-wait, not through a bare `erl`. The layout is no longer an assumption and the spawn is
-no longer a claim.
+Three things in that transcript were assumptions before it. **`beam.smp.dll` is the name**,
+measured off a real tree rather than taken from documentation, and it sits beside `erl.exe` and
+`inet_gethost.exe` where `otp.rs` looks for them. **The cache root is
+`%LOCALAPPDATA%\ginary\<app>\<id>`**, printed by the `uninstall` that empties it — the rule
+`cache_dir` implements on Windows and which until now only a unit test had ever evaluated.
+And the launch itself: the artifact extracted, preflighted, started on a cache it had to fill
+itself, printed its arguments and its `priv` file, ran a second time out of a warm one, and left
+`3` behind for `%ERRORLEVEL%` — through `run`'s own spawn-and-wait, not through a bare `erl`. The
+layout is no longer an assumption and the spawn is no longer a claim.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows
