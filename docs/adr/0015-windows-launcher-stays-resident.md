@@ -171,13 +171,41 @@ job records the number directly and this citation is to be replaced by that one.
 `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs` holds every `pwsh` step to
 ending on a status of its own.
 
-**Both debts that milestone left are paid.** It owed the `otp_win64_<version>.zip` layout and the
-end-to-end run of a real artifact on the same runner, and E23 is both at once: the packaging step
-points `erts = 'dir:…'` at the tree `setup-beam` installs, so the required-file probe, the
-`beam.smp.dll` the PE reader takes the target off, the `inet_gethost.exe` a runtime resolves names
-with and the `erl.ini` assembly deletes are all read off a **real** Windows runtime rather than
-off a fabricated one; and the artifact that comes out is started, which is what reaches `run`.
-The layout is no longer an assumption, and the spawn is no longer a claim.
+**Both debts that milestone left are paid, and here is the run that paid them.** It owed the
+`otp_win64_<version>.zip` layout and the end-to-end run of a real artifact on the same runner, and
+E23 is both at once. The first execution — run
+[34015391532](https://github.com/P4suta/ginary/actions/runs/34015391532), job
+[101438136143](https://github.com/P4suta/ginary/actions/runs/34015391532/job/101438136143),
+`windows-2022`, OTP 29.0.5 / erts-17.0.5 — is green, and it printed what it did rather than
+leaving it to be inferred:
+
+```text
+== the erts source this build was given ==
+[tools.ginary.target."windows-x86_64"]
+erts = 'dir:D:\a\_temp\.setup-beam\otp'
+
+artifact: …\hello_ffi-windows-x86_64.exe (7170048 stub + 3881941 payload + 64 trailer)
+5660672  erts-17.0.5/bin/beam.smp.dll
+ 185856  erts-17.0.5/bin/erlexec.dll
+ 138752  erts-17.0.5/bin/erl.exe
+  67072  erts-17.0.5/bin/inet_gethost.exe
+extract: PASS
+preflight: PASS
+run: PASS
+args=0 hello world
+hello from priv
+cwd=d:/a/ginary/ginary
+the artifact exited 0 on its first run
+the artifact exited 0 on its second, warm-cache run
+halt(3) through the launcher left exit code 3
+```
+
+So: **`beam.smp.dll` is the name**, measured off a real tree rather than taken from
+documentation, and it sits beside `erl.exe` and `inet_gethost.exe` where `otp.rs` looks for them.
+The artifact extracted, preflighted, started, printed its arguments and its `priv` file, ran a
+second time out of a warm cache, and left `3` behind for `%ERRORLEVEL%` — through `run`'s own
+spawn-and-wait, not through a bare `erl`. The layout is no longer an assumption and the spawn is
+no longer a claim.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows

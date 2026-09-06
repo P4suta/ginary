@@ -315,6 +315,18 @@ fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
         "33864729638",
         "100996872499",
         "halt(3)",
+        // And E23's, which is a different claim about the same three digits.
+        // The run above proved a *platform* fact — a bare `erl.exe` leaves 3
+        // behind for its parent. This one proved ginary's: a packaged artifact
+        // carried that code across the spawn `launch_windows::run` owns, which
+        // is the contract the whole resident-launcher design rests on and the
+        // first execution those mechanisms ever had. Two citations because
+        // they are two facts, and an ADR that cited only the first would be
+        // crediting the emulator with the launcher's work.
+        "34015391532",
+        "101438136143",
+        // The layout that used to be an assumption, now read off a real tree.
+        "beam.smp.dll",
     ] {
         assert!(
             adr.contains(needle),
