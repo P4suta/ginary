@@ -51,7 +51,7 @@
 //! `%ERRORLEVEL%`. That needs a runtime, and this job is where one is.
 
 use crate::common::repo::{
-    WorkflowStep, compares_a_captured_exit_code, names_path, workflow_steps,
+    WorkflowStep, compares_a_captured_exit_code, names_path, runs_and_checks, workflow_steps,
 };
 
 /// The workflow the Windows job lives in.
@@ -90,6 +90,67 @@ fn the_rule_this_file_applies_reads_a_comparison_and_not_a_digit() {
         "a step is free to spell `{ARTIFACT_DIR}` with backslashes — it is a Windows path in a \
          Windows shell — and a rule that reads only one separator is a rule about how the step \
          was typed"
+    );
+    assert!(
+        !names_path("# the artifact lands in build/ginary", ARTIFACT_DIR),
+        "a comment about a directory runs nothing in it"
+    );
+}
+
+#[test]
+fn the_three_facts_have_to_be_about_one_command() {
+    // The step this rule exists to reject: it names the artifact directory, it
+    // captures an exit code, and it compares that code against 3 — and the
+    // code it captured is `erl.exe`'s. Every separate predicate passes; the
+    // launcher is never started. Finding the three facts anywhere in a step is
+    // how the assertion this file replaced went wrong, one level up.
+    let erlang_wearing_the_artifacts_clothes = "\
+$artifact = Join-Path $work 'build/ginary/hello_ffi-windows-x86_64.exe'\n\
+& $erl -noshell -eval \"halt(3)\"\n\
+$code = $LASTEXITCODE\n\
+if ($code -ne 3) { exit 1 }\n";
+    assert!(
+        names_path(erlang_wearing_the_artifacts_clothes, ARTIFACT_DIR)
+            && compares_a_captured_exit_code(erlang_wearing_the_artifacts_clothes, HALT_CODE),
+        "the instrument is only meaningful if the loose predicates do pass over this step"
+    );
+    assert!(
+        !runs_and_checks(
+            erlang_wearing_the_artifacts_clothes,
+            ARTIFACT_DIR,
+            HALT_CODE
+        ),
+        "the code compared here is `erl.exe`'s: the artifact is named and never started, and a \
+         rule that accepts this proves nothing about `launch_windows::run`"
+    );
+
+    // And the shape that does start it, in both separator dialects.
+    for spelling in ["build/ginary", "build\\ginary"] {
+        let real = format!(
+            "$artifact = Join-Path $work '{spelling}/hello_ffi-windows-x86_64.exe'\n\
+             # the number the whole row is about\n\
+             & $artifact 3\n\
+             $halted = $LASTEXITCODE\n\
+             if ($halted -ne 3) {{ exit 1 }}\n"
+        );
+        assert!(
+            runs_and_checks(&real, ARTIFACT_DIR, HALT_CODE),
+            "a step that starts the artifact and reads the code it left has to satisfy the rule, \
+             comment and separator dialect notwithstanding:\n{real}"
+        );
+    }
+
+    // A capture that is not the next executable line reads a different moment.
+    let lost = "\
+$artifact = Join-Path $work 'build/ginary/app.exe'\n\
+& $artifact 3\n\
+Write-Host \"ran it\"\n\
+$halted = $LASTEXITCODE\n\
+if ($halted -ne 3) { exit 1 }\n";
+    assert!(
+        !runs_and_checks(lost, ARTIFACT_DIR, HALT_CODE),
+        "`Write-Host` is an external command on the runner and rewrites `$LASTEXITCODE`; a \
+         capture behind one is a capture of the wrong thing, which is E15's lesson"
     );
 }
 
@@ -138,10 +199,11 @@ fn the_windows_job_runs_the_artifact_and_reads_the_code_it_left() {
     assert!(
         running
             .iter()
-            .any(|step| compares_a_captured_exit_code(&step.run, HALT_CODE)),
-        "a step runs the artifact but none compares the code it left against {HALT_CODE}: the \
-         claim `docs/dev/v1-readiness.md` books against this job is that `halt({HALT_CODE})` \
-         reaches `%ERRORLEVEL%`, and only a comparison proves it:\n{}",
+            .any(|step| runs_and_checks(&step.run, ARTIFACT_DIR, HALT_CODE)),
+        "a step names the artifact directory but none starts a program under it and reads the \
+         code *that* program left: the claim `docs/dev/v1-readiness.md` books against this job \
+         is that `halt({HALT_CODE})` reaches `%ERRORLEVEL%` through the launcher, and three \
+         facts found separately in one step do not say they are about one command:\n{}",
         rendered(&running)
     );
 }

@@ -47,7 +47,7 @@
 //! rather than about a direct call, and a direct call from a test would be a
 //! second way in, not the first.
 
-use crate::common::repo::{read, root, workflow_steps};
+use crate::common::repo::{names_path, read, root, workflow_steps};
 
 /// The ADR this file holds to the tree.
 const ADR: &str = "docs/adr/0015-windows-launcher-stays-resident.md";
@@ -62,6 +62,10 @@ const ONLY_CALLER: &str = "src/launcher.rs";
 /// The call this file asks the tree about, spelled as a call rather than as a
 /// name so that prose mentioning the function is not read as running it.
 const THE_SPAWN: &str = "launch_windows::run(";
+
+/// The directory `ginary build` writes an artifact into, and therefore the
+/// only path a command that starts a packaged application can name.
+const ARTIFACT_DIR: &str = "build/ginary";
 
 /// Every Rust source under `tests/`, as a repository-relative path.
 ///
@@ -145,9 +149,15 @@ fn the_windows_job_starts_a_packaged_artifact_and_the_adr_says_so() {
         "the `windows` job of .github/workflows/ci.yml runs nothing, so this test is measuring \
          a job that no longer exists"
     );
+    // A path under `build/ginary`, and not merely a command naming `ginary`.
+    // `& $ginary build` runs `target/release/ginary.exe`, the *builder*, and
+    // satisfied `contains("ginary.exe")` — so this test could pass over a job
+    // that packaged an artifact and never started one, which is the whole
+    // thing it is named for. `names_path` reads either separator, because a
+    // `pwsh` step spells a Windows path both ways.
     let starts_an_artifact: Vec<&String> = commands
         .iter()
-        .filter(|command| command.contains("ginary.exe") || command.contains("release\\ginary"))
+        .filter(|command| names_path(command, ARTIFACT_DIR))
         .collect();
     assert!(
         !starts_an_artifact.is_empty(),

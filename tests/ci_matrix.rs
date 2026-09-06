@@ -23,9 +23,9 @@ use serde_json::Value;
 use crate::common::deps::{Version, rust_version};
 use crate::common::github::TOKEN_VARS;
 use crate::common::repo::{
-    NameSite, ToolchainSite, WorkflowStep, compares_a_captured_exit_code, exists, name_sites,
-    names_path, option_value, parse_yaml, read, read_opt, read_or_missing, root,
-    rust_toolchain_sites, shell_code, shell_scripts_under, workflow_steps,
+    NameSite, ToolchainSite, WorkflowStep, exists, name_sites, names_path, option_value,
+    parse_yaml, read, read_opt, read_or_missing, root, runs_and_checks, rust_toolchain_sites,
+    shell_code, shell_scripts_under, workflow_steps,
 };
 
 /// The directory `ginary build` writes an artifact into, and therefore the only
@@ -272,19 +272,16 @@ fn the_windows_job_asserts_exit_code_propagation() {
     );
     let crossing: Vec<WorkflowStep> = workflow_steps(".github/workflows/ci.yml")
         .into_iter()
-        .filter(|step| {
-            step.job == "windows"
-                && names_path(&step.run, ARTIFACT_DIR)
-                && compares_a_captured_exit_code(&step.run, HALT_CODE)
-        })
+        .filter(|step| step.job == "windows" && runs_and_checks(&step.run, ARTIFACT_DIR, HALT_CODE))
         .collect();
     assert!(
         !crossing.is_empty(),
         "the windows job proves an exit code crosses the launcher, the wine gap from D2 — so one \
-         of its steps has to run a packaged artifact out of `{ARTIFACT_DIR}` and compare the code \
-         it left against {HALT_CODE}. Until E23 this rule was three `contains` over the job's \
-         whole text, and the step it passed over ran `erl.exe` directly; a comment naming \
-         `halt({HALT_CODE})` would satisfy it too:\n{job}"
+         of its steps has to start a packaged artifact out of `{ARTIFACT_DIR}` and compare the \
+         code *that* program left against {HALT_CODE}. Until E23 this rule was three `contains` \
+         over the job's whole text, and the step it passed over ran `erl.exe` directly. The three \
+         facts have to be about one command: a step that names the directory, runs `erl.exe` and \
+         checks Erlang's own code says nothing about `launch_windows::run`:\n{job}"
     );
 }
 

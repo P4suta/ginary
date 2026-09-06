@@ -259,15 +259,56 @@ fn windows_name_is_allowed(name: &str, allowlist: &[&str]) -> bool {
 /// `KERNEL32.dll`. Stated as a table rather than as two `||` arms so that a
 /// third family is a row, and so that neither can be admitted by the other's
 /// companion.
+///
+/// A prefix is not enough. `api-ms-win-core-` is the beginning of an API-set
+/// contract name and also the beginning of any file somebody chooses to call
+/// that, so the name has to be spelled the way the loader spells one — see
+/// [`is_api_set_contract`]. Admitting a whole prefix on the strength of a
+/// companion is a rule about how a name starts; the loader's rule is about the
+/// whole of it.
 fn windows_family_is_allowed(name: &str, allowlist: &[&str]) -> bool {
     const FAMILIES: [(&str, &str); 2] = [
         (WINDOWS_CRT_PREFIX, WINDOWS_CRT_COMPANION),
         (WINDOWS_CORE_PREFIX, WINDOWS_CORE_COMPANION),
     ];
     let lower = name.to_ascii_lowercase();
+    if !is_api_set_contract(&lower) {
+        return false;
+    }
     FAMILIES.iter().any(|(prefix, companion)| {
         lower.starts_with(&prefix.to_ascii_lowercase()) && allowlist.contains(companion)
     })
+}
+
+/// Whether a lower-cased name is spelled the way Windows spells an API set.
+///
+/// The loader's documented grammar: the name begins `api-` or `ext-`, its body
+/// is alphanumeric and dashes, and it ends in `l<n>-<n>-<n>` — the contract's
+/// three version numbers — before the `.dll` the loader requires. Both
+/// families this file admits begin `api-`, so the prefix is already settled by
+/// the caller and what is left to check is the shape of the rest.
+///
+/// `api-ms-win-core-processthreads-l1-1-0.dll` is a contract.
+/// `api-ms-win-core-not-a-contract.dll` is a filename.
+fn is_api_set_contract(lower: &str) -> bool {
+    let Some(stem) = lower.strip_suffix(WINDOWS_LIBRARY_SUFFIX) else {
+        return false;
+    };
+    if !stem
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return false;
+    }
+    // The last three dash-separated words are `l<n>`, `<n>` and `<n>`.
+    let mut words = stem.rsplit('-');
+    let (Some(patch), Some(minor), Some(major)) = (words.next(), words.next(), words.next()) else {
+        return false;
+    };
+    let digits = |word: &str| !word.is_empty() && word.chars().all(|c| c.is_ascii_digit());
+    major
+        .strip_prefix('l')
+        .is_some_and(|level| digits(level) && digits(minor) && digits(patch))
 }
 
 /// The suffix that makes a name on an allowlist a Windows library.

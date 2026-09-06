@@ -611,7 +611,13 @@ jobs:
           # all rather than about the number.
           & $artifact 0 hello world
           $ran = $LASTEXITCODE
-          Write-Host "the artifact left exit code $ran for `0 hello world`"
+          # Single quotes around the arguments, not backticks: a backtick is
+          # PowerShell's escape character, so a trailing one escapes the closing
+          # quote and the string runs on to the next one. That is a parse error
+          # for the whole step, which is why this one ran nothing at all on its
+          # first runner — and why `actionlint` did not see it, since it checks
+          # workflow structure and `bash`, not embedded `pwsh`.
+          Write-Host "the artifact left exit code $ran for '0 hello world'"
           if ($ran -ne 0) {
             Write-Host "::error::expected 0 from the artifact, got $ran"
             exit 1

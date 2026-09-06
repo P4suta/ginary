@@ -41,7 +41,7 @@
 #![cfg(feature = "cli")]
 
 use ginary::verify::{
-    self, WINDOWS_CORE_COMPANION, WINDOWS_CORE_PREFIX, WINDOWS_CRT_COMPANION,
+    self, WINDOWS_CORE_COMPANION, WINDOWS_CORE_PREFIX, WINDOWS_CRT_COMPANION, WINDOWS_CRT_PREFIX,
     WINDOWS_NEEDED_ALLOWLIST,
 };
 
@@ -95,4 +95,32 @@ fn an_extension_api_set_is_still_reported() {
         ),
         "an extension API set may be absent, so an artifact that needs one is a finding"
     );
+}
+
+#[test]
+fn a_name_that_only_begins_like_a_contract_is_still_reported() {
+    // Reviewed on the pull request, and correct: a companion admitted the
+    // whole of its prefix, and a prefix is the beginning of a contract name
+    // and equally the beginning of any file somebody chooses to call that.
+    // The loader's own grammar ends a contract in `l<n>-<n>-<n>`, so a name
+    // that does not is a filename wearing the family's clothes — the same
+    // "satisfied by something that is not the thing" this milestone is about,
+    // in the rule this milestone added.
+    for family in [WINDOWS_CRT_PREFIX, WINDOWS_CORE_PREFIX] {
+        for tail in ["not-a-contract", "synch", "synch-l1-2", "synch-lx-1-0"] {
+            let planted = format!("{family}{tail}.dll");
+            assert!(
+                !verify::needed_is_allowed(&planted, &WINDOWS_NEEDED_ALLOWLIST),
+                "`{planted}` is not spelled the way the loader spells an API set, so the \
+                 companion does not vouch for it"
+            );
+        }
+        // And the grammar has to still admit the real thing, or the rule is
+        // simply a refusal.
+        let real = format!("{family}synch-l1-2-0.dll");
+        assert!(
+            verify::needed_is_allowed(&real, &WINDOWS_NEEDED_ALLOWLIST),
+            "`{real}` is a contract name and its family's companion is on the allowlist"
+        );
+    }
 }
