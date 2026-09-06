@@ -45,6 +45,7 @@ use common::artifact::{
     names_in, os_bytes, read_trace,
 };
 use common::cachefs::{DAY, HeldLock, is_unlocked, lock_path, plant_entry, wait_until_unlocked};
+use common::hostpath::names_the_same_directory;
 use common::tools::require_tools;
 
 use ginary::cache::Env;
@@ -249,19 +250,26 @@ fn the_runtime_starts_in_the_callers_working_directory() {
     let artifact = artifact(&dir);
     let run = artifact.run().output();
     ok(&run);
-    // `canonicalize` answers with the verbatim `\\?\` prefix on Windows and
-    // the working directory a process reports carries none, so the ordinary
-    // spelling is what the two have in common. On unix `plain_path` is the
-    // identity and the canonicalisation is what matters, because macOS
-    // resolves `/tmp` through a symlink.
-    let expected =
-        ginary::winpath::plain_path(&std::fs::canonicalize(artifact.dir()).expect("canonicalise"))
-            .display()
-            .to_string();
-    assert_eq!(
-        run.cwd().as_deref(),
-        Some(expected.as_str()),
-        "the launcher must not chdir: a relative path in a user argument is the user's"
+    // Two spellings of one directory are one directory, and this claim is
+    // about which directory the runtime started in rather than about how it
+    // is written. `names_the_same_directory` is the rule E12 wrote for
+    // `tests/e2e_hello.rs` after the same comparison was made as text: it
+    // reconciles the verbatim `\\?\` prefix, the drive-letter case, the
+    // separators, a `/tmp` that is a symlink on macOS, and the 8.3 short name
+    // a Windows `%TEMP%` carries when the user name is long enough to have one
+    // — `C:\Users\RUNNER~1\…` on a GitHub runner, whose long form is
+    // `C:\Users\runneradmin\…`.
+    let reported = run.cwd().unwrap_or_else(|| {
+        panic!(
+            "the runtime printed no working directory:\n{}",
+            run.stdout_text()
+        )
+    });
+    assert!(
+        names_the_same_directory(&reported, artifact.dir()),
+        "the launcher must not chdir: a relative path in a user argument is the user's.\n\
+         reported {reported}\nexpected {}",
+        artifact.dir().display()
     );
 }
 

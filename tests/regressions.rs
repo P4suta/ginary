@@ -513,6 +513,8 @@ mod e22_a_prerelease_heading_read_as_the_release_it_precedes;
 mod e22_an_unauthenticated_api_read_was_refused_without_saying_why;
 #[path = "regressions/e22_the_release_state_was_read_from_a_document_the_release_cannot_edit.rs"]
 mod e22_the_release_state_was_read_from_a_document_the_release_cannot_edit;
+#[path = "regressions/e23_a_reported_working_directory_was_compared_as_text_again.rs"]
+mod e23_a_reported_working_directory_was_compared_as_text_again;
 #[path = "regressions/e23_a_test_expected_the_operating_systems_words_in_english.rs"]
 mod e23_a_test_expected_the_operating_systems_words_in_english;
 #[cfg(feature = "cli")]
