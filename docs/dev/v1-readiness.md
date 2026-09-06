@@ -198,23 +198,17 @@ failure.
 
 ## The deferred items, restated plainly
 
-Three kinds of work are CI-gated rather than done, and each is authored and committed in the E1
-commit:
+What is listed here is what has **not** happened. An item leaves this list the day something in
+the repository proves it, and takes its evidence to the table above; a bullet that has to explain
+it is no longer deferred is a bullet in the wrong section.
 
 - **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
   stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
-- **Windows launch with a real runtime** — **no longer deferred.** `ci.yml` `windows` job,
-  `windows-2022` runner: it packages the `hello_ffi` fixture against the OTP `setup-beam`
-  installs and starts the artifact, and run
-  [34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195) printed
-  `the artifact left exit code 3 for halt(3)`, with `0` on the cold run and `3` again on the
-  warm one. Rewritten in E23: the step it replaces ran `erl.exe` directly and started no
-  artifact, so the row in the table above had been booking a proof against a step that did not
-  perform it — for two milestones. The launcher's own half is not deferred either; it runs in
-  `tests/launcher.rs` on a Windows host.
 - **A console control event reaching the Windows launcher** — nothing, yet. Declined in E23 with
   a reason: delivering one needs `GenerateConsoleCtrlEvent`, and a new `#[allow(unsafe_code)]`
-  needs an ADR of its own.
+  needs an ADR of its own. This is the one mechanism of
+  `docs/adr/0015-windows-launcher-stays-resident.md` still resting on argument rather than on a
+  run.
 - **Catalog publishing and release provenance** — `distribute.yml`. Builds every target's binary,
   stub and OTP tarball, produces `attest-build-provenance` attestations, and verifies the
   re-downloaded assets before flipping the release out of draft. Runs when the repository has a
