@@ -27,13 +27,20 @@
 //! over one version: a released section is any `##`/`###` heading whose first
 //! character is a digit or a `[` — the same shape release-please's own
 //! `versionHeaderRegex` uses to find them — and a tag reference is any
-//! `releases/tag/…` or `compare/…v<digit>` whatever version it names. While
-//! nothing has been released there may be neither.
+//! `releases/tag/…` or `compare/…v<digit>` whatever version it names.
+//!
+//! E22 supplied the other half: what a claim is measured *against*. The ceiling
+//! is the version `.release-please-manifest.json` records as released, so a
+//! heading or a link is a false claim exactly when it names a version past it —
+//! every one of them while nothing has been released, and none of them for the
+//! release being cut. The old form read that ceiling from a sentence in
+//! `docs/RELEASE.md` and therefore reported the correct changelog of a release
+//! pull request as a lie.
 
 use crate::common::repo::read;
 use crate::common::version::{
-    NO_RELEASE_YET, RELEASE_DOC, nothing_has_been_released, released_section_headings,
-    tag_references,
+    MANIFEST_FILE, last_released_version, released_section_headings,
+    sections_claiming_a_release_not_recorded, tag_references, tag_references_not_recorded,
 };
 
 /// A changelog carrying the claim in the spelling the old guards could not see.
@@ -80,21 +87,25 @@ fn a_tag_reference_to_any_version_is_seen() {
 }
 
 #[test]
-fn the_committed_changelog_names_no_tag_and_claims_no_release() {
-    if !nothing_has_been_released() {
-        return;
-    }
+fn the_committed_changelog_names_no_tag_and_claims_no_release_the_record_does_not_have() {
+    // The two scans above, applied to the real document. E22 restated the
+    // ceiling: it is `.release-please-manifest.json`, not a sentence in
+    // `docs/RELEASE.md` that release-please never rewrites, so this holds after
+    // the first release as well as before it. `tests/v1_readiness.rs` makes the
+    // same claim as part of the readiness sweep; it is pinned here too because
+    // this is the file that owns the both-spellings scan the claim rests on.
     let changelog = read("CHANGELOG.md");
+    let last = last_released_version();
+    let recorded = last.as_deref().unwrap_or("nothing released");
     assert!(
-        tag_references(&changelog).is_empty(),
-        "{RELEASE_DOC} says `{NO_RELEASE_YET}`, so every tag the changelog could link is one that \
-         does not exist: {:?}",
-        tag_references(&changelog)
+        tag_references_not_recorded(&changelog, last.as_deref()).is_empty(),
+        "{MANIFEST_FILE} records {recorded}, so these link tags nobody has cut: {:?}",
+        tag_references_not_recorded(&changelog, last.as_deref())
     );
     assert!(
-        released_section_headings(&changelog).is_empty(),
-        "{RELEASE_DOC} says `{NO_RELEASE_YET}`, and a dated version section is the same false \
-         claim `.release-please-manifest.json` was making: {:?}",
-        released_section_headings(&changelog)
+        sections_claiming_a_release_not_recorded(&changelog, last.as_deref()).is_empty(),
+        "{MANIFEST_FILE} records {recorded}, and a dated version section past it is the same \
+         false claim the manifest itself was making before E20: {:?}",
+        sections_claiming_a_release_not_recorded(&changelog, last.as_deref())
     );
 }

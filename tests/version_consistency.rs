@@ -39,9 +39,8 @@ use std::process::Command;
 
 use crate::common::repo::{read, root};
 use crate::common::version::{
-    CONFIG_FILE, MANIFEST_FILE, NO_RELEASE_YET, NOTHING_RELEASED, RELEASE_DOC, ROOT_VAR,
-    VersionRoot, cargo_version, last_released_version, manifest_version, nothing_has_been_released,
-    package_setting,
+    CONFIG_FILE, MANIFEST_FILE, NOTHING_RELEASED, RELEASE_DOC, ROOT_VAR, VersionRoot,
+    cargo_version, last_released_version, manifest_version, package_setting,
 };
 
 /// The version the fixture trees are built around.
@@ -205,42 +204,31 @@ fn the_three_refusals_read_as_one_account() {
 // ---------------------------------------------- the records, as committed --
 
 #[test]
-fn the_manifest_records_what_has_been_released_and_nothing_has() {
-    // The invariant that is true in both states, and the one E20 replaces the
-    // old `manifest == Cargo.toml` assertion with. `docs/RELEASE.md` carries
-    // the tree's answer to "has anything been released", because no committed
-    // file can derive it: a tag and a GitHub release live on the server, and a
-    // shallow CI checkout fetches no tags.
+fn the_two_version_records_hold_one_release_between_them() {
+    // The invariant that is true in both states. It reads no document: E22
+    // exists because the release state was read from prose release-please does
+    // not write, and the answer was wrong on the one pull request that cuts a
+    // release. `.release-please-manifest.json` is the record — `0.0.0` is
+    // release-please's own spelling of "never released" — and it moves in the
+    // same commit as `Cargo.toml`.
     let manifest = manifest_version();
     let cargo = cargo_version();
-    // `last_released_version` is the same question asked the way the rest of
-    // the suite should ask it: `None` while nothing has been released.
-    let released = last_released_version();
-    if nothing_has_been_released() {
-        assert_eq!(
-            released, None,
-            "{RELEASE_DOC} says `{NO_RELEASE_YET}`, so there is no last released version; \
-             {MANIFEST_FILE} records {manifest}"
-        );
+    let Some(released) = last_released_version() else {
         assert_eq!(
             manifest, NOTHING_RELEASED,
-            "{RELEASE_DOC} says `{NO_RELEASE_YET}`, and `git tag` and `gh release list` are both \
-             empty (docs/dev/log/E20.md, section 3). release-please reads {MANIFEST_FILE} as the \
-             last released version and derives the next proposal from it, so a manifest of \
-             {manifest} for a repository that has released nothing is what made it propose a \
-             *second* release. While nothing has been released the manifest records \
-             {NOTHING_RELEASED}; Cargo.toml keeps {cargo}, the version being prepared"
+            "`last_released_version` answered `None`, so {MANIFEST_FILE} has to record \
+             {NOTHING_RELEASED} and records {manifest}. The two are the same question and one of \
+             them has stopped reading the file"
         );
-    } else {
-        assert_eq!(
-            released.as_deref(),
-            Some(cargo.as_str()),
-            "{RELEASE_DOC} no longer says `{NO_RELEASE_YET}`, so a release has been cut. \
-             release-please writes {MANIFEST_FILE} and Cargo.toml in one commit, so from the \
-             first release onward the two records hold one version between them; the manifest \
-             records {manifest}"
-        );
-    }
+        return;
+    };
+    assert_eq!(
+        released, cargo,
+        "{MANIFEST_FILE} records {manifest} as the last released version and Cargo.toml carries \
+         {cargo}. release-please writes both in one commit, so from the first release onward the \
+         two records hold one version between them; a disagreement is drift, and \
+         `scripts/ci/version-consistency.sh` refuses to build a release out of it"
+    );
 }
 
 #[test]

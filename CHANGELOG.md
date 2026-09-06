@@ -36,6 +36,13 @@ no Erlang installation. Five phases, A through E, built it:
 
 ### Added
 
+- `GINARY_GITHUB_TOKEN`, `GH_TOKEN` and `GITHUB_TOKEN`, tried in that order: the token
+  `ginary otp repack` reads the GitHub release API with. It needs no scopes for a public
+  repository. Without one the read is anonymous, and GitHub allows 60 an hour **per source
+  address** — one address for a CI runner pool, an office or anything behind a proxy — so a
+  machine that is not doing anything unusual can be refused. The token is sent to the API base
+  only: never with the asset download, which goes to a storage host, never to another host, and
+  never carried on to a redirect.
 - Every ginary binary carries a 128-byte identity marker naming the version it was built by, the
   target it runs on, the payload format it reads and whether it holds the command line half.
   `docs/format.md` specifies it.
@@ -88,6 +95,12 @@ no Erlang installation. Five phases, A through E, built it:
 
 ### Changed
 
+- A GitHub API refusal that is a rate limit says so, and says what to do about it. `403` and
+  `429` carrying `x-ratelimit-remaining: 0` or `retry-after` are reported as an exhausted rate
+  limit, with the delay the server asked for and the variables a token comes from, rather than as
+  `answered HTTP 403` — which reads identically to a private repository, a tag that is not there
+  and a token that is wrong. A `403` that says nothing about a rate limit is still reported as
+  the plain status it is.
 - A build for a target other than the host is no longer refused outright. What it needs now is a
   stub, which can be built, and a runtime, which still has to be named:
   `[tools.ginary.target.<name>] erts = "dir:..."`. A cross target with no runtime named for it is

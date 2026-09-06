@@ -503,3 +503,10 @@ mod e21_an_unreleased_heading_one_level_down_read_as_a_release;
 mod e21_the_fuzz_smoke_never_created_the_corpus_it_passed;
 #[path = "regressions/e21_the_seam_scan_read_only_the_workflows_beside_it.rs"]
 mod e21_the_seam_scan_read_only_the_workflows_beside_it;
+#[path = "regressions/e22_a_prerelease_heading_read_as_the_release_it_precedes.rs"]
+mod e22_a_prerelease_heading_read_as_the_release_it_precedes;
+#[cfg(feature = "cli")]
+#[path = "regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs"]
+mod e22_an_unauthenticated_api_read_was_refused_without_saying_why;
+#[path = "regressions/e22_the_release_state_was_read_from_a_document_the_release_cannot_edit.rs"]
+mod e22_the_release_state_was_read_from_a_document_the_release_cannot_edit;

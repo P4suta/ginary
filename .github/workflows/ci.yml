@@ -286,6 +286,14 @@ jobs:
             --upstream-tag OTP-29.0.5 \
             --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
             --out dist/otp
+        env:
+          # `ginary otp repack` reads the upstream release through the GitHub
+          # API. An unauthenticated read is limited to 60 an hour by source
+          # address, which every hosted runner in a pool shares, and the answer
+          # over it is a 403 nothing retries its way out of. `contents: read` is
+          # all this needs; the token moves the read onto this repository's own
+          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
+          GITHUB_TOKEN: ${{ github.token }}
       - run: scripts/smoke-matrix.sh
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
@@ -604,6 +612,14 @@ jobs:
             --upstream-tag OTP-29.0.5 \
             --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
             --out dist/otp
+        env:
+          # `ginary otp repack` reads the upstream release through the GitHub
+          # API. An unauthenticated read is limited to 60 an hour by source
+          # address, which every hosted runner in a pool shares, and the answer
+          # over it is a 403 nothing retries its way out of. `contents: read` is
+          # all this needs; the token moves the read onto this repository's own
+          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
+          GITHUB_TOKEN: ${{ github.token }}
       # Line coverage, gated at 90%. The branch floor is documented as
       # nightly-only (it needs a `-Z coverage-options=branch` build); see
       # docs/dev/testing.md. The threshold lives here, not only in the script's

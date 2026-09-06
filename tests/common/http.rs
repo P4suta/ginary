@@ -248,6 +248,22 @@ pub enum Reply {
         /// The bytes as they go on the wire, already encoded.
         body: Vec<u8>,
     },
+    /// A status, a body, and whatever headers the answer is about.
+    ///
+    /// The general shape [`Reply::Encoded`] is one case of. It exists for the
+    /// answers whose *headers* carry the meaning: GitHub says a request was
+    /// refused for a rate limit in `x-ratelimit-remaining` and `retry-after`,
+    /// and a `location` is the whole of a redirect. A client that reads only
+    /// the status line cannot tell any of those from any other answer with the
+    /// same code.
+    Headed {
+        /// The status line's code.
+        status: u16,
+        /// Header name and value, written in order and verbatim.
+        headers: Vec<(String, String)>,
+        /// The bytes, sent with a matching `Content-Length`.
+        body: Vec<u8>,
+    },
     /// A `Content-Length` header that promises more than is sent, then a
     /// close: the transport failure a retry is supposed to survive.
     Truncated {
@@ -273,6 +289,18 @@ impl Reply {
     pub fn status(status: u16) -> Self {
         Self::Body {
             status,
+            body: Vec::new(),
+        }
+    }
+
+    /// A status and an empty body under `headers`.
+    pub fn headed(status: u16, headers: &[(&str, &str)]) -> Self {
+        Self::Headed {
+            status,
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
             body: Vec::new(),
         }
     }
@@ -678,6 +706,23 @@ fn write_reply<W: Write>(sink: &mut W, reply: &Reply) -> std::io::Result<()> {
                 reason(*status),
                 body.len()
             );
+            sink.write_all(head.as_bytes())?;
+            sink.write_all(body)?;
+            sink.flush()
+        }
+        Reply::Headed {
+            status,
+            headers,
+            body,
+        } => {
+            let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(*status));
+            for (name, value) in headers {
+                head.push_str(&format!("{name}: {value}\r\n"));
+            }
+            head.push_str(&format!(
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ));
             sink.write_all(head.as_bytes())?;
             sink.write_all(body)?;
             sink.flush()

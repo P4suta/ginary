@@ -20,8 +20,8 @@ mod common;
 use std::collections::BTreeMap;
 
 use ginary::download::{
-    self, BACKOFF_BASE, DownloadError, Expect, GITHUB_API_BASE, GITHUB_BASE_VAR, MAX_ATTEMPTS,
-    MAX_TEXT_BYTES, Net, OFFLINE_VAR, PROXY_VARS,
+    self, BACKOFF_BASE, DownloadError, Expect, GITHUB_API_BASE, GITHUB_BASE_VAR, GITHUB_TOKEN_VARS,
+    MAX_ATTEMPTS, MAX_TEXT_BYTES, Net, OFFLINE_VAR, PROXY_VARS,
 };
 
 use crate::common::http::{Reply, TestServer};
@@ -475,6 +475,7 @@ fn a_document_read_goes_through_the_base_override() {
     let net = Net {
         offline: false,
         base_overrides: BTreeMap::from([(GITHUB_API_BASE.to_owned(), server.base())]),
+        token: None,
     };
 
     let text = download::get_text(
@@ -497,6 +498,7 @@ fn a_base_override_redirects_a_whole_host_and_leaves_every_other_url_alone() {
             GITHUB_API_BASE.to_owned(),
             "http://127.0.0.1:9/api".to_owned(),
         )]),
+        token: None,
     };
 
     assert_eq!(
@@ -524,6 +526,7 @@ fn the_longest_matching_base_is_the_one_that_wins() {
                 "http://long".to_owned(),
             ),
         ]),
+        token: None,
     };
 
     assert_eq!(
@@ -576,5 +579,20 @@ fn the_github_base_variable_becomes_an_override_of_the_release_api() {
     assert_eq!(
         net.rewrite(&format!("{GITHUB_API_BASE}/repos")),
         "http://mirror.test/repos"
+    );
+}
+
+#[test]
+fn the_downloader_reads_the_variables_the_workflows_are_held_to() {
+    // `tests/ci_matrix.rs` requires every workflow step that fetches an OTP
+    // asset to be handed a token, and it runs in both flavors of the suite, so
+    // it cannot import this `cli`-gated constant and keeps its own copy. This
+    // is the seam between them: rename a variable here, leave the workflows
+    // alone, and the reads quietly go back to being anonymous.
+    assert_eq!(
+        GITHUB_TOKEN_VARS,
+        crate::common::github::TOKEN_VARS,
+        "the names this module reads a token from and the names the workflow rule accepts have to \
+         be one list"
     );
 }

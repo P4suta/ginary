@@ -21,6 +21,7 @@ use saphyr::YamlOwned;
 use serde_json::Value;
 
 use crate::common::deps::{Version, rust_version};
+use crate::common::github::TOKEN_VARS;
 use crate::common::repo::{
     NameSite, ToolchainSite, WorkflowStep, exists, name_sites, option_value, parse_yaml, read,
     read_opt, read_or_missing, root, rust_toolchain_sites, shell_code, shell_scripts_under,
@@ -2172,5 +2173,50 @@ fn the_testing_document_says_what_the_nightly_mutation_pass_does_not_cover() {
          \"every mutant of these modules is caught\", and no passage of the document names \
          `{record}` and, within twenty lines of it, says what the pass `does not cover`, what \
          `--timeout` bounds and what `timeout-minutes` the budget is"
+    );
+}
+
+// ------------------------------------------- the token an OTP fetch needs --
+
+#[test]
+fn every_step_that_fetches_an_otp_asset_is_handed_a_github_token() {
+    let mut unauthenticated: Vec<String> = Vec::new();
+    for (path, _) in action_yaml() {
+        if !path.contains("/workflows/") {
+            continue;
+        }
+        for step in workflow_steps(&path) {
+            if !step
+                .commands()
+                .iter()
+                .any(|command| command.contains("otp repack"))
+            {
+                continue;
+            }
+            // The step's own `env:` overlaid on its job's, which is what the
+            // process actually gets: a token declared once for the job is as
+            // good as one on the step and is the tidier place for it.
+            if !TOKEN_VARS.iter().any(|name| step.env.contains_key(*name)) {
+                unauthenticated.push(format!(
+                    "{path}: job `{}` step {} ({})",
+                    step.job, step.position, step.name
+                ));
+            }
+        }
+    }
+
+    // `ginary otp repack` reads the upstream release through the GitHub API,
+    // and an unauthenticated read is limited to 60 an hour by source address —
+    // one address for a whole pool of hosted runners. The limit is not a
+    // failure mode a workflow can retry its way out of: it is 403, it is not
+    // retryable, and it takes the job down for a reason that has nothing to do
+    // with the change under test. E22 is that job, on the first release pull
+    // request this repository ever opened.
+    assert!(
+        unauthenticated.is_empty(),
+        "these steps fetch an OTP asset with no token in reach: {unauthenticated:?}. Hand the \
+         step (or its job) `GITHUB_TOKEN: ${{{{ github.token }}}}` — `contents: read` is enough \
+         for a public repository, and it moves the read off the runner's shared per-address \
+         budget onto this repository's own. The names a token may travel under are {TOKEN_VARS:?}"
     );
 }

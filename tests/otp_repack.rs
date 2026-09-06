@@ -596,6 +596,7 @@ fn net_through(server: &TestServer) -> Net {
             GITHUB_API_BASE.to_owned(),
             server.base(),
         )]),
+        token: None,
     }
 }
 

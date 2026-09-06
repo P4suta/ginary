@@ -38,21 +38,23 @@
 //! above it and the `[Unreleased]` body is neither moved nor consumed. Under
 //! the false description, the whole phase summary would have been filed as
 //! unreleased for ever after the first release, and the two guards that would
-//! have noticed — `the_work_that_is_done_and_not_released_sits_under_unreleased`
-//! and `the_changelog_claims_no_release_that_has_not_been_cut` — both stand
-//! down the moment a release is cut.
+//! have noticed both stood down the moment a release was cut. E22 restated
+//! them over `.release-please-manifest.json` so that they do not.
 //!
 //! **The correct behaviour.** The documents say what the updater does, and
 //! `docs/RELEASE.md` carries the step that follows from it: when reviewing the
-//! release pull request the maintainer clears `## [Unreleased]` by hand, because
-//! release-please will not. The insertion point itself is pinned here with
-//! release-please's own regex, so a changelog that grows a second version
-//! header — the state in which the documented behaviour would no longer
-//! describe where the section lands — is a test failure rather than a surprise
-//! at release time.
+//! release pull request the maintainer folds the released body into the
+//! generated section and puts an empty `## [Unreleased]` back above it, because
+//! release-please will not. The insertion point itself is pinned here, and E22
+//! moved that pin from "exactly one version header" — a claim that is only true
+//! before the first release — to "`[Unreleased]` is the *first* version header",
+//! which is the property that actually holds. The insertion point of the next
+//! release is the first match, so a `[Unreleased]` that has fallen below a
+//! release section falls one further with every release after it and never
+//! comes back.
 
 use crate::common::repo::read;
-use crate::common::version::{nothing_has_been_released, version_header_lines};
+use crate::common::version::first_version_header;
 
 /// The claims that were in the tree, in the spelling each document used.
 ///
@@ -134,17 +136,23 @@ fn the_release_document_says_where_the_generated_section_lands_and_who_clears_un
 }
 
 #[test]
-fn the_changelog_has_exactly_one_insertion_point_and_it_is_unreleased() {
-    if !nothing_has_been_released() {
-        return;
-    }
-    let headers = version_header_lines(&read("CHANGELOG.md"));
+fn the_unreleased_heading_is_the_first_version_header() {
+    // E20 pinned this as "exactly one version header, and it is
+    // `[Unreleased]`", which is only true before the first release; the guard
+    // stood down the moment one was cut, which is the moment it was needed.
+    // What matters is not how many there are but which one is *first*: that
+    // line is where release-please splices the next generated section in, and
+    // once `[Unreleased]` is not it, `[Unreleased]` is below a release — and
+    // below the insertion point of every release after it, sinking one section
+    // further each time until the section for work that is not released is at
+    // the bottom of the file for ever.
     assert_eq!(
-        headers,
-        vec!["## [Unreleased]".to_owned()],
+        first_version_header(&read("CHANGELOG.md")).as_deref(),
+        Some("## [Unreleased]"),
         "release-please splices its generated section in above the *first* line matching its own \
-         `\\n###? v?[0-9[]`. While nothing has been released that line has to be \
-         `## [Unreleased]`, and it has to be the only one: a second version header would move the \
-         insertion point somewhere docs/RELEASE.md does not describe"
+         `\\n###? v?[0-9[]`. That line has to be `## [Unreleased]`. If a release section is above \
+         it, the release pull request has not been finished: move the released body under the \
+         generated heading and put an empty `## [Unreleased]` back on top, as `docs/RELEASE.md` \
+         step 1 describes"
     );
 }

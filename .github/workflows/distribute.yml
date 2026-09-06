@@ -83,6 +83,14 @@ jobs:
           esac
           cargo run --quiet --locked -- otp repack \
             --upstream-tag OTP-29.0.5 --targets "$spec" --out dist/release
+        env:
+          # `ginary otp repack` reads the upstream release through the GitHub
+          # API. An unauthenticated read is limited to 60 an hour by source
+          # address, which every hosted runner in a pool shares, and the answer
+          # over it is a 403 nothing retries its way out of. `contents: read` is
+          # all this needs; the token moves the read onto this repository's own
+          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}
@@ -132,6 +140,14 @@ jobs:
         run: |
           cargo run --quiet --locked -- otp repack \
             --upstream-tag OTP-29.0.5 --targets "${{ matrix.target }}" --out dist/release
+        env:
+          # `ginary otp repack` reads the upstream release through the GitHub
+          # API. An unauthenticated read is limited to 60 an hour by source
+          # address, which every hosted runner in a pool shares, and the answer
+          # over it is a 403 nothing retries its way out of. `contents: read` is
+          # all this needs; the token moves the read onto this repository's own
+          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}

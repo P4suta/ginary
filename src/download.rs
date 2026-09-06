@@ -10,11 +10,23 @@
 //! the file onto `dest`. A failure at any point removes the part file, so a
 //! destination either does not exist or is the whole, verified file.
 //!
-//! [`Net`] carries the two things a fetch has to be told rather than read:
-//! whether this build may talk to the network at all, and which bases have
-//! been redirected at a mirror. `GINARY_OFFLINE=1` and `GINARY_GITHUB_BASE_URL`
-//! are the two spellings, and [`Net::from_vars`] takes the variables rather
-//! than reading the process environment, so the rules are testable in parallel.
+//! [`Net`] carries the three things a fetch has to be told rather than read:
+//! whether this build may talk to the network at all, which bases have been
+//! redirected at a mirror, and what it authenticates to the GitHub API as.
+//! `GINARY_OFFLINE=1`, `GINARY_GITHUB_BASE_URL` and [`GITHUB_TOKEN_VARS`] are
+//! the spellings, and [`Net::from_vars`] takes the variables rather than
+//! reading the process environment, so the rules are testable in parallel.
+//!
+//! The token goes to the API and nowhere else. [`get_text`] attaches it only
+//! for a URL under [`GITHUB_API_BASE`] — decided before the base override, so a
+//! mirror of the API is still the API and a catalogue document `ginary otp
+//! update` was pointed at is still not — [`fetch`] attaches none at all, since
+//! the asset bytes come from a release download URL that redirects to a storage
+//! host, and the client is configured so that a redirect does not carry an
+//! `Authorization` header onward. What it buys is the rate limit: an
+//! unauthenticated read is 60 an hour *by source address*, which a CI runner
+//! pool, a proxy and an office all share, and the headers of a refusal are read
+//! so that hitting it says so: see [`DownloadError::RateLimited`].
 //!
 //! Proxies are the transport's business: the honoured variables are named in
 //! [`PROXY_VARS`] and are read by the HTTP client itself, so nothing here
@@ -65,6 +77,13 @@ pub const GITHUB_BASE_VAR: &str = "GINARY_GITHUB_BASE_URL";
 
 /// The base [`GITHUB_BASE_VAR`] replaces.
 pub const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// The variables a GitHub token is taken from, in the order they are tried.
+///
+/// `GH_TOKEN` before `GITHUB_TOKEN` is the `gh` command line's own precedence,
+/// and `GINARY_GITHUB_TOKEN` in front of both is the way to give ginary a token
+/// without giving one to every other tool in the shell.
+pub const GITHUB_TOKEN_VARS: [&str; 3] = ["GINARY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
 
 /// The proxy variables the HTTP client is expected to honour.
 ///
@@ -124,13 +143,49 @@ pub fn parse_sha256(text: &str) -> Option<[u8; 32]> {
     Some(digest)
 }
 
-/// Whether this build may fetch, and where the bases point.
+/// A GitHub token, kept out of every rendering of whatever holds it.
+///
+/// The [`std::fmt::Debug`] implementation is written rather than derived, and
+/// that is the whole point of the type: [`Net`] is `Debug`, `Net` travels
+/// inside the build context, and a derived `Debug` would put a credential into
+/// any trace, panic message or `{net:?}` that ever prints one.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// The token `value` names, or [`None`] when it names none.
+    ///
+    /// An empty variable is unset: a workflow that writes `GITHUB_TOKEN: ${{
+    /// }}` for a value it does not have exports the name with nothing in it,
+    /// and an empty `Authorization` header is a worse answer than no header.
+    pub fn new(value: &str) -> Option<Self> {
+        (!value.trim().is_empty()).then(|| Self(value.trim().to_owned()))
+    }
+
+    /// The `Authorization` header value this token is sent as.
+    fn header_value(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Token(<redacted>)")
+    }
+}
+
+/// Whether this build may fetch, where the bases point, and what it
+/// authenticates as.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Net {
     /// `--offline`, or `GINARY_OFFLINE=1`.
     pub offline: bool,
     /// Base URL to replacement, longest base first when they overlap.
     pub base_overrides: BTreeMap<String, String>,
+    /// The token the GitHub API is read with, from [`GITHUB_TOKEN_VARS`].
+    ///
+    /// Sent to the API base and to nothing else; see [`get_text`].
+    pub token: Option<Token>,
 }
 
 impl Net {
@@ -147,7 +202,7 @@ impl Net {
         }
     }
 
-    /// The two variables this module reads, taken rather than read.
+    /// The variables this module reads, taken rather than read.
     ///
     /// `offline_flag` is the command line's own `--offline`, which
     /// [`OFFLINE_VAR`] can only turn on: a build asked to stay offline is not
@@ -158,9 +213,13 @@ impl Net {
         if let Some(base) = vars.get(GITHUB_BASE_VAR).filter(|value| !value.is_empty()) {
             base_overrides.insert(GITHUB_API_BASE.to_owned(), base.clone());
         }
+        let token = GITHUB_TOKEN_VARS
+            .iter()
+            .find_map(|name| vars.get(*name).and_then(|value| Token::new(value)));
         Self {
             offline,
             base_overrides,
+            token,
         }
     }
 
@@ -168,6 +227,7 @@ impl Net {
     pub fn env_vars() -> BTreeMap<String, String> {
         [OFFLINE_VAR, GITHUB_BASE_VAR]
             .into_iter()
+            .chain(GITHUB_TOKEN_VARS)
             .filter_map(|name| {
                 std::env::var(name)
                     .ok()
@@ -233,6 +293,27 @@ pub enum DownloadError {
         url: String,
         /// Where the file would have gone.
         dest_hint: PathBuf,
+    },
+    /// The API refused the request because a rate limit is exhausted.
+    ///
+    /// A 403 or a 429 that says so in its headers, which is a different answer
+    /// from a 403 that means "not yours": one is fixed by waiting or by
+    /// authenticating and the other is not, and a message that reports only the
+    /// status leaves a user to guess which they have.
+    #[error(
+        "{url} answered HTTP {status} because the GitHub API rate limit is exhausted{}. \
+         An unauthenticated read is limited by source address, which a CI runner, a proxy and an \
+         office share; set GINARY_GITHUB_TOKEN, GH_TOKEN or GITHUB_TOKEN to a GitHub token — it \
+         needs no scopes for a public repository — to be counted on your own account instead",
+        .retry_after.map_or(String::new(), |seconds| format!(", and asks for the next request in {seconds} seconds"))
+    )]
+    RateLimited {
+        /// The URL that was refused.
+        url: String,
+        /// The status the server answered, 403 or 429.
+        status: u16,
+        /// The `retry-after` the server asked for, in seconds, when it named one.
+        retry_after: Option<u64>,
     },
     /// The server answered a status that is not worth asking again.
     #[error("{url} answered HTTP {status}")]
@@ -395,6 +476,15 @@ pub fn fetch(url: &str, dest: &Path, expect: &Expect, net: &Net) -> Result<(), D
 /// [`DownloadError`], as [`fetch`], plus [`DownloadError::TooLarge`] and
 /// [`DownloadError::NotText`].
 pub fn get_text(url: &str, net: &Net) -> Result<String, DownloadError> {
+    // Before the rewrite, deliberately. The question is which *service* is
+    // being read, and `GINARY_GITHUB_BASE_URL` answers where it lives rather
+    // than what it is: a mirror of the GitHub API is still the GitHub API, and
+    // a catalogue document `ginary otp update` was pointed at is not, whatever
+    // host either sits on.
+    let authorization = net
+        .token
+        .as_ref()
+        .filter(|_| url.starts_with(GITHUB_API_BASE));
     let url = net.rewrite(url);
     if net.offline {
         return Err(DownloadError::Offline {
@@ -406,7 +496,7 @@ pub fn get_text(url: &str, net: &Net) -> Result<String, DownloadError> {
     let agent = agent();
     let mut last = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
-        match text_once(&agent, &url) {
+        match text_once(&agent, &url, authorization) {
             Ok(text) => return Ok(text),
             Err(Attempt::Fatal(error)) => return Err(error),
             Err(Attempt::Retryable(message)) => {
@@ -466,23 +556,63 @@ const READ_LIMIT: u64 = MAX_TEXT_BYTES + 1;
 /// past every such expansion and still a bound.
 const TRANSFER_LIMIT: u64 = 2 * READ_LIMIT;
 
+/// What a non-2xx answer means, read from its headers as well as its status.
+///
+/// The one place a status becomes an outcome, for both request paths. A 5xx is
+/// worth asking again and a 4xx is not, which is [`retryable`]; what the status
+/// alone cannot say is *which* 4xx a 403 is, and GitHub says that in the
+/// headers. `x-ratelimit-remaining: 0` is the primary limit — 60 an hour by
+/// source address for an unauthenticated read — and `retry-after` is the
+/// secondary one. Neither is retried here: three asks 200 ms apart do not
+/// outlast a limit measured in minutes, and the answer a user needs is the
+/// message rather than a slower failure.
+fn status_attempt(url: &str, status: u16, header: impl Fn(&str) -> Option<String>) -> Attempt {
+    if retryable(status) {
+        return Attempt::Retryable(format!("HTTP {status}"));
+    }
+    let retry_after = header("retry-after");
+    let rate_limited = matches!(status, 403 | 429)
+        && (header("x-ratelimit-remaining").as_deref() == Some("0") || retry_after.is_some());
+    if rate_limited {
+        return Attempt::Fatal(DownloadError::RateLimited {
+            url: url.to_owned(),
+            status,
+            retry_after: retry_after.and_then(|value| value.trim().parse().ok()),
+        });
+    }
+    Attempt::Fatal(DownloadError::Status {
+        url: url.to_owned(),
+        status,
+    })
+}
+
 /// One request for a small document.
-fn text_once(agent: &ureq::Agent, url: &str) -> Result<String, Attempt> {
-    let response = agent
+///
+/// `authorization` is the token this request is made with, and the caller
+/// decides: [`get_text`] sends one only for a URL under [`GITHUB_API_BASE`].
+fn text_once(
+    agent: &ureq::Agent,
+    url: &str,
+    authorization: Option<&Token>,
+) -> Result<String, Attempt> {
+    let mut request = agent
         .get(url)
-        .header("accept", "application/vnd.github+json")
+        .header("accept", "application/vnd.github+json");
+    if let Some(token) = authorization {
+        request = request.header("authorization", token.header_value());
+    }
+    let response = request
         .call()
         .map_err(|error| Attempt::Retryable(error.to_string()))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(if retryable(status) {
-            Attempt::Retryable(format!("HTTP {status}"))
-        } else {
-            Attempt::Fatal(DownloadError::Status {
-                url: url.to_owned(),
-                status,
-            })
-        });
+        return Err(status_attempt(url, status, |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        }));
     }
     // The bytes rather than a string, so that the two things that can be wrong
     // with them are two answers rather than one: `read_to_string` decodes as it
@@ -574,14 +704,13 @@ fn attempt_once(
 
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(if retryable(status) {
-            Attempt::Retryable(format!("HTTP {status}"))
-        } else {
-            Attempt::Fatal(DownloadError::Status {
-                url: url.to_owned(),
-                status,
-            })
-        });
+        return Err(status_attempt(url, status, |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        }));
     }
 
     let mut body = response.into_body().into_reader();
