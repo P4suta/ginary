@@ -445,7 +445,7 @@ jobs:
           codesign --verify --strict --verbose=4 "$artifact"
 
   windows:
-    name: Windows build and exit-code propagation
+    name: Windows build, launch and exit-code propagation
     # windows-2025 is offered and deliberately not taken: this runner is where
     # the Windows launcher's exit-code propagation is proved, and moving the
     # image is a claim about what that proof runs against. It moves with a run
@@ -468,7 +468,22 @@ jobs:
       # Both flavors, and the launcher-side unit tests natively (the wine gap
       # from D2 — a real Rust test binary cannot start under the cross image's
       # wine, so these run nowhere until a real Windows runner does it).
-      - run: cargo build --no-default-features --release --locked
+      #
+      # The stub goes into a target directory of its own, and that is not a
+      # tidiness preference. Both flavors are one Cargo target and share
+      # `target/release/ginary.exe`, so a stub built into the default directory
+      # replaces the command line tool the packaging step below runs — which is
+      # exactly what happened to the macOS job on its first live run, where the
+      # build was answered by the launcher stub's payloadless sentence. See
+      # tests/regressions/e5_the_macos_job_ran_the_stub_as_the_command_line_tool.rs.
+      - name: Build the windows stub into a directory of its own
+        shell: bash
+        run: |
+          cargo build --no-default-features --release --locked --target-dir target/stub
+          mkdir -p target/stubs
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          cp target/stub/release/ginary.exe \
+            "target/stubs/ginary-stub-${version}-windows-x86_64.exe"
       - run: cargo build --release --locked
       # `--no-fail-fast` for the reason the `test` job gives: cargo abandons
       # every target after the first that fails, so the seven library failures
@@ -524,6 +539,146 @@ jobs:
           Write-Host "erl -noshell -eval halt(3) left exit code $code"
           if ($code -ne 3) {
             Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
+            exit 1
+          }
+          exit 0
+      # The end-to-end run D2 left to a real Windows host, and the first
+      # execution `launch_windows::run` has ever had: the spawn, the job object
+      # and the console control handler are reached by a packaged artifact
+      # starting a real runtime and by nothing else. Every other Windows
+      # mechanism in this repository — the cache root, the `\\?\` prefix, the
+      # two share modes, the exit-code mapping — is a pure function a Linux
+      # machine checks honestly, and those are unit-tested. This one is not.
+      #
+      # It is the macOS job's `Package, run and verify a hello_ffi artifact`
+      # step with the platform changed and nothing else, so that what the two
+      # runners prove differs in the operating system rather than in the
+      # thoroughness of the check.
+      #
+      # The runtime is named as a `dir:` source in the fixture's own
+      # `gleam.toml`, because `ginary build` has no `--erts` flag and never had
+      # one; assuming it did killed the macOS job at argument parsing on two
+      # consecutive runs. See
+      # tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs.
+      # The value is written as a TOML *literal* string, in single quotes: a
+      # Windows path is full of backslashes and `\U`, `\t` and `\x` are escapes
+      # inside a TOML basic string, so `erts = "dir:C:\Users\..."` is not the
+      # path it looks like and is often not valid TOML at all. That is the
+      # spelling a Windows user has to write too, which is why the README says
+      # so and why this job proves it rather than sidestepping it with forward
+      # slashes.
+      - name: Package, run and verify a hello_ffi artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $otp = $env:INSTALL_DIR_FOR_OTP
+          if (-not $otp -or -not (Test-Path -LiteralPath $otp)) {
+            Write-Host "::error::INSTALL_DIR_FOR_OTP names no directory: '$otp'"
+            Write-Host "erlef/setup-beam exports it, and this step packages the runtime it installed"
+            exit 1
+          }
+          $ginary = Join-Path $env:GITHUB_WORKSPACE 'target\release\ginary.exe'
+          if (-not (Test-Path -LiteralPath $ginary)) {
+            Write-Host "::error::no command line tool at $ginary"
+            exit 1
+          }
+          $env:GINARY_STUB_DIR = Join-Path $env:GITHUB_WORKSPACE 'target\stubs'
+          Get-ChildItem -LiteralPath $env:GINARY_STUB_DIR | ForEach-Object {
+            Write-Host "stub: $($_.Name) $($_.Length) bytes"
+          }
+
+          # The fixture is copied first and the erts source appended to the
+          # *copy*, never to the committed file.
+          $work = Join-Path $env:RUNNER_TEMP 'windows-e2e'
+          Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $project = Join-Path $work 'hello_ffi'
+          Copy-Item -Recurse -Force 'tests\fixtures\hello_ffi' $project
+          Add-Content -LiteralPath (Join-Path $project 'gleam.toml') -Encoding utf8 -Value @(
+            '',
+            '[tools.ginary.target."windows-x86_64"]',
+            "erts = 'dir:$otp'"
+          )
+          Write-Host "== the erts source this build was given =="
+          Get-Content -LiteralPath (Join-Path $project 'gleam.toml') | Select-Object -Last 3
+
+          Push-Location $project
+          & $ginary build --target windows-x86_64
+          $built = $LASTEXITCODE
+          Pop-Location
+          if ($built -ne 0) {
+            Write-Host "::error::ginary build --target windows-x86_64 exited $built"
+            Write-Host "== erts-*/bin of the runtime it was pointed at =="
+            Get-ChildItem -LiteralPath $otp -Filter 'beam.smp.dll' -Recurse -File |
+              ForEach-Object { Write-Host $_.FullName }
+            Get-ChildItem -LiteralPath $otp -Filter 'erl.exe' -Recurse -File |
+              ForEach-Object { Write-Host $_.FullName }
+            exit 1
+          }
+
+          $artifact = Join-Path $project 'build\ginary\hello_ffi-windows-x86_64.exe'
+          if (-not (Test-Path -LiteralPath $artifact)) {
+            Write-Host "::error::the build reported success and left no $artifact"
+            Get-ChildItem -Recurse -LiteralPath (Join-Path $project 'build\ginary') |
+              ForEach-Object { Write-Host $_.FullName }
+            exit 1
+          }
+          & $ginary inspect $artifact
+
+          # The launcher's own diagnostic first: extract, preflight, and start
+          # the runtime on a no-op halt, each step reported PASS or FAIL. When
+          # it fails it says which phase did, which a bare exit code cannot.
+          $env:GINARY_CMD = 'selftest'
+          & $artifact
+          $selftest = $LASTEXITCODE
+          Remove-Item Env:\GINARY_CMD
+          if ($selftest -ne 0) {
+            Write-Host "::error::GINARY_CMD=selftest exited $selftest"
+            exit 1
+          }
+
+          # Cold cache: this extracts the runtime and is the first spawn.
+          $output = (& $artifact 0 hello world 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $output
+          Write-Host "the artifact exited $code on its first run"
+          if ($code -ne 0) {
+            Write-Host "::error::the hello_ffi artifact exited $code, not 0"
+            $env:GINARY_DEBUG = '1'
+            & $artifact 0 hello world
+            Remove-Item Env:\GINARY_DEBUG
+            exit 1
+          }
+          foreach ($needle in @('args=0 hello world', 'hello from priv', 'cwd=')) {
+            if (-not $output.Contains($needle)) {
+              Write-Host "::error::the artifact printed no '$needle' line"
+              exit 1
+            }
+          }
+
+          # Warm cache: the entry is there, nothing is extracted, and the same
+          # spawn runs against a runtime this launcher did not unpack.
+          & $artifact 0 again | Out-Null
+          $warm = $LASTEXITCODE
+          Write-Host "the artifact exited $warm on its second, warm-cache run"
+          if ($warm -ne 0) {
+            Write-Host "::error::the warm-cache run exited $warm, not 0"
+            exit 1
+          }
+
+          # And the contract itself: `halt(3)` through ginary's own launcher.
+          # The bare probe above proves the emulator leaves 3 behind for a
+          # parent; this proves `launch_windows::run` carries it to
+          # %ERRORLEVEL% across the spawn it owns. Both, because one failure
+          # that could be either is a failure nobody can read.
+          & $artifact 3 | Out-Null
+          $halted = $LASTEXITCODE
+          Write-Host "halt(3) through the launcher left exit code $halted"
+          if ($halted -ne 3) {
+            Write-Host "::error::expected 3 from halt(3) through the launcher, got $halted"
+            $env:GINARY_DEBUG = '1'
+            & $artifact 3
+            Remove-Item Env:\GINARY_DEBUG
             exit 1
           }
           exit 0

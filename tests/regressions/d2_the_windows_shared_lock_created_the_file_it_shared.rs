@@ -20,8 +20,10 @@
 //!
 //! **This test does not run on Linux.** It is the Windows half of a Windows
 //! rule and there is no `CreateFile` here to hold it to; it compiles for
-//! `x86_64-pc-windows-gnu` and `docs/dev/log/D2.md` lists it among the claims
-//! the GitHub Actions milestone has to check.
+//! `x86_64-pc-windows-gnu` here, and it *runs* in the `windows` job of
+//! `.github/workflows/ci.yml`, whose `cargo test` is native. `docs/dev/log/D2.md`
+//! listed it among the claims a real Windows host had to check; that host now
+//! checks it on every push.
 #![cfg(windows)]
 
 use ginary::cache_lock::SharedLock;

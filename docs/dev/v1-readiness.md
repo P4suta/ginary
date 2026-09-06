@@ -4,13 +4,15 @@
 This is the fail-closed checklist that decides whether ginary is v1. It enumerates every plan
 phase, A through E, with the acceptance evidence each one produced, marks each item done or
 deferred, and names the commit that closed it. An item is **done** only when a test, a script or
-a committed artifact in this repository proves it. An item that needs a runner this machine is
-not — a Mac, a Windows host, a published remote — is **CI-gated**: the workflow is authored and
-committed, and it runs when the repository has a remote. A CI-gated item is never marked done and
-never hand-waved; it says which workflow carries it and in which commit.
+a committed artifact in this repository proves it — or, for an item that needs a runner this
+machine is not, a CI job that runs it on every push and a test in this repository that holds the
+job to doing so. An item whose workflow is authored and has **never executed** is **CI-gated**: it
+is never marked done and never hand-waved, and it says which workflow carries it.
 
-The rule is fail-closed: an item with no evidence is not v1-ready, and a deferred item is honest
-about being deferred rather than quietly counted as done.
+The rule is fail-closed in both directions. An item with no evidence is not v1-ready, and a
+deferred item is honest about being deferred rather than quietly counted as done; equally, an item
+that stays deferred once its evidence exists understates the project in the document that exists
+to prevent hand-waving, so a job that starts running closes its item in the same milestone.
 
 ## What v1 delivers
 
@@ -21,8 +23,9 @@ arm64, and Windows on x86_64 — together with the tools to read, verify and cro
 artifact: a version-locked stub per target, a local-first OTP catalog, native-code reconciliation
 for the NIFs and port programs a shipment carries, `ginary verify` and `ginary sbom`, and a
 launcher whose cache protocol is modelled in TLA+. The Linux half runs end to end on this
-machine today; the macOS and Windows launches, the catalog publishing and the release provenance
-are authored as CI jobs and run when the repository is published.
+machine today, and the macOS and Windows halves run end to end on `macos-15-intel`, `macos-14` and
+`windows-2022` on every push. What has never executed is the release path: the catalog publishing
+and the provenance attestations wait on a release nobody has cut.
 
 ## The evidence, by phase
 
@@ -98,18 +101,24 @@ application confirms the shape at scale: the **`notify` shipment packages to 12.
 | item | evidence | status |
 |---|---|---|
 | Windows cfg split, resident launcher, stub | `tests/windows.rs`, `tests/windows_build.rs` | done (packaging) — `380de43` (D2) |
-| Windows artifact **launch**, exit-code propagation | `ci.yml` `windows` job | CI-gated — authored in E1, runs on `windows-2022` |
+| Windows artifact **launch**, exit-code propagation | `ci.yml` `windows` job, `tests/ci_matrix.rs` | done — E23, on `windows-2022` |
 | Mach-O section payload, ad-hoc signing | `tests/macho.rs`, `tests/payload_locate.rs`, `tests/sign_macos.rs` | done (packaging) — `5b35ecf` (D3) |
-| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-15-intel`/`macos-14` |
+| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job, `tests/ci_matrix.rs` | done — E1 authored it, `macos-15-intel`/`macos-14` run it |
 
 Windows and macOS packaging are proved structurally on Linux — the cfg split, the resident
 launcher, the PE and Mach-O readers, the section injection and ad-hoc signing all have tests that
-run on this machine. What only a runner can confirm is the **actual launch**: no Windows machine
-has started a packaged application and propagated `halt(3)` to `%ERRORLEVEL%`, and no Mach-O has
-ever been executed or had `codesign --verify --strict` run against ginary's own output. Both are
-CI-gated: the `windows` and `macos` jobs of `.github/workflows/ci.yml` are authored in the E1
-commit and run when the repository has a remote. These are the jobs that close the D2 wine gap and
-the D3 "awaits a Mac runner" gap.
+run on this machine. What only a runner can confirm is the **actual launch**, and both runners now
+do. The `macos` job packages a `hello_ffi` artifact on `macos-15-intel` and `macos-14`, runs
+`codesign --verify --strict` over ginary's own output, starts the artifact, asserts its arguments
+and its exit code, and verifies the signature again afterwards. The `windows` job does the same on
+`windows-2022`: it packages against the runtime `setup-beam` installs, then starts the artifact as
+a `GINARY_CMD=selftest`, on a cold cache, on a warm one, and on `halt(3)` — which is the exit-code
+contract, the code reaching `%ERRORLEVEL%` through ginary's own spawn-and-wait launcher rather
+than through a bare `erl`. That closes the D2 wine gap and the D3 "awaits a Mac runner" gap, and
+it is the first and only execution `launch_windows::run` — the spawn, the job object and the
+console control handler — has anywhere. `tests/regressions/e23_the_documents_said_the_launches_had_never_happened.rs`
+derives both claims from the workflow rather than trusting this paragraph, and it derives them in
+both directions: a job that goes back to building without launching puts the old sentences back.
 
 ### Phase E — the verification matrix
 
@@ -170,6 +179,17 @@ failure.
   does **not** satisfy Gatekeeper on a file downloaded from the network: a quarantined
   ad-hoc-signed binary still prompts the user. Clearing that needs a real Developer ID signature,
   which is out of scope for v1.
+- **There is no Windows runtime in the catalog, so a Windows artifact is built on Windows.**
+  `ginary otp repack` produces the Linux and macOS catalog tarballs and no `windows-x86_64` one,
+  and `distribute.yml` therefore publishes none: the upstream a Windows entry would be repacked
+  from is `otp_win64_<version>.zip`, a different shape from the tarballs the other targets take,
+  and reading it is a milestone of its own rather than a line of this one. What that costs is
+  cross-building *to* Windows from Linux or macOS: a `windows-x86_64` build needs
+  `erts = 'dir:…'` naming an unpacked Windows runtime, which in practice means building on a
+  Windows machine — where a Gleam developer already has Erlang installed, because `gleam` needs
+  it. The `windows` job does exactly that on every push. This is a stated boundary of v1 and not
+  a defect: the build refuses by name rather than producing an artifact with the wrong runtime in
+  it.
 - **The host OTP major version must match.** A runtime is read for its own target, linkage and
   libc, but ginary does not rewrite BEAM across OTP major versions: an artifact's bundled runtime
   and the modules in it are one OTP major, and a catalog entry whose `otp_release` differs from
@@ -177,17 +197,17 @@ failure.
 
 ## The deferred items, restated plainly
 
-Three kinds of work are CI-gated rather than done, and each is authored and committed in the E1
-commit:
+**One** kind of work is CI-gated rather than done. The two that used to stand beside it — the
+macOS launch and the Windows launch — are closed by the jobs that now run them on every push, and
+are marked done above rather than deferred; a checklist that leaves an item deferred after its
+evidence exists understates the project exactly as badly as one that marks an item done without
+it.
 
-- **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
-  stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
-- **Windows launch** — `ci.yml` `windows` job, `windows-2022` runner. Asserts `halt(3)` reaches
-  `%ERRORLEVEL%` as 3, the exit-code propagation the D2 wine gap left unproven.
 - **Catalog publishing and release provenance** — `distribute.yml`. Builds every target's binary,
   stub and OTP tarball, produces `attest-build-provenance` attestations, and verifies the
-  re-downloaded assets before flipping the release out of draft. Runs when the repository has a
-  remote and a maintainer cuts a release.
+  re-downloaded assets before flipping the release out of draft. It runs when a maintainer cuts a
+  release, and no release has been cut: no tag, no publish and no attestation exists. The workflow
+  is `actionlint`-clean and held by `tests/release_workflow.rs`, and that is inspection rather
+  than execution.
 
-Nothing above is tagged, pushed or published now. The workflows are correct by inspection and
-`actionlint`-clean; they wait on a remote that does not exist yet.
+Nothing is tagged, pushed or published now.

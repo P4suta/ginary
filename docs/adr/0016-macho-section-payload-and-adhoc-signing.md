@@ -106,12 +106,18 @@ validation rules, and `docs/dev/log/D3.md` for the crate and API this was implem
   libc distinction on macOS the way there is on Linux, so the `cputype` is the whole of the
   target), whether it is fat (a fat binary carries no single section to look the payload up
   in, and every caller here needs one architecture), and where a named section is.
-- Real verification — `codesign --verify --strict`, Gatekeeper's own quarantine gate, an actual
-  launch — needs a Mac and cannot be done from this Linux host. What can be proven here is
-  structural: the section lands where `macho.rs` itself says it does, an `LC_CODE_SIGNATURE`
-  load command is present exactly when signing was asked for, and `payload::locate` round-trips
-  the exact bytes and digest that went in. `docs/dev/log/D3.md` records exactly that split, and
-  CI on a `macos-15-intel`/`macos-14` runner is the GitHub Actions milestone that closes it.
+- Real verification — `codesign --verify --strict` and an actual launch — needs a Mac and cannot
+  be done from this Linux host. What can be proven here is structural: the section lands where
+  `macho.rs` itself says it does, an `LC_CODE_SIGNATURE` load command is present exactly when
+  signing was asked for, and `payload::locate` round-trips the exact bytes and digest that went
+  in. `docs/dev/log/D3.md` records exactly that split, and the `macos` job of
+  `.github/workflows/ci.yml` closes it: on `macos-15-intel` and `macos-14` it packages a
+  `hello_ffi` artifact, runs `codesign --verify --strict` over ginary's own output, starts the
+  artifact, and verifies the signature again afterwards — the second check being the one that
+  says extracting a payload did not rewrite the file the signature covers. **Gatekeeper's
+  quarantine gate is the half that stays unverified**, and deliberately: an ad-hoc signature
+  satisfies the kernel's load-time requirement and nothing more, and clearing a quarantined
+  download needs a real Developer ID signature, which is out of scope for v1.
 - A Mach-O object found *inside* a payload (a NIF, a port program) is not required to carry its
   own code signature: only the artifact itself, the one the kernel loads directly, needs one.
   Giving `ginary verify`'s native-object scan the same `cputype`/target awareness for an inner

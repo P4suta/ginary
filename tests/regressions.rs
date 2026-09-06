@@ -513,3 +513,5 @@ mod e22_a_prerelease_heading_read_as_the_release_it_precedes;
 mod e22_an_unauthenticated_api_read_was_refused_without_saying_why;
 #[path = "regressions/e22_the_release_state_was_read_from_a_document_the_release_cannot_edit.rs"]
 mod e22_the_release_state_was_read_from_a_document_the_release_cannot_edit;
+#[path = "regressions/e23_the_documents_said_the_launches_had_never_happened.rs"]
+mod e23_the_documents_said_the_launches_had_never_happened;

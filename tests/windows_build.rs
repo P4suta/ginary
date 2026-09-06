@@ -8,8 +8,11 @@
 //! Windows runtime on this machine and no way to make one, and every claim
 //! here is about *which names are in a directory* rather than about what any
 //! of them does. The one claim that needs a real `otp_win64_<version>.zip` —
-//! that the names in it are these names — is the GitHub Actions milestone, and
-//! `docs/dev/log/D2.md` records it as an open question rather than as a fact.
+//! that the names in it are these names — is answered by the `windows` job of
+//! `.github/workflows/ci.yml`, which packages an artifact against the runtime
+//! `setup-beam` installs: a name this fixture has wrong is a build that fails
+//! there. `docs/dev/log/D2.md` recorded it as an open question and E23 closed
+//! it.
 //!
 //! The last five tests are the same shape as `tests/smoke_matrix.rs`: a task
 //! and four documents that nothing else would notice going stale.
@@ -252,13 +255,26 @@ fn the_readme_records_what_windows_support_covers_and_what_is_untested() {
     let rest = &readme[start + 1..];
     let section = rest.find("\n## ").map_or(rest, |end| &rest[..end]);
 
-    for needle in ["cross", "stub", "erl.exe", "GitHub Actions"] {
+    // What the section has to cover, one needle per claim a reader depends on:
+    // that a Linux machine cross-compiles the crate and its stub for Windows,
+    // that `erl.exe` is what a Windows runtime is started with, that a real
+    // Windows host packages and launches an artifact (and which image does),
+    // and that `MAX_PATH` is the one launch limit that remains. E23 replaced
+    // `GitHub Actions` — a phrase that only meant "some day" — with the runner
+    // the work actually happens on.
+    for needle in ["cross", "stub", "erl.exe", "windows-2022", "MAX_PATH"] {
         assert!(
             section.contains(needle),
-            "the Windows section has to say what works and what has never been run: it mentions \
-             no `{needle}`"
+            "the Windows section has to say what is proved, on what, and what is still not: it \
+             mentions no `{needle}`"
         );
     }
+    assert!(
+        !section.contains("windows-latest"),
+        "the Windows section names a runner label this repository deliberately does not take: \
+         the image is pinned to `windows-2022` so that moving it is a claim somebody makes on \
+         purpose. See docs/dev/log/E4.md"
+    );
 }
 
 #[test]

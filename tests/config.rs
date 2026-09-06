@@ -1584,6 +1584,73 @@ fn the_erts_source_of_a_configured_target_is_the_one_it_names() {
 }
 
 #[test]
+fn a_windows_runtime_path_survives_a_toml_literal_string() {
+    // The spelling a Windows user has to write, and the reason the README says
+    // so. `\U`, `\t` and `\x` are escape sequences inside a TOML *basic*
+    // string, so the natural-looking `erts = "dir:C:\Users\you\otp"` is either
+    // a different path or not valid TOML at all. A literal string — single
+    // quotes — has no escapes, and this is the assertion that keeps the
+    // documented advice true: the backslashes arrive intact, and the path is
+    // absolute so nothing joins the project root onto it.
+    let root = Path::new("/w/cross_app");
+    let config = parse_text(
+        "name = \"cross_app\"\nversion = \"1.1.0\"\n\n\
+         [tools.ginary.target.\"windows-x86_64\"]\n\
+         erts = 'dir:C:\\Users\\you\\otp'\n",
+    );
+    let options = BuildOptions::merge(root, &config, &no_flags(root)).expect("the merge succeeds");
+    let Ok(ErtsSourceSpec::Dir(path)) = options.erts_spec(target("windows-x86_64")) else {
+        panic!("a `dir:` source is a `dir:` source whatever its separators are");
+    };
+
+    assert!(
+        path.to_string_lossy().ends_with("C:\\Users\\you\\otp"),
+        "a literal string has no escapes, so every backslash the user typed reaches the build \
+         unchanged: {}",
+        path.display()
+    );
+
+    // And the part that is a property of the *build machine* rather than of
+    // TOML, stated here because a reader of the line above would otherwise
+    // assume the opposite. "Is this path absolute?" is answered by the host's
+    // own rules, and `C:\…` is not absolute to a Linux one, so a Windows path
+    // written into a manifest that a Linux machine builds is joined onto the
+    // project root. It is diagnosable rather than silent — the runtime is then
+    // looked for at the joined path and the refusal prints it — and it does
+    // not reach the mainline case, where a Windows tree unpacked on a Linux
+    // build machine is named by a Linux path. On a Windows host the same
+    // manifest is absolute and nothing is joined.
+    assert_eq!(
+        path,
+        root.join("C:\\Users\\you\\otp"),
+        "on a unix build machine a drive-absolute path is relative, because `Path::is_absolute` \
+         answers for the host: {}",
+        path.display()
+    );
+}
+
+#[test]
+fn a_windows_runtime_path_in_a_basic_string_is_refused_rather_than_mangled() {
+    // The other half of the same advice, and the half that makes it worth
+    // documenting: a user who writes the path in double quotes does not get a
+    // build against some other directory, they get a parse error naming the
+    // manifest. `\U` starts a Unicode escape in TOML and `\y` is no escape at
+    // all, so this text is not a manifest with a wrong path in it — it is not
+    // a manifest.
+    let error = ProjectConfig::from_toml(
+        "name = \"cross_app\"\nversion = \"1.1.0\"\n\n\
+         [tools.ginary.target.\"windows-x86_64\"]\n\
+         erts = \"dir:C:\\Users\\you\\otp\"\n",
+        Path::new(MANIFEST),
+    )
+    .expect_err("a basic string full of backslashes is not valid TOML");
+    assert!(
+        error.to_string().contains(MANIFEST),
+        "the refusal has to name the file the user has to edit: {error}"
+    );
+}
+
+#[test]
 fn a_relative_erts_directory_is_relative_to_the_project() {
     // `[tools.ginary.target.<name>] erts = "dir:vendor/otp"` describes the
     // project, as `output`, `vm_args` and `sys_config` do, so it is joined
