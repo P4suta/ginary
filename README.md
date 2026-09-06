@@ -640,24 +640,37 @@ share-mode lock, the `\\?\` extraction, the cache, the argument vector, the envi
 difference, the five numbered failures, the `GINARY_CMD` commands, pruning and uninstalling. The
 job object has its own test: kill the resident launcher mid-run and the runtime goes with it.
 
-What is still **untested**, and is the GitHub Actions milestone on a `windows-2022` runner:
+What the GitHub Actions `windows-2022` runner proved, in run
+[34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195):
 
-- **A real `erl.exe` has never been started by this launcher.** What the suite starts is a stub
-  runtime, which is what makes the launcher's own behaviour observable without an Erlang
-  installation. Packaging the `hello_ffi` fixture against a real runtime and running it is the
-  `windows` CI job's, and that job does it as of E23.
-- **No exit code from a real runtime has been propagated.** The launcher's half — a child's code
-  arriving at the caller through `launch_windows::run` — is asserted on a Windows host; that
-  `halt(3)` inside a packaged application reaches `%ERRORLEVEL%` as 3 is the CI job's.
+```text
+erl -noshell -eval halt(3) left exit code 3
+the artifact left exit code 0 for '0 hello world'
+the artifact left exit code 3 for halt(3)
+the second, warm run left exit code 3
+```
+
+A real `erl.exe`, started by this launcher, inside a `hello_ffi` artifact packaged against the OTP
+`setup-beam` installs — cold, then warm, with `halt(3)` arriving as `%ERRORLEVEL%` 3. That
+discharges the exit-code contract end to end, the `otp_win64_<version>.zip` layout the
+required-file probe was written data-driven against, and `ginary build --target windows-x86_64`
+over a real unpacked runtime. Until E23 the job it replaced ran `erl.exe` directly and packaged
+nothing, so this row of `docs/dev/v1-readiness.md` had been booking a proof against a step that
+did not perform it.
+
+What is still **untested**:
+
 - **No console control event has ever reached the launcher.** `SetConsoleCtrlHandler` is called
-  on every launch, so the handler is installed. Delivering a Ctrl-C to a process group a test
-  owns needs `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and a new
+  on every launch, so the handler is installed and its return is checked; what has never happened
+  is an event arriving. Delivering a Ctrl-C to a process group a test owns needs
+  `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and a new
   `#[allow(unsafe_code)]` needs an ADR of its own — so E23 recorded it as declined rather than
-  faking it.
-- **No Windows artifact has been built end to end here.** There is no `otp_win64_<version>.zip`
-  on the development machine to point `erts = "dir:…"` at, so what is covered is that such a tree
-  *resolves* — over a fabricated tree carrying real PE headers. `ginary build --target
-  windows-x86_64` over a real unpacked zip is the Actions run.
+  faking it. It is the one mechanism of ADR 0015 still resting on argument.
+- **No Windows artifact has been built end to end on a development machine.** There is no
+  `otp_win64_<version>.zip` to point `erts = "dir:…"` at there, so what the local suite covers is
+  that such a tree *resolves* — over a fabricated tree carrying real PE headers — and what the
+  suite starts is a stub runtime, which is what makes the launcher's own behaviour observable
+  with no Erlang installed. The real build is the runner's, above.
 - **The `otp_win64_<version>.zip` layout is an assumption.** The required-file probe is
   data-driven for exactly that reason, and the DLL the emulator is named as — `beam.smp.dll` —
   is what the documentation says rather than what a real zip was read for.

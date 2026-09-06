@@ -181,8 +181,36 @@ step now captures the code, prints it and ends on a verdict of its own, so the n
 job records the number directly and this citation is to be replaced by that one.
 `docs/dev/log/E15.md` records the diagnosis, and
 `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs` holds every `pwsh` step to
-ending on a status of its own. What that milestone still owes is the `otp_win64_<version>.zip`
-layout and the end-to-end run of a real artifact, on the same runner.
+ending on a status of its own.
+
+**That citation is now superseded, as it said it would be.** E23 rewrote the job to package the
+`hello_ffi` fixture against the runtime `setup-beam` installs and start the *artifact*, so the
+number is printed rather than inferred from silence. Run
+[34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195), job
+[101460035482](https://github.com/P4suta/ginary/actions/runs/34023412195/job/101460035482),
+`windows-2022`:
+
+```text
+probing D:\a\_temp\.setup-beam\otp\bin\erl.exe
+erl -noshell -eval halt(3) left exit code 3
+the artifact left exit code 0 for '0 hello world'
+the artifact left exit code 3 for halt(3)
+the second, warm run left exit code 3
+```
+
+Four facts, in the order they have to be read. The bare `erl` is the platform precondition, kept
+so that a runner where the emulator itself cannot report a code is a different failure. The three
+after it are this ADR's own subject: `run` spawned `erl.exe` inside a packaged application,
+assigned it to the job object, waited, and mirrored what it left — `0` on a cold cache with
+arguments, `3` for `halt(3)`, and `3` again on the warm cache. So the `otp_win64_<version>.zip`
+layout and **the end-to-end run of a real artifact** — the two things this paragraph recorded as
+still owing — are both discharged, on the runner it named.
+
+What is still owed is one mechanism, and only one: a console control **event**. `run` installs
+the handler on every launch, so `SetConsoleCtrlHandler` is called and its return is checked; no
+Ctrl-C has ever been delivered to a launcher that installed one. E23 declined to drive it rather
+than fake it, because `GenerateConsoleCtrlEvent` needs a second `#[allow(unsafe_code)]` and this
+repository requires an ADR of its own for that.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows

@@ -99,7 +99,7 @@ application confirms the shape at scale: the **`notify` shipment packages to 12.
 |---|---|---|
 | Windows cfg split, resident launcher, stub | `tests/windows.rs`, `tests/windows_build.rs` | done (packaging) — `380de43` (D2) |
 | Windows artifact **launch**, the launcher's half | `tests/launcher.rs` on a Windows host, `tests/regressions/e23_*` | done — E23 |
-| Windows artifact **launch** with a real `erl.exe` | `ci.yml` `windows` job | CI-gated — rewritten in E23, runs on `windows-2022` |
+| Windows artifact **launch** with a real `erl.exe` | `ci.yml` `windows` job, run [34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195) | done — E23, on `windows-2022` |
 | Mach-O section payload, ad-hoc signing | `tests/macho.rs`, `tests/payload_locate.rs`, `tests/sign_macos.rs` | done (packaging) — `5b35ecf` (D3) |
 | macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-15-intel`/`macos-14` |
 
@@ -203,12 +203,15 @@ commit:
 
 - **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
   stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
-- **Windows launch with a real runtime** — `ci.yml` `windows` job, `windows-2022` runner. Packages
-  the `hello_ffi` fixture against the OTP `setup-beam` installs, runs the artifact cold and warm,
-  and asserts `halt(3)` reaches `%ERRORLEVEL%` as 3. Rewritten in E23: the step it replaces ran
-  `erl.exe` directly and started no artifact, so the row above it in this document had been
-  booking a proof against a step that did not perform it. The launcher's own half of the same
-  contract is no longer deferred — it runs in `tests/launcher.rs` on a Windows host.
+- **Windows launch with a real runtime** — **no longer deferred.** `ci.yml` `windows` job,
+  `windows-2022` runner: it packages the `hello_ffi` fixture against the OTP `setup-beam`
+  installs and starts the artifact, and run
+  [34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195) printed
+  `the artifact left exit code 3 for halt(3)`, with `0` on the cold run and `3` again on the
+  warm one. Rewritten in E23: the step it replaces ran `erl.exe` directly and started no
+  artifact, so the row in the table above had been booking a proof against a step that did not
+  perform it — for two milestones. The launcher's own half is not deferred either; it runs in
+  `tests/launcher.rs` on a Windows host.
 - **A console control event reaching the Windows launcher** — nothing, yet. Declined in E23 with
   a reason: delivering one needs `GenerateConsoleCtrlEvent`, and a new `#[allow(unsafe_code)]`
   needs an ADR of its own.
