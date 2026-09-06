@@ -607,12 +607,15 @@ body that hashes to the wrong digest, a 500 that becomes a 200 on the second ask
 *not* be asked again, and a connection that dies mid-body. `TestServer::start` takes a map of path
 to a list of `Reply` values, answers them in order and then repeats the last one for ever, and
 records every request — so a test asserts on *how many times* the client asked as readily as on
-what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has four
-shapes: `Body` with a status and a `Content-Length` that matches, `Encoded`, which adds the one
-header this fixture sends — a `Content-Encoding` naming what the body is compressed in, so that a
-bound on the document can be told apart from a bound on the transfer — `Truncated` with a
+what it got back, which is the only way to state "a 4xx is asked exactly once". `Reply` has five
+shapes: `Body` with a status and a `Content-Length` that matches, `Encoded`, which adds a
+`Content-Encoding` naming what the body is compressed in, so that a bound on the document can be
+told apart from a bound on the transfer, `Headed`, which writes whatever headers the answer is
+*about* — E22 added it, because GitHub says which kind of 403 a 403 is in `x-ratelimit-remaining`
+and `retry-after`, and a `location` is the whole of a redirect — `Truncated` with a
 `Content-Length` that promises more than is written before the close, and `Hangup`, which accepts
-the connection and writes nothing. It binds `127.0.0.1:0` and reports the port it was given, so
+the connection and writes nothing. Request headers were already recorded, so the other half —
+which requests carry an `Authorization` and which must not — needed nothing new. It binds `127.0.0.1:0` and reports the port it was given, so
 any number of tests run in parallel without agreeing on anything, and `wait_for_requests` is
 bounded by `WAIT_BUDGET` (10 s) so a stalled client is a failed assertion rather than a hung test
 binary. It is hand-rolled rather than a dependency and it is the smallest server those claims
@@ -1549,17 +1552,41 @@ another platform can see: `calls_with`, which finds a call to a named function t
 host in its arguments, and `literal_sites`, which finds a literal in code rather than in prose.
 
 `version.rs` and `mise.rs` are E20's, and both are readers of a record no other target reads.
-`version.rs` is the one place the suite reads the three records of a version from —
-`cargo_version`, `manifest_version`, `last_released_version` (`None` while the manifest records
-`0.0.0`) and `nothing_has_been_released`, which reads `docs/RELEASE.md` for the sentence
-`No release has been cut yet.` because no committed file can derive whether a tag exists. It also
-holds the two changelog scanners, stated over the shape release-please's own
-`versionHeaderRegex` uses rather than over one spelling of one version, and `VersionRoot`, a
-`tempfile` tree carrying just a `Cargo.toml` and a manifest so
-`scripts/ci/version-consistency.sh` can be driven in every release state through the
+`version.rs` is the one place the suite reads the two records of a version from —
+`cargo_version` for the version being prepared, `manifest_version` for the one
+`.release-please-manifest.json` records as last released, and `last_released_version`, which is
+that record read as the suite's **one oracle for the release state**: `None` while the manifest
+holds `0.0.0`, release-please's own spelling of "never released".
+
+E20 read that state from a sentence in `docs/RELEASE.md` instead, on the argument that no
+committed file can derive whether a tag exists. The manifest is that file. E22 is the bug that
+proves it has to be: release-please rewrites the changelog and the manifest and no other file, so
+on the release pull request the sentence still said nothing had been released while the changelog
+carried `## 0.1.0`, and four guards failed a tree whose records were correct. The manifest is in
+the tree — so a shallow checkout and a `cargo mutants` copy both answer, which is the property
+the sentence was chosen for — and it moves in the same commit as the section it has to agree
+with.
+
+`version.rs` also holds the changelog rules, all stated over the shape release-please's own
+`versionHeaderRegex` uses rather than over one spelling of one version, and all taking the
+recorded release as a parameter so the suite can drive them in the state this checkout is not in:
+`first_version_header` (where the next generated section lands),
+`sections_claiming_a_release_not_recorded` and `tag_references_not_recorded` (a heading or a link
+naming a version past the record), `unreleased_section` and `released_section` (which section a
+body sits under). And `VersionRoot`, a `tempfile` tree carrying just a `Cargo.toml` and a manifest
+so `scripts/ci/version-consistency.sh` can be driven in every release state through the
 `GINARY_VERSION_ROOT` seam. That variable exists for the suite and for nothing else: a workflow
 that sets it makes the release gate prove a tag against some other tree, which is the check
 passing while not running, and a regression test asserts that no workflow mentions it.
+
+`github.rs` is E22's, and it is one constant: the variables a GitHub token is taken from.
+`ginary::download::GITHUB_TOKEN_VARS` is the source of it and `tests/download.rs` holds the two
+equal; the copy exists because the rule that needs it most is in `tests/ci_matrix.rs`, which reads
+`.github/` in both flavors of the suite and therefore cannot import a `cli`-gated module. That
+rule requires every workflow step running `otp repack` to be handed a token, and the pairing is
+the point of the copy: rename the variable in `src/download.rs`, leave the workflows alone, and
+the reads go quietly back to being anonymous until a job somewhere is refused with a 403 that
+looks like an outage rather than a regression.
 
 `mise.rs` reads one task out of `mise.toml` — a hand-rolled scanner rather than the `toml` crate,
 for the reason `deps.rs` gives: `toml` is behind the `cli` feature and these assertions hold for

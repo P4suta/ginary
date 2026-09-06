@@ -521,12 +521,15 @@ usage error.
 | `GINARY_PRUNE_DAYS` | the artifact | How many days an unused cache entry of this application may live. Defaults to 14; `0` turns pruning off. A value that is not a count of days falls back to the default rather than failing a launch. |
 | `GINARY_STUB_DIR` | `ginary build` | A directory of prebuilt stubs, searched for `ginary-stub-<version>-<target>` and then `ginary-<version>-<target>` before the cache. `mise run stubs:build` fills one. |
 | `SOURCE_DATE_EPOCH` | `ginary build` | Pins the manifest's `created_at`, so two builds of one project produce byte-identical artifacts. |
+| `GINARY_OFFLINE=1` | `ginary build`, `ginary otp` | Forbid every fetch. A step that would have gone to the network fails naming what it wanted instead of reaching for it. |
+| `GINARY_GITHUB_BASE_URL` | `ginary otp` | Read the GitHub API from this base instead of `https://api.github.com`, for a mirror or an air-gapped cache. |
+| `GINARY_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | `ginary otp` | A GitHub token for the release API, tried in that order; the first non-empty one wins. It needs no scopes. Without one the read is anonymous and GitHub allows 60 an hour **per source address** — shared by a CI runner pool, a proxy or an office — and answers over that with `HTTP 403`. The token is sent to the API base only: never with the asset download, never to another host, and never carried on to a redirect. |
 
 Every run prunes its own application's stale entries as it starts, best effort and never fatal;
 `ginary cache prune [--days N] [--all] [--app NAME]` does the same on demand over the whole
 cache. An entry a process is running out of is never removed, whatever its age — see
-[ADR 0010](docs/adr/0010-cache-locking-and-pruning.md). `GINARY_OFFLINE` is planned rather than
-implemented; see [docs/dev/debugging.md](docs/dev/debugging.md) for the whole table.
+[ADR 0010](docs/adr/0010-cache-locking-and-pruning.md). See
+[docs/dev/debugging.md](docs/dev/debugging.md) for the diagnostic variables as well.
 
 ## How it works
 

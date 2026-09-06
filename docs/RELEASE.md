@@ -5,10 +5,17 @@ This document is what a maintainer runs to cut a ginary release. It is written f
 first one, but every later release is the same three moves: let release-please prepare the
 version, publish the draft, let distribute verify and flip it.
 
-No release has been cut yet. The repository is now live at <https://github.com/P4suta/ginary>
-and the workflows run for real, but the house rule stands: a tag, a push or a publish waits for an
-explicit request. What follows is the procedure the workflows carry out when one is made — and,
-first, the one part of it that no workflow can do for itself.
+Whether anything has been released is not written down here. It is recorded in
+`.release-please-manifest.json`, whose `0.0.0` is release-please's own spelling of "this package
+has never been released" and whose any other value is the last released version. That record moves
+in the same commit as the changelog section it has to agree with, so it is the one answer that
+cannot be left behind; a sentence in this document could only be a copy of it that somebody has to
+remember to delete. `git log --oneline -- .release-please-manifest.json` is the history of it.
+
+The repository is live at <https://github.com/P4suta/ginary> and the workflows run for real, but
+the house rule stands: a tag, a push or a publish waits for an explicit request. What follows is
+the procedure the workflows carry out when one is made — and, first, the one part of it that no
+workflow can do for itself.
 
 ## One-time setup
 
@@ -163,11 +170,29 @@ inside that character class — so the new section is inserted **above the `## [
 heading** and everything under `[Unreleased]` is left exactly where it was. It is not rewritten,
 moved or consumed. (`src/updaters/changelog.ts`, quoted in `docs/dev/log/E20.md`.)
 
-For `v0.1.0`, review that pull request: confirm the version is `0.1.0`, that `Cargo.toml` and the
-manifest agree, that the generated section reads correctly — and **clear the `[Unreleased]`
-section by hand** in the same pull request, because the work it describes is the work being
-released and release-please will not move it. Merging is a deliberate act: the version bump and
-the changelog are a human decision, not an automatic one.
+Review that pull request: confirm the version, that `Cargo.toml` and the manifest agree, and that
+the generated section reads correctly. Then **clear the `[Unreleased]` section by hand** in the
+same pull request, because the work it describes is the work being released and release-please
+will not move it. Concretely, three edits to `CHANGELOG.md`:
+
+1. **Fold the hand-written body into the generated section.** Everything under `## [Unreleased]`
+   — the prose, `### Added`, `### Changed` — describes the release being cut. Move it under the
+   `## <version>` heading release-please generated, above or below its commit lists as reads
+   best. release-please writes commit subjects and cannot write prose; this is the only part of
+   the release notes a person has to place.
+2. **Put an empty `## [Unreleased]` back above that heading.** release-please inserted its section
+   above the old one, so `[Unreleased]` is now *below* a release. Left there it is also below the
+   insertion point of the next release, and sinks one section further every time — the section for
+   work that is not released ends up at the bottom of the file for ever.
+3. **Point the `[Unreleased]` link at the new tag**, `compare/v<version>...HEAD`, or leave it at
+   `commits/main`. Both are honest; a link to a tag past the one the manifest records is not.
+
+The suite holds all three: `the_unreleased_heading_is_the_first_version_header` fails while
+`[Unreleased]` is not back on top, and `the_unreleased_section_holds_only_work_that_is_not_released`
+fails while the released work is still filed under it. A red release pull request here is that
+check working — the edits are what turn it green, and they are why merging is a deliberate act
+rather than an automatic one. release-please regenerates its branch when new commits reach `main`,
+which would discard them, so make the edits when the merge is next.
 
 ### 2. The draft release is created
 

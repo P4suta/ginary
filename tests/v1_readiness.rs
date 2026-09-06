@@ -21,8 +21,8 @@ mod common;
 
 use crate::common::repo::{read, root};
 use crate::common::version::{
-    NO_RELEASE_YET, RELEASE_DOC, nothing_has_been_released, released_section_headings,
-    tag_references,
+    MANIFEST_FILE, last_released_version, released_section,
+    sections_claiming_a_release_not_recorded, tag_references_not_recorded, unreleased_section,
 };
 
 // -------------------------------------------- docs/dev/v1-readiness.md --
@@ -246,21 +246,6 @@ fn the_readme_carries_the_one_paragraph_v1_summary() {
 
 // ---------------------------------------------------------- CHANGELOG --
 
-/// The `## [Unreleased]` section of `text`, up to the next `## ` heading.
-///
-/// The heading line itself is not included, so a caller asking what the
-/// section *holds* cannot be answered by the heading.
-fn unreleased_section(text: &str) -> String {
-    let mut lines = text
-        .lines()
-        .skip_while(|line| !line.starts_with("## [Unreleased]"));
-    lines.next();
-    lines
-        .take_while(|line| !line.starts_with("## "))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 // The two changelog scanners live in `crate::common::version`: they are stated
 // over the shape release-please's own `versionHeaderRegex` uses rather than
 // over one spelling, so `## 0.2.0 - 2026-09-02` and a link to any tag are seen
@@ -289,66 +274,95 @@ fn the_changelog_documents_the_phases_and_what_v1_delivers() {
     }
 }
 
+/// What the release notes of this project's first release are made of: the
+/// phase summary and the two Keep a Changelog sections under it.
+const THE_RELEASE_NOTES: [&str; 7] = [
+    "Phase A",
+    "Phase B",
+    "Phase C",
+    "Phase D",
+    "Phase E",
+    "### Added",
+    "### Changed",
+];
+
 #[test]
-fn the_work_that_is_done_and_not_released_sits_under_unreleased() {
-    // Where that content lives is decided by whether a release has been cut.
-    // While none has, `[Unreleased]` is the only section there can be, and an
-    // empty one beside a dated section that describes the same work is the
-    // repository claiming a release it never made.
-    if !nothing_has_been_released() {
-        return;
-    }
+fn the_unreleased_section_holds_only_work_that_is_not_released() {
+    // Which section that content belongs under is decided by the record, not by
+    // a document: `.release-please-manifest.json` is what release-please writes
+    // in the same commit as the changelog section, so the two cannot disagree
+    // about which release the work went out in.
     let changelog = read("CHANGELOG.md");
     let unreleased = unreleased_section(&changelog);
-    for phase in ["Phase A", "Phase B", "Phase C", "Phase D", "Phase E"] {
+    let Some(version) = last_released_version() else {
+        for mark in THE_RELEASE_NOTES {
+            assert!(
+                unreleased.contains(mark),
+                "{MANIFEST_FILE} records no release, so this work is done and unreleased and \
+                 belongs under `## [Unreleased]`; `{mark}` is not there"
+            );
+        }
+        return;
+    };
+    let released = released_section(&changelog, &version).unwrap_or_else(|| {
+        panic!(
+            "{MANIFEST_FILE} records {version} as released, and the changelog has no section for \
+             it. release-please generates that heading when it prepares the release; a manifest \
+             recording a version the changelog never names is drift between the two files \
+             release-please writes together"
+        )
+    });
+    for mark in THE_RELEASE_NOTES {
         assert!(
-            unreleased.contains(phase),
-            "{RELEASE_DOC} says `{NO_RELEASE_YET}`, so the phase summary describes work that is \
-             done and unreleased and belongs under `## [Unreleased]`; `{phase}` is not there"
+            !unreleased.contains(mark),
+            "{MANIFEST_FILE} records {version} as released, so `{mark}` describes released work \
+             and must not still sit under `## [Unreleased]`. release-please inserts its section \
+             *above* that heading and moves nothing, so this is the edit `docs/RELEASE.md` asks \
+             the maintainer to make while reviewing the release pull request"
         );
-    }
-    for section in ["### Added", "### Changed"] {
         assert!(
-            unreleased.contains(section),
-            "the `{section}` entries describe unreleased work and belong under \
-             `## [Unreleased]` until release-please moves them"
+            released.contains(mark),
+            "`{mark}` is part of the release notes for {version} and belongs under its heading; \
+             release-please writes commit subjects and cannot write prose"
         );
     }
 }
 
 #[test]
-fn the_changelog_claims_no_release_that_has_not_been_cut() {
-    if !nothing_has_been_released() {
-        return;
-    }
+fn the_changelog_claims_no_release_the_manifest_does_not_record() {
     let changelog = read("CHANGELOG.md");
-    let headings = released_section_headings(&changelog);
+    let last = last_released_version();
+    let claimed = sections_claiming_a_release_not_recorded(&changelog, last.as_deref());
     assert!(
-        headings.is_empty(),
-        "{RELEASE_DOC} says `{NO_RELEASE_YET}` and neither `git tag` nor `gh release list` has \
-         anything in it, but the changelog carries a dated release section: {headings:?}. A \
-         version heading is release-please's output when a release is cut, and a hand-written \
-         one with a date on it is the same false claim `.release-please-manifest.json` was \
-         making"
+        claimed.is_empty(),
+        "the changelog carries {claimed:?}, and {MANIFEST_FILE} records {}. A version heading is \
+         release-please's output when a release is cut, and a heading for a version the record \
+         does not have — hand-written, or left behind by a proposal that never merged — is a \
+         release nobody made",
+        last.as_deref().unwrap_or("nothing released")
     );
 }
 
 #[test]
-fn the_changelog_links_no_tag_that_does_not_exist() {
-    if !nothing_has_been_released() {
-        return;
-    }
+fn the_changelog_links_no_tag_the_manifest_does_not_record() {
     let changelog = read("CHANGELOG.md");
-    let dangling = tag_references(&changelog);
+    let last = last_released_version();
+    let dangling = tag_references_not_recorded(&changelog, last.as_deref());
     assert!(
         dangling.is_empty(),
-        "the changelog links {dangling:?}, and no tag exists at all; a reader following one gets \
-         a 404 from the project's own release notes"
+        "the changelog links {dangling:?}, and {MANIFEST_FILE} records {}; a reader following one \
+         gets a 404 from the project's own release notes",
+        last.as_deref().unwrap_or("nothing released")
     );
+    let commits = "[Unreleased]: https://github.com/P4suta/ginary/commits/main";
+    let compare = last.as_ref().map(|version| {
+        format!("[Unreleased]: https://github.com/P4suta/ginary/compare/v{version}...HEAD")
+    });
     assert!(
-        changelog.contains("[Unreleased]: https://github.com/P4suta/ginary/commits/main"),
-        "with no release to compare against, `[Unreleased]` points at the commit history rather \
-         than at a comparison with a tag nobody cut"
+        changelog.contains(commits) || compare.is_some_and(|compare| changelog.contains(&compare)),
+        "`[Unreleased]` has to point somewhere honest: the commit history, or a comparison \
+         against the tag {MANIFEST_FILE} records. Both spellings are accepted so that a release \
+         does not oblige anyone to rewrite this line"
     );
 }
 

@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The three records of a version, and what each of them actually means.
+//! The two records of a version, and what each of them actually means.
 //!
 //! `Cargo.toml` holds the version *being prepared*. `.release-please-manifest.json`
 //! holds the version that was *last released* — release-please reads it as
-//! nothing else, and it is what the next proposal is derived from.
-//! `docs/RELEASE.md` says, in one sentence a maintainer deletes when they cut
-//! the first release, whether anything has been released at all.
+//! nothing else, and it is what the next proposal is derived from. Those are
+//! two different questions, and E20 exists because the tree answered the second
+//! one with the first one's value: a manifest of `0.1.0` for a repository whose
+//! `git tag` and `gh release list` are both empty.
 //!
-//! Those are three different questions, and E20 exists because the tree
-//! answered the second one with the first one's value: a manifest of `0.1.0`
-//! for a repository whose `git tag` and `gh release list` are both empty. This
-//! module is the one place the suite reads them from, so the rule that relates
-//! them is written once.
+//! The manifest is also the *only* record of whether anything has been released
+//! at all, and E22 exists because that answer was read from a sentence in
+//! `docs/RELEASE.md` instead. release-please rewrites the changelog and the
+//! manifest and no other file, so on a release pull request the sentence still
+//! said "nothing", the changelog said `## 0.1.0`, and four guards failed a tree
+//! whose records were correct. This module is the one place the suite reads
+//! them from, so the rule that relates them is written once.
 //!
 //! [`VersionRoot`] is the other half: a throwaway tree carrying just those two
 //! files, so `scripts/ci/version-consistency.sh` can be driven over every state
@@ -43,17 +46,11 @@ pub const MANIFEST_FILE: &str = ".release-please-manifest.json";
 /// `release-please-config.json`, relative to the repository root.
 pub const CONFIG_FILE: &str = "release-please-config.json";
 
-/// The document that says whether a release has been cut.
-pub const RELEASE_DOC: &str = "docs/RELEASE.md";
-
-/// The sentence `docs/RELEASE.md` carries while nothing has been released.
+/// The document that says how a release is cut.
 ///
-/// The tree's own answer to a question no committed file can derive: a tag and
-/// a GitHub release live on the server, a shallow CI checkout fetches no tags,
-/// and `git tag` in a `cargo mutants` copy of the tree answers about nothing.
-/// So the fact is written down once, in the document a maintainer edits when
-/// they cut the release, and every test that needs it reads it from there.
-pub const NO_RELEASE_YET: &str = "No release has been cut yet.";
+/// What it does *not* say is whether one has been: that is
+/// [`last_released_version`], read from the record release-please writes.
+pub const RELEASE_DOC: &str = "docs/RELEASE.md";
 
 /// The environment variable that points the version-consistency script at a
 /// tree other than this one.
@@ -109,14 +106,15 @@ pub fn manifest_version_in(tree: &Path) -> String {
 }
 
 /// The last released version, or `None` while nothing has been released.
+///
+/// The suite's one oracle for the release state. It is read from the tree, so a
+/// shallow CI checkout and a `cargo mutants` copy both answer — the property a
+/// `git tag` cannot offer — and release-please writes it in the same commit as
+/// the changelog section it has to agree with, so it is never left behind by a
+/// release the way a hand-maintained sentence is.
 pub fn last_released_version() -> Option<String> {
     let recorded = manifest_version();
     (recorded != NOTHING_RELEASED).then_some(recorded)
-}
-
-/// Whether `docs/RELEASE.md` still says no release has been cut.
-pub fn nothing_has_been_released() -> bool {
-    read(RELEASE_DOC).contains(NO_RELEASE_YET)
 }
 
 /// `release-please-config.json`, parsed.
@@ -233,6 +231,191 @@ pub fn tag_references(text: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The `major.minor.patch` a version string names, with an optional leading `v`.
+///
+/// Deliberately strict: three decimal components and nothing else. A version
+/// this cannot read is one the rules below refuse to treat as covered, which is
+/// the fail-closed direction — an unreadable claim is not a proven one.
+pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let text = text.strip_prefix('v').unwrap_or(text);
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((major, minor, patch))
+}
+
+/// The version `text` opens with, when the whole of what it opens with is one.
+///
+/// The digits are read up to the first character that is neither a digit nor a
+/// dot, and then what *ends* them decides. A version ends at the end of the
+/// text, at a space, at a `]` or a `)`. What it does not end at is a letter, a
+/// digit, a `-` or a `+`: the last two are semantic versioning's pre-release
+/// and build metadata, and `1.2.3-rc.1` names something other than the release
+/// whose digits it carries.
+///
+/// A dot is the one character that has to be argued twice. `compare/v0.1.0...HEAD`
+/// puts a version in front of a `...` separator, so a version may end with
+/// exactly three trailing dots and nothing else may follow from them: `1.2.3.`
+/// and `1.2.3.foo` are not `1.2.3`. Both halves of the rule are pinned by
+/// `tests/regressions/e22_a_prerelease_heading_read_as_the_release_it_precedes.rs`.
+fn version_at(text: &str) -> Option<(u64, u64, u64)> {
+    /// The separator a `compare/` range writes between two versions.
+    const RANGE: &str = "...";
+
+    let rest = text.strip_prefix('v').unwrap_or(text);
+    let run = rest
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .map_or(rest, |end| &rest[..end]);
+    let digits = run.trim_end_matches('.');
+    let dots = &run[digits.len()..];
+    let ends_the_version = if dots.is_empty() {
+        !rest[run.len()..].starts_with(|character: char| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '+'
+        })
+    } else {
+        dots == RANGE
+    };
+    ends_the_version.then(|| parse_version(digits)).flatten()
+}
+
+/// The version a version heading names, whichever ordinary spelling it uses.
+///
+/// `## [0.1.0] - 2026-09-02`, `## 0.2.0 - 2026-09-02` and release-please's own
+/// `## 0.1.0 (2026-09-05)` all name a version; the date and the brackets are
+/// decoration. [`None`] for a heading whose version cannot be read.
+fn heading_version(line: &str) -> Option<(u64, u64, u64)> {
+    let rest = line.trim_start_matches('#').trim_start();
+    version_at(rest.strip_prefix('[').unwrap_or(rest))
+}
+
+/// Every version a tag reference names.
+///
+/// A `compare/` range names two, and a reader following either gets a 404 if
+/// the tag is not there, so both are checked. `v` is only a version marker at a
+/// word boundary: `rev0.1.0` names nothing.
+fn versions_in(reference: &str) -> Vec<(u64, u64, u64)> {
+    let mut out = Vec::new();
+    for (at, character) in reference.char_indices() {
+        if character != 'v' {
+            continue;
+        }
+        if reference[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        if let Some(version) = version_at(&reference[at..]) {
+            out.push(version);
+        }
+    }
+    out
+}
+
+/// The first line release-please would take as the point it inserts a generated
+/// section *above*.
+///
+/// This is the whole of what decides where the next release lands. While it is
+/// `## [Unreleased]` the generated section goes to the top of the file; once
+/// anything else is first, `[Unreleased]` has sunk below a release and sinks one
+/// further with every release after it.
+pub fn first_version_header(text: &str) -> Option<String> {
+    text.lines()
+        .find(|line| is_version_header(line))
+        .map(|line| line.trim_end().to_owned())
+}
+
+/// The lines of the section `starts` opens, up to the next version heading.
+///
+/// The heading line itself is not included, so a caller asking what a section
+/// *holds* cannot be answered by the heading. The section ends at the next
+/// version heading rather than at the next `## `, because `### Added` is part of
+/// the section above it and `## 0.1.0` is not.
+fn section_body(text: &str, starts: impl Fn(&str) -> bool) -> Option<String> {
+    let mut lines = text.lines().skip_while(|line| !starts(line));
+    lines.next()?;
+    Some(
+        lines
+            .take_while(|line| !is_version_header(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The body of the `[Unreleased]` section, or the empty string when there is
+/// none.
+pub fn unreleased_section(text: &str) -> String {
+    section_body(text, |line| {
+        is_version_header(line) && names_the_unreleased_section(line)
+    })
+    .unwrap_or_default()
+}
+
+/// The body of the section that describes `version`.
+///
+/// [`None`] when the changelog has no section for it, which is a different
+/// answer from an empty one and is what a caller asking "did the release notes
+/// end up under the release" has to be able to tell apart.
+pub fn released_section(text: &str, version: &str) -> Option<String> {
+    let wanted = parse_version(version)?;
+    section_body(text, |line| {
+        is_version_header(line)
+            && !names_the_unreleased_section(line)
+            && heading_version(line) == Some(wanted)
+    })
+}
+
+/// Whether a claimed version is one `ceiling` records as released.
+///
+/// A claim with no readable version, and any claim at all while nothing has
+/// been released, is not covered.
+fn is_covered(claimed: Option<(u64, u64, u64)>, ceiling: Option<(u64, u64, u64)>) -> bool {
+    claimed
+        .zip(ceiling)
+        .is_some_and(|(claimed, ceiling)| claimed <= ceiling)
+}
+
+/// Every heading claiming a release `last_released` does not cover.
+///
+/// `last_released` is what `.release-please-manifest.json` records, so this is
+/// the same rule in both states: while nothing has been released every version
+/// heading is a claim of a release nobody made, and afterwards only a heading
+/// past the recorded one is.
+pub fn sections_claiming_a_release_not_recorded(
+    text: &str,
+    last_released: Option<&str>,
+) -> Vec<String> {
+    let ceiling = last_released.and_then(parse_version);
+    released_section_headings(text)
+        .into_iter()
+        .filter(|line| !is_covered(heading_version(line), ceiling))
+        .collect()
+}
+
+/// Every tag reference naming a version `last_released` does not cover.
+///
+/// The same rule as [`sections_claiming_a_release_not_recorded`], applied to the
+/// links rather than the headings: a reference is covered only when it names at
+/// least one version and every version it names is at or below the recorded
+/// release.
+pub fn tag_references_not_recorded(text: &str, last_released: Option<&str>) -> Vec<String> {
+    let ceiling = last_released.and_then(parse_version);
+    tag_references(text)
+        .into_iter()
+        .filter(|reference| {
+            // A reference naming no version this can read is not a proven one
+            // either: the fail-closed direction is to report it.
+            let named = versions_in(reference);
+            named.is_empty()
+                || !named
+                    .into_iter()
+                    .all(|version| is_covered(Some(version), ceiling))
+        })
+        .collect()
 }
 
 /// Whether a file with no permission bits set is unreadable on this machine.
