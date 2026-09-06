@@ -542,7 +542,9 @@ pub fn prepare(env: &Env, uid: u32, warn: &mut dyn Write) -> Result<CacheDirs, L
 
 /// Resolves the Windows cache root and creates it.
 ///
-/// The shape of [`prepare`], with the two differences Windows makes. The first
+/// The shape of `prepare` — the unix half, and `#[cfg(unix)]`, so it is named
+/// here rather than linked: an intra-doc link to it is unresolvable in exactly
+/// the documentation build this function is documented in. The first
 /// is the fallback's name: `%TEMP%\ginary-<user>` rather than
 /// `${TMPDIR}/ginary-<uid>`, because there is no uid. The second is what
 /// creating it checks. The unix fallback lives in a directory every account on

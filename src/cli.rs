@@ -95,7 +95,10 @@ packaged application holds, and `ginary doctor` to see what this machine can do.
 remaining commands — `appfile`, `closure`, `stage`, `beam`, `elf` and `cache` — are
 windows onto the individual phases of a build.
 
-Only Linux x86_64 host packaging is implemented; cross-target builds are not.",
+Seven targets are supported: Linux gnu and musl on x86_64 and aarch64, macOS on x86_64
+and arm64, and Windows on x86_64. A cross build needs a stub and a runtime for the
+target it names — `ginary otp` manages the runtimes and `ginary doctor` reports what
+this machine already has.",
     arg_required_else_help = true
 )]
 pub struct Cli {

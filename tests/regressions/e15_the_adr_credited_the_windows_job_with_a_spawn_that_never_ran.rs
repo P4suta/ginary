@@ -29,6 +29,23 @@
 //! a packaged artifact, the ADR has to keep recording the spawn, the job
 //! object and the console handler as unrun. The day one of those premises
 //! stops holding, this test fails and points at the sentence to update.
+//!
+//! **E23 is that day, and the test did its job.** The `windows` job now
+//! packages the `hello_ffi` fixture and runs the artifact, and
+//! `tests/launcher.rs` — `#![cfg(unix)]` until E23, because its fixture's
+//! `erlexec` was a shell script — runs on a Windows host and starts artifacts
+//! there, so the spawn and the job object both run. The assertions below are
+//! therefore inverted rather than deleted: what they derive from the tree is
+//! now that the two *are* reached and that the ADR says so, and that the one
+//! mechanism still unreached — a console control event actually arriving — is
+//! still recorded as unreached. A test that had simply been removed would have
+//! left the ADR unguarded on the way back.
+//!
+//! The spawn is reached by a *subprocess*, which is the only way it can be:
+//! `launcher::start` is its one call site and a launching artifact is the only
+//! thing that gets there. So the premise below is about the artifact runs
+//! rather than about a direct call, and a direct call from a test would be a
+//! second way in, not the first.
 
 use crate::common::repo::{read, root, workflow_steps};
 
@@ -121,15 +138,7 @@ fn windows_job_commands() -> Vec<String> {
 }
 
 #[test]
-fn no_test_and_no_ci_step_reaches_the_windows_spawn() {
-    let reachable = what_would_run_the_spawn();
-    assert!(
-        reachable.is_empty(),
-        "`{THE_SPAWN}..)` is reachable from the suite now — {reachable:?}. That is a better \
-         tree than the one this test was written against, and it means the sentence in {ADR} \
-         recording the spawn as unrun has to be rewritten around what those tests prove"
-    );
-
+fn the_windows_job_starts_a_packaged_artifact_and_the_adr_says_so() {
     let commands = windows_job_commands();
     assert!(
         !commands.is_empty(),
@@ -141,10 +150,36 @@ fn no_test_and_no_ci_step_reaches_the_windows_spawn() {
         .filter(|command| command.contains("ginary.exe") || command.contains("release\\ginary"))
         .collect();
     assert!(
-        starts_an_artifact.is_empty(),
-        "the `windows` job starts a packaged artifact now — {starts_an_artifact:?} — which is \
-         the end-to-end run {ADR} says that milestone still owes. Both statements in the ADR \
-         change together"
+        !starts_an_artifact.is_empty(),
+        "the `windows` job no longer starts a packaged artifact, so the end-to-end run {ADR} now \
+         credits it with is not happening. Either the step came out or it stopped naming the \
+         binary it runs; the ADR and this test change together, in that order"
+    );
+}
+
+/// The one mechanism of ADR 0015 nothing has reached, kept honest.
+///
+/// A console control *event* has never arrived at a launcher that installed a
+/// handler for it: `ignore_console_ctrl` runs on every Windows launch, but
+/// delivering `CTRL_BREAK_EVENT` to a process group needs
+/// `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and
+/// `CLAUDE.md` requires an ADR for any new `#[allow(unsafe_code)]` — the test
+/// tree included. E23 declined it and said so. This asserts the ADR still
+/// does.
+#[test]
+fn the_adr_still_records_the_console_handler_as_never_having_had_an_event() {
+    let adr = flowed(&read(ADR));
+    assert!(
+        adr.contains("The console control handler has still never been given an event"),
+        "{ADR} has to keep saying that no console control event has ever reached a launcher: \
+         nothing in the tree delivers one, and a decision whose `unsafe` is described as \
+         exercised invites exactly the review it would then be answering falsely"
+    );
+    let reachable = what_would_run_the_spawn();
+    assert!(
+        reachable.is_empty(),
+        "a test calls `{THE_SPAWN}..)` directly now — {reachable:?}. That is a second way into \
+         the spawn beside a launching artifact, and {ADR} describes only the first"
     );
 }
 
@@ -174,10 +209,17 @@ fn the_adr_credits_the_windows_job_with_what_it_actually_runs() {
         );
     }
     assert!(
-        adr.contains("The spawn, the job object and the console handler have still never run"),
-        "{ADR} has to keep saying that the spawn, the job object and the console handler have \
-         run nowhere, because {} calls `{THE_SPAWN}..)` and no test does",
-        ONLY_CALLER
+        !adr.contains("The spawn, the job object and the console handler have still never run"),
+        "{ADR} still says the spawn and the job object have never run, and both do: \
+         `tests/launcher.rs` starts artifacts on a Windows host, whose launcher reaches \
+         `{THE_SPAWN}..)` through {ONLY_CALLER}, and `a_killed_launcher_takes_its_runtime_with_it` \
+         asserts the job object takes the runtime down. The one thing still unreached is a \
+         console control event, and the ADR says that separately"
+    );
+    assert!(
+        adr.contains("the spawn runs"),
+        "{ADR} has to say that the spawn runs, because it does — and a decision that \
+         under-claims its own evidence is as unreadable as one that over-claims it"
     );
     for needle in ["share-mode lock", "win32::process_is_alive"] {
         assert!(

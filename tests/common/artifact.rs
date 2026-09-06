@@ -9,7 +9,10 @@
 //!
 //! - a staging root whose `erts-<vsn>/bin` programs are `/bin/sh` scripts,
 //!   with the launch program printing every variable the contract names and
-//!   one line per argument it was given before exiting 7;
+//!   one line per argument it was given before exiting 7 — and on Windows,
+//!   where nothing reads a shebang, that one program is the compiled
+//!   `examples/ginary_test_erlexec.rs` instead, doing the same thing from the
+//!   same description. See [`ErlexecForm`];
 //! - the real [`ginary::payload::pack`], so the artifact holds a real
 //!   deterministic tar inside a real zstd stream;
 //! - a copy of this test run's own `ginary` binary as the stub, with the
@@ -22,9 +25,12 @@
 //! produces.
 //!
 //! Every run is scrubbed: [`Run`]'s builder clears the environment, puts an
-//! empty directory on `PATH`, and points `HOME` and `XDG_CACHE_HOME` inside
-//! the artifact's own temporary tree. A launcher test that read the
-//! developer's real cache would be a launcher test that passes on one machine.
+//! empty directory on `PATH`, and points `HOME` and `XDG_CACHE_HOME` — and
+//! `%LOCALAPPDATA%`, `%TEMP%`, `%TMP%` and `%USERNAME%`, which are the names
+//! Windows resolves a cache from — inside the artifact's own temporary tree. A
+//! launcher test that read the developer's real cache would be a launcher test
+//! that passes on one machine, and one scrubbed in unix's spelling alone wrote
+//! into the real `C:\Windows\Temp` on the other.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -78,9 +84,11 @@ pub const STUB_SLOGAN: &str = "Slogan: init terminating in do_boot (ginary test 
 ///
 /// The lock proof needs a runtime that is still running when the test looks at
 /// the cache entry: nothing about a launcher that has already exited can say
-/// whether the `flock` survived `execve`. `sleep` is a program rather than a
-/// shell builtin, so a run that uses this must put a real `PATH` on the child
-/// — see [`Runner::env`].
+/// whether the `flock` survived `execve`. In the shell rendering `sleep` is a
+/// program rather than a builtin, so a run that uses this must put a real
+/// `PATH` on the child — see [`Runner::env`]. The compiled rendering sleeps in
+/// its own process and needs nothing on `PATH`, which is why the Windows
+/// job-object proof passes none.
 pub const SLEEP_ARG: &str = "--sleep";
 
 /// The `-eval` expression the stub treats as a request to exit zero.
@@ -90,6 +98,10 @@ pub const SLEEP_ARG: &str = "--sleep";
 /// the stub looks at `-eval`.
 pub const HALT_EVAL: &str = "erlang:halt(0)";
 
+/// The user name a scrubbed run gives Windows, so the `%TEMP%\ginary-<user>`
+/// fallback is named after the test rather than after whoever is logged in.
+pub const FALLBACK_USER: &str = "ginary-test";
+
 /// The compression level the tests pack at.
 ///
 /// One rather than nineteen: a launcher test packs a few kilobytes and runs
@@ -98,17 +110,53 @@ pub const HALT_EVAL: &str = "erlang:halt(0)";
 /// `tests/launcher.rs`.
 pub const LEVEL: i32 = 1;
 
-/// The `erlexec` stub.
+/// The environment variables the stub reports, in the order it reports them.
 ///
-/// It answers the two questions every launcher test asks. First, which of the
-/// contract's variables were set and to what — `<unset>` is printed for one
-/// that is absent, because "absent" is the assertion for `ERL_LIBS` and a
-/// missing line would also be produced by a stub that failed. Second, the
-/// arguments, one per line, printed with `printf` so that a byte which is not
-/// valid UTF-8 arrives on standard output as itself.
-const ERLEXEC_STUB: &str = r#"#!/bin/sh
-for name in ROOTDIR BINDIR EMU PROGNAME HOME ERL_CRASH_DUMP ERL_LIBS ERL_FLAGS ERL_AFLAGS \
-            HEART_COMMAND GINARY_ENV_ONE GINARY_ENV_TWO
+/// The launch contract's own list. `<unset>` is printed for one that is
+/// absent, because "absent" is the assertion for `ERL_LIBS` and a missing line
+/// would also be produced by a stub that failed.
+pub const CONTRACT_VARS: [&str; 12] = [
+    "ROOTDIR",
+    "BINDIR",
+    "EMU",
+    "PROGNAME",
+    "HOME",
+    "ERL_CRASH_DUMP",
+    "ERL_LIBS",
+    "ERL_FLAGS",
+    "ERL_AFLAGS",
+    "HEART_COMMAND",
+    "GINARY_ENV_ONE",
+    "GINARY_ENV_TWO",
+];
+
+/// The lines the stub writes into the crash dump it is asked for.
+///
+/// Not a real dump. Three lines with a `Slogan:` among them, which is exactly
+/// what `launch::supervise` reads and all a test can assert without a running
+/// BEAM.
+const DUMP_LINES: [&str; 3] = [
+    "=erl_crash_dump:0.5",
+    STUB_SLOGAN,
+    "System version: ginary test stub",
+];
+
+/// The `erlexec` stub, as the `/bin/sh` script unix starts it with.
+///
+/// Public for the reason [`erlexec_contract_text`] is: `tests/windows.rs`
+/// holds the two renderings against each other.
+///
+/// It answers the two questions every launcher test asks. First, which of
+/// [`CONTRACT_VARS`] were set and to what. Second, the arguments, one per
+/// line, printed with `printf` so that a byte which is not valid UTF-8 arrives
+/// on standard output as itself.
+///
+/// Built from the same constants [`erlexec_contract_text`] writes, rather than
+/// spelled out, so that the shell rendering and the compiled one cannot say
+/// different things. See [`ErlexecForm`].
+pub fn erlexec_shell_body() -> String {
+    const TEMPLATE: &str = r#"#!/bin/sh
+for name in %VARS%
 do
   eval "value=\${$name-@unset@}"
   if [ "$value" = "@unset@" ]; then
@@ -118,7 +166,7 @@ do
   fi
 done
 echo "cwd:$(pwd)"
-code=7
+code=%DEFAULT_EXIT%
 signal=
 dump=
 nap=
@@ -126,26 +174,121 @@ previous=
 for argument in "$@"
 do
   case $previous in
-    --exit) code=$argument ;;
-    --signal) signal=$argument ;;
-    --sleep) nap=$argument ;;
-    -eval) case $argument in "erlang:halt(0)") code=0 ;; esac ;;
+    %EXIT_ARG%) code=$argument ;;
+    %SIGNAL_ARG%) signal=$argument ;;
+    %SLEEP_ARG%) nap=$argument ;;
+    -eval) case $argument in "%HALT_EVAL%") code=0 ;; esac ;;
   esac
-  if [ "$argument" = "--dump" ]; then dump=1; fi
+  if [ "$argument" = "%DUMP_ARG%" ]; then dump=1; fi
   previous=$argument
 done
 if [ $# -gt 0 ]; then printf 'argv:%s\n' "$@"; fi
 if [ -n "$dump" ] && [ -n "$ERL_CRASH_DUMP" ]; then
   {
-    echo "=erl_crash_dump:0.5"
-    echo "Slogan: init terminating in do_boot (ginary test stub)"
-    echo "System version: ginary test stub"
+%DUMP_ECHOES%
   } > "$ERL_CRASH_DUMP"
 fi
 if [ -n "$nap" ]; then sleep "$nap"; fi
 if [ -n "$signal" ]; then kill -"$signal" $$; fi
 exit "$code"
 "#;
+    let echoes: Vec<String> = DUMP_LINES
+        .iter()
+        .map(|line| format!("    echo \"{line}\""))
+        .collect();
+    TEMPLATE
+        .replace("%VARS%", &CONTRACT_VARS.join(" "))
+        .replace("%DEFAULT_EXIT%", &STUB_EXIT.to_string())
+        .replace("%EXIT_ARG%", EXIT_ARG)
+        .replace("%SIGNAL_ARG%", SIGNAL_ARG)
+        .replace("%SLEEP_ARG%", SLEEP_ARG)
+        .replace("%HALT_EVAL%", HALT_EVAL)
+        .replace("%DUMP_ARG%", DUMP_ARG)
+        .replace("%DUMP_ECHOES%", &echoes.join("\n"))
+}
+
+/// The same contract as the `<program>.contract` sidecar
+/// `examples/ginary_test_erlexec.rs` reads.
+///
+/// Public for the reason `script::shell_script_body` is: a test can hold the
+/// two renderings against each other, and a term that exists in one and not
+/// the other is a fixture that behaves differently on two platforms.
+pub fn erlexec_contract_text() -> String {
+    let mut text = String::new();
+    for name in CONTRACT_VARS {
+        text.push_str(&format!("var {name}\n"));
+    }
+    text.push_str(&format!("exit-arg {EXIT_ARG}\n"));
+    text.push_str(&format!("signal-arg {SIGNAL_ARG}\n"));
+    text.push_str(&format!("sleep-arg {SLEEP_ARG}\n"));
+    text.push_str(&format!("dump-arg {DUMP_ARG}\n"));
+    text.push_str(&format!("halt-eval {HALT_EVAL}\n"));
+    text.push_str(&format!("default-exit {STUB_EXIT}\n"));
+    for line in DUMP_LINES {
+        text.push_str(&format!("dump-line {line}\n"));
+    }
+    text
+}
+
+/// How the stub that stands in for the runtime is realised on a platform.
+///
+/// The launcher fixture's half of `script::ShimForm`, and the same rule: a
+/// `#!/bin/sh` file is a program on unix and a data file everywhere else. Every
+/// launcher test on Windows failed inside the launcher, with a message about
+/// the fixture rather than about ginary:
+///
+/// ```text
+/// ginary: cannot start \\?\C:\...\erts-17.0.5\bin\erlexec:
+/// %1 is not a valid Win32 application. (os error 193)
+/// ```
+///
+/// So on Windows the staged runtime is the compiled
+/// `examples/ginary_test_erlexec.rs`, with its contract in a sidecar beside
+/// it. Both are staged into the payload, so both are extracted into the cache
+/// entry and the program finds its contract where it looks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErlexecForm {
+    /// A `/bin/sh` script with a shebang, staged with the execute bit.
+    ShellScript,
+    /// The compiled example, copied byte for byte, plus its contract sidecar.
+    CompiledProgram,
+}
+
+/// Which form the staged runtime takes on `os`.
+pub const fn erlexec_form(os: ginary::target::Os) -> ErlexecForm {
+    match os {
+        ginary::target::Os::Linux | ginary::target::Os::Macos => ErlexecForm::ShellScript,
+        ginary::target::Os::Windows => ErlexecForm::CompiledProgram,
+    }
+}
+
+/// The compiled runtime stub, from this test run's own target directory.
+///
+/// `cargo test` builds every example alongside the test binaries, so it is
+/// there whenever the tests are. Located from the `ginary` binary's own path
+/// rather than from `CARGO_TARGET_DIR`, which a caller may have moved — the
+/// reasoning `script::compiled_shim` gives.
+///
+/// # Panics
+///
+/// If the example has not been built.
+fn compiled_erlexec() -> PathBuf {
+    let target = Path::new(env!("CARGO_BIN_EXE_ginary"))
+        .parent()
+        .expect("the ginary binary is in a directory")
+        .to_path_buf();
+    let path = target.join("examples").join(format!(
+        "ginary_test_erlexec{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        path.is_file(),
+        "the compiled runtime stub {} is not built; `cargo test` builds every example, so run \
+         the suite through cargo or `cargo build --example ginary_test_erlexec` first",
+        path.display()
+    );
+    path
+}
 
 /// A program under the bindir that is not the launch program.
 ///
@@ -185,6 +328,78 @@ pub struct ArtifactOptions {
     /// A whole `launch` spec to put in the manifest instead of the canonical
     /// one.
     pub launch: Option<LaunchSpec>,
+    /// Stage a launch program nothing can start, rather than one this host
+    /// can.
+    ///
+    /// The launcher fixture needs a runtime a real `execve` or `CreateProcess`
+    /// will accept, which on Windows means a real PE — see [`ErlexecForm`].
+    /// The fixtures that only *read* an artifact do not, and one of them is
+    /// held to what the artifact contains: `tests/verify.rs` asserts that the
+    /// synthetic runtime holds no objects, so that the objects it plants on
+    /// purpose are the whole of the list under test. A real program in the
+    /// bindir is an object, and every one of those assertions changed meaning
+    /// the moment the launch program became one.
+    ///
+    /// So the two fixtures ask for different trees and say which. `false`,
+    /// the default, is the startable one.
+    pub placeholder_runtime: bool,
+}
+
+/// The staged emulator's file name on this host: `beam.smp`, or
+/// `beam.smp.dll` on Windows, where `erl.exe` loads it rather than execs it.
+///
+/// A test that damages the runtime to see the launcher repair it has to damage
+/// the file `launch::preflight` actually looks for, and the two platforms do
+/// not spell it the same.
+pub fn emulator_name() -> &'static str {
+    host_manifest().target.emulator_program()
+}
+
+/// The path of a staged bindir file, as the extracted entry spells it.
+///
+/// `<entry>/erts-<vsn>/bin/<name>`, in the ordinary spelling. The `\\?\`
+/// spelling the extraction writes under is [`extracted_path`]'s.
+pub fn bindir_path(entry: &Path, name: &str) -> PathBuf {
+    entry.join(format!("erts-{ERTS_VSN}/bin")).join(name)
+}
+
+/// `path` as the launcher's own records spell it.
+///
+/// The extraction runs under the verbatim `\\?\` prefix on Windows — that is
+/// what `cache::extraction_dir` hands every path below it — so the plan the
+/// launcher traces names a program under that prefix and not under the
+/// ordinary one. On unix the two are the same string.
+pub fn extracted_path(path: &Path) -> PathBuf {
+    ginary::winpath::long_path(path).into_owned()
+}
+
+/// `value` as the bytes the runtime stub would print for it.
+///
+/// The stub writes an argument as its own bytes on unix, where an argument is
+/// bytes, and as its lossy rendering on Windows, where it is UTF-16 and
+/// standard output is not. A test that compares what the launcher passed
+/// against what `launch::plan` built has to make the same choice, or it is
+/// comparing two different renderings and calling the difference a defect.
+pub fn os_bytes(value: &OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        value.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        value.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// `name` with the suffix that makes a file a program on this host.
+///
+/// Empty on unix; `.exe` on Windows, where `std::process::Command` resolves a
+/// path with no extension by appending one, so an artifact written as `hello`
+/// is a file nothing will start. A real Windows artifact carries the suffix
+/// for the same reason — see `Target::exe_suffix`.
+pub fn exe_name(name: &str) -> String {
+    format!("{name}{}", Target::host().exe_suffix())
 }
 
 /// A packaged application built by hand.
@@ -221,7 +436,7 @@ impl SyntheticArtifact {
     pub fn build_with(dir: &Path, options: &ArtifactOptions) -> Self {
         let staging = dir.join("staging");
         stage(&staging, options);
-        let mut manifest = canonical_manifest();
+        let mut manifest = host_manifest();
         if let Some(version) = options.format_version {
             manifest.format_version = version;
         }
@@ -249,13 +464,13 @@ impl SyntheticArtifact {
             payload_sha256: packed.sha256,
         };
 
-        let path = dir.join(APP);
+        let path = dir.join(exe_name(APP));
         let mut bytes = stub.clone();
         bytes.extend_from_slice(&payload);
         bytes.extend_from_slice(&trailer.to_bytes());
         write_executable(&path, &bytes);
 
-        for name in ["home", "xdg", "emptybin"] {
+        for name in ["home", "xdg", "emptybin", "tmp"] {
             std::fs::create_dir_all(dir.join(name))
                 .unwrap_or_else(|error| panic!("cannot create {name}: {error}"));
         }
@@ -340,7 +555,7 @@ impl SyntheticArtifact {
     ///
     /// If the copy fails.
     pub fn copy_to(&self, name: &str) -> PathBuf {
-        let target = self.dir.join(name);
+        let target = self.dir.join(exe_name(name));
         let bytes = std::fs::read(&self.path)
             .unwrap_or_else(|error| panic!("cannot read the artifact: {error}"));
         write_executable(&target, &bytes);
@@ -465,6 +680,31 @@ impl<'a> Runner<'a> {
         env.insert(
             OsString::from("XDG_CACHE_HOME"),
             artifact.dir.join("xdg").into_os_string(),
+        );
+        // The same isolation in the spelling Windows resolves a cache from.
+        // `HOME` and `XDG_CACHE_HOME` are unix conventions no shell there
+        // exports, so a run scrubbed with only those resolved the *real*
+        // `%TEMP%\ginary-<user>` fallback and wrote a cache outside the test's
+        // own directory — visible on the first Windows-native run as
+        // `\\?\C:\Windows\Temp\ginary-unknown\hello\<key>` in a launcher
+        // message. `%LOCALAPPDATA%\ginary` is `cache::resolve_windows`'s
+        // second rung and lands on the same `<dir>/xdg/ginary` the unix rung
+        // does, so `SyntheticArtifact::cache_root` answers for both. `%TEMP%`
+        // and `%TMP%` are set too, so that a test which forces the fallback
+        // still stays inside the temporary tree.
+        env.insert(
+            OsString::from(ginary::cache::LOCALAPPDATA_VAR),
+            artifact.dir.join("xdg").into_os_string(),
+        );
+        for name in [ginary::cache::TEMP_VAR, ginary::cache::TMP_VAR] {
+            env.insert(
+                OsString::from(name),
+                artifact.dir.join("tmp").into_os_string(),
+            );
+        }
+        env.insert(
+            OsString::from(ginary::cache::USERNAME_VAR),
+            OsString::from(FALLBACK_USER),
         );
         Self {
             artifact,
@@ -870,6 +1110,47 @@ pub fn canonical_manifest() -> Manifest {
     }
 }
 
+/// The canonical manifest as an artifact built *on this host* carries it.
+///
+/// [`canonical_manifest`] is the unix one and stays that way: `tests/launch.rs`
+/// and `tests/windows.rs` both assert against it, and the second derives its
+/// Windows counterpart from it on purpose. What a running artifact needs is
+/// different — `launch::preflight` holds a tree to the manifest's *target*, so
+/// an artifact staged with `erl.exe` and a manifest that says `erlexec` fails
+/// before the launcher has done anything wrong.
+///
+/// On unix this is [`canonical_manifest`] unchanged, byte for byte.
+pub fn host_manifest() -> Manifest {
+    let mut manifest = canonical_manifest();
+    if ginary::platform::HOST == ginary::target::Os::Windows {
+        manifest.target = Target::host();
+        manifest.launch.program = manifest.target.launch_program().to_owned();
+        // A Windows runtime links no libc a manifest can name a floor for, and
+        // `ginary verify` reads this field as a claim about the target rather
+        // than about the machine that staged the tree.
+        manifest.otp.libc = None;
+    }
+    manifest
+}
+
+/// The programs [`stage`] writes under the bindir for `target`, launch program
+/// first.
+///
+/// The launcher's own rule, read from the launcher: `launch::required_binaries`
+/// answers what `preflight` will look for, and the launch program is
+/// `Target::launch_program`. Deriving the fixture from the rule rather than
+/// listing it twice is what keeps a tree the launcher refuses out of the
+/// suite.
+fn staged_bin_names(target: Target) -> Vec<String> {
+    let mut names = vec![target.launch_program().to_owned()];
+    names.extend(
+        ginary::launch::required_binaries(target.os)
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    names
+}
+
 /// Writes the staging root and its `ginary.stage.json`.
 ///
 /// Public because `tests/launch.rs` checks `preflight` against the same tree
@@ -880,37 +1161,69 @@ pub fn canonical_manifest() -> Manifest {
 /// If the tree cannot be written.
 pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
     let bindir = format!("erts-{ERTS_VSN}/bin");
-    let contents: Vec<(String, u32, Vec<u8>, Category)> = vec![
-        (
-            "bin/no_dot_erlang.boot".to_owned(),
-            0o644,
-            b"boot script bytes".to_vec(),
-            Category::Boot,
-        ),
-        (
-            format!("{bindir}/erlexec"),
+    // A placeholder tree is the canonical unix one on every host, and the
+    // fixtures that ask for it pair it with `canonical_manifest`. Only the
+    // startable tree follows the host, because only a tree something starts
+    // has to be one this platform can start. Keeping the two apart is what
+    // stops a reader's fixture from changing shape under it.
+    let target = if options.placeholder_runtime {
+        canonical_manifest().target
+    } else {
+        host_manifest().target
+    };
+    let bins = staged_bin_names(target);
+    let (launch_program, other_bins) = bins.split_first().expect("a launch program");
+
+    let mut contents: Vec<(String, u32, Vec<u8>, Category)> = vec![(
+        "bin/no_dot_erlang.boot".to_owned(),
+        0o644,
+        b"boot script bytes".to_vec(),
+        Category::Boot,
+    )];
+
+    // The launch program, in the form this host can start, and its contract
+    // where that form reads one.
+    let form = if options.placeholder_runtime {
+        ErlexecForm::ShellScript
+    } else {
+        erlexec_form(ginary::platform::HOST)
+    };
+    match form {
+        ErlexecForm::ShellScript => contents.push((
+            format!("{bindir}/{launch_program}"),
             0o755,
-            ERLEXEC_STUB.as_bytes().to_vec(),
+            erlexec_shell_body().into_bytes(),
             Category::ErtsBinary,
-        ),
-        (
-            format!("{bindir}/beam.smp"),
+        )),
+        ErlexecForm::CompiledProgram => {
+            let source = compiled_erlexec();
+            let bytes = std::fs::read(&source)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", source.display()));
+            contents.push((
+                format!("{bindir}/{launch_program}"),
+                0o755,
+                bytes,
+                Category::ErtsBinary,
+            ));
+            contents.push((
+                format!("{bindir}/{launch_program}.contract"),
+                0o644,
+                erlexec_contract_text().into_bytes(),
+                Category::ErtsBinary,
+            ));
+        }
+    }
+
+    for name in other_bins {
+        contents.push((
+            format!("{bindir}/{name}"),
             0o755,
             OTHER_BIN_STUB.as_bytes().to_vec(),
             Category::ErtsBinary,
-        ),
-        (
-            format!("{bindir}/erl_child_setup"),
-            0o755,
-            OTHER_BIN_STUB.as_bytes().to_vec(),
-            Category::ErtsBinary,
-        ),
-        (
-            format!("{bindir}/inet_gethost"),
-            0o755,
-            OTHER_BIN_STUB.as_bytes().to_vec(),
-            Category::ErtsBinary,
-        ),
+        ));
+    }
+
+    contents.extend([
         (
             format!("lib/{APP}/ebin/{APP}.app"),
             0o644,
@@ -935,9 +1248,8 @@ pub fn stage(root: &Path, options: &ArtifactOptions) -> StageListing {
             b"{application, stdlib, [{vsn, \"8.0.3\"}]}.\n".to_vec(),
             Category::AppResource,
         ),
-    ];
+    ]);
 
-    let mut contents = contents;
     for name in &options.erts_bins {
         contents.push((
             format!("{bindir}/{name}"),

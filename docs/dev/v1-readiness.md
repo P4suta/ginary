@@ -98,18 +98,39 @@ application confirms the shape at scale: the **`notify` shipment packages to 12.
 | item | evidence | status |
 |---|---|---|
 | Windows cfg split, resident launcher, stub | `tests/windows.rs`, `tests/windows_build.rs` | done (packaging) — `380de43` (D2) |
-| Windows artifact **launch**, exit-code propagation | `ci.yml` `windows` job | CI-gated — authored in E1, runs on `windows-2022` |
+| Windows artifact **launch**, the launcher's half | `tests/launcher.rs` on a Windows host, `tests/regressions/e23_*` | done — E23 |
+| Windows artifact **launch** with a real `erl.exe` | `ci.yml` `windows` job | CI-gated — rewritten in E23, runs on `windows-2022` |
 | Mach-O section payload, ad-hoc signing | `tests/macho.rs`, `tests/payload_locate.rs`, `tests/sign_macos.rs` | done (packaging) — `5b35ecf` (D3) |
 | macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-15-intel`/`macos-14` |
 
-Windows and macOS packaging are proved structurally on Linux — the cfg split, the resident
-launcher, the PE and Mach-O readers, the section injection and ad-hoc signing all have tests that
-run on this machine. What only a runner can confirm is the **actual launch**: no Windows machine
-has started a packaged application and propagated `halt(3)` to `%ERRORLEVEL%`, and no Mach-O has
-ever been executed or had `codesign --verify --strict` run against ginary's own output. Both are
-CI-gated: the `windows` and `macos` jobs of `.github/workflows/ci.yml` are authored in the E1
-commit and run when the repository has a remote. These are the jobs that close the D2 wine gap and
-the D3 "awaits a Mac runner" gap.
+macOS packaging is proved structurally on Linux — the cfg split, the Mach-O reader, the section
+injection and ad-hoc signing all have tests that run there. What only a runner can confirm is the
+**actual launch**: no Mach-O has ever been executed or had `codesign --verify --strict` run
+against ginary's own output. That stays CI-gated in the `macos` job, which closes the D3 "awaits a
+Mac runner" gap when the repository has a remote.
+
+**Windows is no longer in that position.** E23 was the first milestone worked on a Windows host,
+and the launcher's own suite runs there now: `tests/launcher.rs` was `#![cfg(unix)]` in its
+entirety until then, because the fixture's `erlexec` was a `#!/bin/sh` script and Windows starts
+no such thing. It stages a real program instead, and 59 of the file's claims — the cache, the
+argument vector, the environment difference, the five numbered exit codes, the `GINARY_CMD`
+commands, the trace, the lock, pruning and uninstalling — run natively and pass, with five
+gated `#[cfg(unix)]` for reasons each one states. `a_killed_launcher_takes_its_runtime_with_it`
+is the first test of the job object that `docs/adr/0015-windows-launcher-stays-resident.md`
+argues the crate's only `#[allow(unsafe_code)]` for.
+
+Two halves remain, and both are named rather than absorbed:
+
+- **A real `erl.exe`.** The development host has no Erlang, so what the suite proves is the
+  launcher spawning, waiting for and mirroring a *stub* runtime. That `halt(3)` inside a real
+  packaged application reaches `%ERRORLEVEL%` is the `windows` CI job's, and until E23 that job
+  did not do it — it ran `erl.exe` directly and started no artifact. It now packages the
+  `hello_ffi` fixture, runs the artifact cold and warm, and compares the code.
+- **A console control event.** `SetConsoleCtrlHandler` is called on every Windows launch, so the
+  handler is installed; no Ctrl-C has ever been delivered to a launcher holding one. Driving one
+  needs `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and `CLAUDE.md`
+  requires an ADR for any new `#[allow(unsafe_code)]` — the test tree included. E23 declined it
+  on that ground rather than faking it.
 
 ### Phase E — the verification matrix
 
@@ -182,8 +203,15 @@ commit:
 
 - **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
   stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
-- **Windows launch** — `ci.yml` `windows` job, `windows-2022` runner. Asserts `halt(3)` reaches
-  `%ERRORLEVEL%` as 3, the exit-code propagation the D2 wine gap left unproven.
+- **Windows launch with a real runtime** — `ci.yml` `windows` job, `windows-2022` runner. Packages
+  the `hello_ffi` fixture against the OTP `setup-beam` installs, runs the artifact cold and warm,
+  and asserts `halt(3)` reaches `%ERRORLEVEL%` as 3. Rewritten in E23: the step it replaces ran
+  `erl.exe` directly and started no artifact, so the row above it in this document had been
+  booking a proof against a step that did not perform it. The launcher's own half of the same
+  contract is no longer deferred — it runs in `tests/launcher.rs` on a Windows host.
+- **A console control event reaching the Windows launcher** — nothing, yet. Declined in E23 with
+  a reason: delivering one needs `GenerateConsoleCtrlEvent`, and a new `#[allow(unsafe_code)]`
+  needs an ADR of its own.
 - **Catalog publishing and release provenance** — `distribute.yml`. Builds every target's binary,
   stub and OTP tarball, produces `attest-build-provenance` attestations, and verifies the
   re-downloaded assets before flipping the release out of draft. Runs when the repository has a

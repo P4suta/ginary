@@ -540,6 +540,59 @@ pub fn workflow_steps(relative: &str) -> Vec<WorkflowStep> {
     workflow_steps_of(relative, &yaml(relative))
 }
 
+/// Every variable a `pwsh` script fills from `$LASTEXITCODE`.
+///
+/// A step captures the code rather than testing it in place, because the next
+/// external command rewrites the automatic variable — a `Write-Host` between
+/// the run and the comparison is enough to lose it, which is the lesson E15
+/// paid for. So the comparison names a variable of the step's own choosing and
+/// a rule about the comparison has to find that name first.
+pub fn captured_exit_codes(script: &str) -> Vec<String> {
+    script
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.trim().split_once('=')?;
+            if right.trim() != "$LASTEXITCODE" {
+                return None;
+            }
+            let name = left.trim();
+            let bare = name.strip_prefix('$')?;
+            (!bare.is_empty()
+                && bare != "LASTEXITCODE"
+                && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Whether a script names `path`, in either separator spelling.
+///
+/// A `pwsh` step writes `build\ginary` as readily as `build/ginary`, and both
+/// name the same directory to Windows. A rule that reads only one of them is a
+/// rule about how the step was typed rather than about what it runs, and it
+/// fails the day someone rewrites the step in the other dialect.
+pub fn names_path(script: &str, path: &str) -> bool {
+    script.replace('\\', "/").contains(&path.replace('\\', "/"))
+}
+
+/// Whether a `pwsh` script compares a captured exit code against `code`.
+///
+/// A comparison, and not a mention. `contains("3")` — or `contains("halt(3)")`
+/// — is satisfied by a version number, a path, or a comment *about* the number,
+/// and E23 found exactly that: the rule that was supposed to prove an exit code
+/// crossed the Windows launcher passed over a step that ran `erl.exe` directly,
+/// and would pass again over a step that only mentions the code in a comment.
+/// A rule about a number a job checks reads the check.
+pub fn compares_a_captured_exit_code(script: &str, code: i32) -> bool {
+    let names = captured_exit_codes(script);
+    script.lines().any(|line| {
+        names.iter().any(|name| {
+            line.contains(&format!("{name} -ne {code}"))
+                || line.contains(&format!("{name} -eq {code}"))
+        })
+    })
+}
+
 /// Every step of every job of one already-parsed workflow, in file order.
 ///
 /// [`workflow_steps`] is this over a committed file. The split exists so that

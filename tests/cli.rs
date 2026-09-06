@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
 use crate::common::hostpath::{is_absolute_for, joined};
+use crate::common::oserror::{NOT_FOUND, os_words};
 use crate::common::tools::require_tools;
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
@@ -162,8 +163,12 @@ fn appfile_parse_reports_a_missing_file_and_exits_one() {
         stderr.contains("cannot read"),
         "the cause must be the failed read, not a generic message: {stderr}"
     );
+    // Built from `io::Error` rather than quoted: the reason after ginary's
+    // colon is the host's to word, and on a Windows that speaks Japanese it is
+    // not English. See
+    // tests/regressions/e23_a_test_expected_the_operating_systems_words_in_english.rs.
     assert!(
-        stderr.contains("No such file or directory") || stderr.contains("cannot find the file"),
+        stderr.contains(&os_words(NOT_FOUND)),
         "the operating system's own reason must survive: {stderr}"
     );
     assert!(

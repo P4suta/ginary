@@ -9,9 +9,17 @@
 //! made of — so a defect in any of these rules is a defect this suite can
 //! catch on the machine ginary is developed on.
 //!
-//! What is *not* here, and cannot be: starting `erl.exe`, the job object, the
-//! console control handler and the exit code of a real runtime. Those are the
-//! GitHub Actions milestone; `docs/dev/log/D2.md` says so in as many words.
+//! What is *not* here is what a Linux machine cannot answer, and E23 moved
+//! most of that rather than leaving it. The spawn, the exit code, the
+//! share-mode lock and the `\\?\` extraction are asserted by
+//! `tests/launcher.rs`, which runs on a Windows host now that its fixture
+//! stages a program Windows will start; the job object has its own test there,
+//! `a_killed_launcher_takes_its_runtime_with_it`. Two things remain outside
+//! this file and outside that one: starting a real `erl.exe`, which is the
+//! `windows` job of `.github/workflows/ci.yml`, and delivering a console
+//! control event, which E23 declined because it needs a second
+//! `#[allow(unsafe_code)]` and `CLAUDE.md` asks for an ADR before there is
+//! one. `docs/adr/0015-windows-launcher-stays-resident.md` records both.
 //!
 //! The file is not gated on the `cli` feature. Every module it reads is one a
 //! launcher-only stub carries, so the stub flavor of the suite asserts these
@@ -448,4 +456,55 @@ fn a_windows_launch_plan_is_the_unix_one_with_erl_exe_in_front() {
     );
     assert_eq!(windows_plan.set, unix_plan.set);
     assert_eq!(windows_plan.remove, unix_plan.remove);
+}
+
+// ------------------------------------ the fixture's two runtime stubs --
+
+/// The launcher fixture's runtime stub exists twice — a `/bin/sh` script and
+/// the compiled `examples/ginary_test_erlexec.rs` — because Windows starts no
+/// shebang. Two renderings of one behaviour is exactly the shape that drifts,
+/// so every term of the contract has to appear in both, and each is built from
+/// the same constants rather than spelled out. This is `ShimStep`'s rule from
+/// E10, stated for the launcher's own fixture. See `tests/common/artifact.rs`.
+#[test]
+fn both_renderings_of_the_runtime_stub_carry_every_term_of_the_contract() {
+    let shell = common::artifact::erlexec_shell_body();
+    let contract = common::artifact::erlexec_contract_text();
+
+    for name in common::artifact::CONTRACT_VARS {
+        assert!(
+            shell.contains(name),
+            "the shell rendering must report `{name}`:\n{shell}"
+        );
+        assert!(
+            contract.contains(&format!("var {name}\n")),
+            "the compiled rendering must be told to report `{name}`:\n{contract}"
+        );
+    }
+
+    for (term, value) in [
+        ("exit-arg", common::artifact::EXIT_ARG),
+        ("signal-arg", common::artifact::SIGNAL_ARG),
+        ("sleep-arg", common::artifact::SLEEP_ARG),
+        ("dump-arg", common::artifact::DUMP_ARG),
+        ("halt-eval", common::artifact::HALT_EVAL),
+    ] {
+        assert!(
+            shell.contains(value),
+            "the shell rendering must read `{value}`:\n{shell}"
+        );
+        assert!(
+            contract.contains(&format!("{term} {value}\n")),
+            "the compiled rendering must be told about `{term}`:\n{contract}"
+        );
+    }
+
+    let default_exit = common::artifact::STUB_EXIT.to_string();
+    assert!(shell.contains(&format!("code={default_exit}\n")));
+    assert!(contract.contains(&format!("default-exit {default_exit}\n")));
+    assert!(
+        shell.contains(common::artifact::STUB_SLOGAN),
+        "the crash dump the shell writes carries the slogan a supervised run reads back"
+    );
+    assert!(contract.contains(&format!("dump-line {}\n", common::artifact::STUB_SLOGAN)));
 }

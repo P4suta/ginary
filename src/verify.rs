@@ -108,7 +108,7 @@ pub const MACOS_NEEDED_ALLOWLIST: [&str; 2] =
 /// is installed, so an artifact needing one is exactly the finding this check
 /// is for. See
 /// `tests/regressions/e12_the_windows_allowlist_carried_one_vc_runtime_of_three.rs`.
-pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 16] = [
+pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 17] = [
     "ADVAPI32.dll",
     "bcrypt.dll",
     "CRYPT32.dll",
@@ -117,6 +117,11 @@ pub const WINDOWS_NEEDED_ALLOWLIST: [&str; 16] = [
     "KERNEL32.dll",
     "MSVCP140.dll",
     "msvcrt.dll",
+    // Below `KERNEL32.dll` and on every Windows there has ever been. It was
+    // missing until a real PE reached a payload for the first time and was
+    // reported for needing it; see
+    // `tests/regressions/e23_the_windows_allowlist_named_no_api_set_but_the_crt_one.rs`.
+    "ntdll.dll",
     "ole32.dll",
     "SHELL32.dll",
     "ucrtbase.dll",
@@ -244,8 +249,25 @@ fn windows_name_is_allowed(name: &str, allowlist: &[&str]) -> bool {
         // `tests/regressions/e11_a_dll_the_import_table_spelt_in_lower_case_was_unexpected.rs`.
         known.to_ascii_lowercase().ends_with(WINDOWS_LIBRARY_SUFFIX)
             && known.eq_ignore_ascii_case(name)
-    }) || (name.to_ascii_lowercase().starts_with(WINDOWS_CRT_PREFIX)
-        && allowlist.contains(&WINDOWS_CRT_COMPANION))
+    }) || windows_family_is_allowed(name, allowlist)
+}
+
+/// The API-set half of [`windows_name_is_allowed`].
+///
+/// Two families, each admitted by its own companion: the Universal CRT's
+/// forwarding libraries by `ucrtbase.dll`, and the Win32 base's by
+/// `KERNEL32.dll`. Stated as a table rather than as two `||` arms so that a
+/// third family is a row, and so that neither can be admitted by the other's
+/// companion.
+fn windows_family_is_allowed(name: &str, allowlist: &[&str]) -> bool {
+    const FAMILIES: [(&str, &str); 2] = [
+        (WINDOWS_CRT_PREFIX, WINDOWS_CRT_COMPANION),
+        (WINDOWS_CORE_PREFIX, WINDOWS_CORE_COMPANION),
+    ];
+    let lower = name.to_ascii_lowercase();
+    FAMILIES.iter().any(|(prefix, companion)| {
+        lower.starts_with(&prefix.to_ascii_lowercase()) && allowlist.contains(companion)
+    })
 }
 
 /// The suffix that makes a name on an allowlist a Windows library.
@@ -258,6 +280,31 @@ const WINDOWS_LIBRARY_SUFFIX: &str = ".dll";
 /// an allowlist that admits `ucrtbase.dll` admits its forwarding libraries and
 /// one that does not admits neither.
 pub const WINDOWS_CRT_COMPANION: &str = "ucrtbase.dll";
+
+/// The prefix of the Win32 base's API sets.
+///
+/// [`WINDOWS_CRT_PREFIX`]'s counterpart for the other family a Windows program
+/// links. The Universal CRT is not the only thing Windows forwards through
+/// API sets: `KERNEL32.dll` publishes its own surface as `api-ms-win-core-*`,
+/// and a PE this decade's toolchains link names both families in one import
+/// table. Matched case-insensitively, for the reason
+/// [`WINDOWS_NEEDED_ALLOWLIST`]'s entries are.
+///
+/// `ext-ms-win-*` is deliberately not matched. Extension API sets are the half
+/// of the mechanism an edition of Windows may genuinely not have, so a program
+/// that needs one needs a machine that supplies it — which is the finding this
+/// check exists for. See
+/// `tests/regressions/e23_the_windows_allowlist_named_no_api_set_but_the_crt_one.rs`.
+pub const WINDOWS_CORE_PREFIX: &str = "api-ms-win-core-";
+
+/// The library whose presence on an allowlist admits the Win32 base's
+/// `api-ms-win-core-*` family.
+///
+/// [`WINDOWS_CRT_COMPANION`]'s counterpart, and the same argument: the family
+/// *is* `KERNEL32.dll`'s own surface, so an allowlist that admits the base
+/// admits its API sets and one that does not admits neither. An allowlist a
+/// test narrows to `&[]` therefore still admits nothing.
+pub const WINDOWS_CORE_COMPANION: &str = "KERNEL32.dll";
 
 /// One native object found in the payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

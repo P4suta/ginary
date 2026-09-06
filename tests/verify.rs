@@ -17,8 +17,10 @@
 //! four live in `tests/regressions/`, because each one was a defect.
 //!
 //! Three builders feed it. [`SyntheticArtifact`] is the clean artifact, whose
-//! `erts-*/bin` programs are shell scripts and which therefore holds no ELF at
-//! all. [`crate::common::repack`] lays the payload out entry by entry, so the
+//! `erts-*/bin` programs are shell scripts and which therefore holds no object
+//! at all — except on Windows, where a launcher can start nothing but a real
+//! program, so its one launch program is a real PE and a clean report says so.
+//! [`crate::common::repack`] lays the payload out entry by entry, so the
 //! index can be made to disagree with the tree it describes, and copies this
 //! test run's own binary in as a real object. The gated test at the end runs
 //! the whole thing over a real `ginary build`.
@@ -39,7 +41,9 @@ use ginary::verify::{
 };
 use serde_json::Value;
 
-use crate::common::artifact::{ArtifactOptions, SyntheticArtifact};
+use crate::common::artifact::{
+    ArtifactOptions, ERTS_VSN, ErlexecForm, SyntheticArtifact, erlexec_form,
+};
 use crate::common::built::BuiltProject;
 use crate::common::hostpath::emulator_suffix;
 use crate::common::portability::unmet_needs;
@@ -72,10 +76,30 @@ fn a_clean_artifact_holds_no_objects_and_raises_nothing() {
 
     assert!(report.payload.ok(), "{:?}", report.payload);
     assert_eq!(report.issues, Vec::new());
+    // The synthetic runtime's programs are `/bin/sh` scripts on unix and the
+    // launch program is a real one on Windows, where a launcher can start
+    // nothing else — so the object list is empty there and holds that one
+    // program here. The claim under test is the line above it either way: a
+    // clean artifact raises nothing, and on Windows that now means a genuine
+    // PE's import table was read and found to be entirely on the platform's
+    // own floor. See
+    // tests/regressions/e23_the_windows_allowlist_named_no_api_set_but_the_crt_one.rs.
+    let objects: Vec<String> = report
+        .objects
+        .iter()
+        .map(|object| object.path.clone())
+        .collect();
+    let expected: Vec<String> = match erlexec_form(ginary::platform::HOST) {
+        ErlexecForm::ShellScript => Vec::new(),
+        ErlexecForm::CompiledProgram => vec![format!(
+            "erts-{ERTS_VSN}/bin/{}",
+            ginary::target::Target::host().launch_program()
+        )],
+    };
     assert_eq!(
-        report.objects,
-        Vec::new(),
-        "the synthetic runtime's programs are shell scripts, not ELF"
+        objects, expected,
+        "the only object a clean synthetic artifact holds is the runtime this host has to be \
+         able to start"
     );
     assert!(report.ok());
     assert_eq!(report.format_version, VERIFY_FORMAT_VERSION);
