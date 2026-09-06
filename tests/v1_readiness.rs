@@ -64,17 +64,80 @@ fn the_readiness_sweep_records_the_artifact_sizes() {
 fn deferred_items_are_honest_about_being_ci_gated_rather_than_hand_waved() {
     let sweep = read("docs/dev/v1-readiness.md");
     assert!(
-        sweep.contains("CI-gated") || sweep.contains("runs when the repo has a remote"),
-        "a deferred item has to say it is workflow-authored and runs on a remote, not claim it \
+        sweep.contains("CI-gated"),
+        "a deferred item has to say it is workflow-authored and has never executed, not claim it \
          is done:\n{sweep}"
     );
-    // The runner-only work is named as deferred rather than omitted.
-    for deferred in ["macOS", "Windows", "provenance"] {
+    // The runner-only work is named rather than omitted. All three were
+    // deferred once; two are closed by jobs that now run them on every push,
+    // and the sweep still has to account for each by name — an item that
+    // vanishes from the checklist is worse than one that stays deferred.
+    for item in ["macOS", "Windows", "provenance"] {
         assert!(
-            sweep.contains(deferred),
-            "the sweep does not list the runner-gated item `{deferred}`"
+            sweep.contains(item),
+            "the sweep does not account for the runner-only item `{item}`"
         );
     }
+}
+
+#[test]
+fn the_only_deferred_item_left_is_the_one_nothing_has_run() {
+    // The fail-closed rule cuts both ways, and this is the half E23 added. A
+    // checklist that leaves an item deferred once its evidence exists
+    // understates the project in the document that exists to prevent
+    // hand-waving, so the deferred list is held to naming exactly what has
+    // never executed. Today that is the release path and nothing else: no tag
+    // has been cut, so `distribute.yml` has produced no asset and no
+    // attestation, while the macOS and Windows launches run on every push.
+    let sweep = read("docs/dev/v1-readiness.md");
+    let deferred = sweep
+        .split("## The deferred items, restated plainly")
+        .nth(1)
+        .expect("the sweep restates its deferred items in a section of their own");
+    assert!(
+        deferred.contains("provenance"),
+        "the release provenance has never run — no release has been cut — so it is the one item \
+         the deferred section has to carry:\n{deferred}"
+    );
+    // The *entries*, not the prose. The section explains which items moved out
+    // of it and why, and a rule that could not tell a bullet from a sentence
+    // would forbid the explanation — leaving a reader who remembers the old
+    // list with no account of where those two items went.
+    let entries: Vec<&str> = deferred
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "the deferred section lists nothing at all, so this rule is measuring a list that no \
+         longer exists:\n{deferred}"
+    );
+    for closed in ["macOS launch", "Windows launch"] {
+        assert!(
+            !entries.iter().any(|entry| entry.contains(closed)),
+            "`{closed}` is still an entry of the deferred list, and the job that closes it \
+             packages an artifact and starts it on every push. `tests/regressions/\
+             e23_the_documents_said_the_launches_had_never_happened.rs` derives that from the \
+             workflow:\n{entries:#?}"
+        );
+    }
+    // Exactly one, because the section's own first word is "One". A new
+    // deferred item is a real thing to add — but adding it silently under a
+    // sentence that counts them is how a checklist starts disagreeing with
+    // itself, and this is the document where that matters most.
+    assert_eq!(
+        entries.len(),
+        1,
+        "the deferred section opens by saying **one** kind of work is CI-gated, and lists \
+         {}. The count and the sentence move together:\n{entries:#?}",
+        entries.len()
+    );
+    assert!(
+        entries[0].contains("provenance"),
+        "the one deferred entry has to be the release provenance, the one thing that has never \
+         executed:\n{entries:#?}"
+    );
 }
 
 #[test]

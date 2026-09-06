@@ -8,8 +8,11 @@
 //! Windows runtime on this machine and no way to make one, and every claim
 //! here is about *which names are in a directory* rather than about what any
 //! of them does. The one claim that needs a real `otp_win64_<version>.zip` —
-//! that the names in it are these names — is the GitHub Actions milestone, and
-//! `docs/dev/log/D2.md` records it as an open question rather than as a fact.
+//! that the names in it are these names — is answered by the `windows` job of
+//! `.github/workflows/ci.yml`, which packages an artifact against the runtime
+//! `setup-beam` installs: a name this fixture has wrong is a build that fails
+//! there. `docs/dev/log/D2.md` recorded it as an open question and E23 closed
+//! it.
 //!
 //! The last five tests are the same shape as `tests/smoke_matrix.rs`: a task
 //! and four documents that nothing else would notice going stale.
@@ -252,13 +255,26 @@ fn the_readme_records_what_windows_support_covers_and_what_is_untested() {
     let rest = &readme[start + 1..];
     let section = rest.find("\n## ").map_or(rest, |end| &rest[..end]);
 
-    for needle in ["cross", "stub", "erl.exe", "GitHub Actions"] {
+    // What the section has to cover, one needle per claim a reader depends on:
+    // that a Linux machine cross-compiles the crate and its stub for Windows,
+    // that `erl.exe` is what a Windows runtime is started with, that a real
+    // Windows host packages and launches an artifact (and which image does),
+    // and that `MAX_PATH` is the one launch limit that remains. E23 replaced
+    // `GitHub Actions` — a phrase that only meant "some day" — with the runner
+    // the work actually happens on.
+    for needle in ["cross", "stub", "erl.exe", "windows-2022", "MAX_PATH"] {
         assert!(
             section.contains(needle),
-            "the Windows section has to say what works and what has never been run: it mentions \
-             no `{needle}`"
+            "the Windows section has to say what is proved, on what, and what is still not: it \
+             mentions no `{needle}`"
         );
     }
+    assert!(
+        !section.contains("windows-latest"),
+        "the Windows section names a runner label this repository deliberately does not take: \
+         the image is pinned to `windows-2022` so that moving it is a claim somebody makes on \
+         purpose. See docs/dev/log/E4.md"
+    );
 }
 
 #[test]
@@ -299,6 +315,31 @@ fn the_windows_launcher_adr_records_the_run_that_proved_halt_propagation() {
         "33864729638",
         "100996872499",
         "halt(3)",
+        // And E23's — both of them, the first execution and the one that
+        // followed review by making the cold-cache launch genuinely cold.
+        // These are a different claim about the same three digits.
+        // The run above proved a *platform* fact — a bare `erl.exe` leaves 3
+        // behind for its parent. This one proved ginary's: a packaged artifact
+        // carried that code across the spawn `launch_windows::run` owns, which
+        // is the contract the whole resident-launcher design rests on and the
+        // first execution those mechanisms ever had. Two citations because
+        // they are two facts, and an ADR that cited only the first would be
+        // crediting the emulator with the launcher's work.
+        "34015391532",
+        "101438136143",
+        "34018931746",
+        "101447799420",
+        // The layout that used to be an assumption, now read off a real tree.
+        // Its *measured size*, not its name: `beam.smp.dll` appears three
+        // times in this ADR — the design says what the emulator is, and the
+        // required-files paragraph names it — so a needle spelled that way is
+        // satisfied by an ADR whose evidence section has been deleted. The
+        // byte count exists only in the transcript.
+        "5660672",
+        // And the cache root the same run measured, for the same reason: it
+        // is printed by the `uninstall` that empties the entry, and nothing
+        // else in this repository has ever observed it.
+        "AppData\\Local\\ginary",
     ] {
         assert!(
             adr.contains(needle),

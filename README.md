@@ -34,15 +34,17 @@ matrix below.
 | `linux-x86_64-musl` | yes (cross) | yes (alpine container) | yes (smoke matrix) |
 | `linux-aarch64-gnu` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
 | `linux-aarch64-musl` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
-| `macos-x86_64` | no (needs a Mac) | no | yes (macos-15-intel) |
-| `macos-aarch64` | no (needs a Mac) | no | yes (macos-14) |
-| `windows-x86_64` | yes (stub, cross) | no | yes (windows-2022) |
+| `macos-x86_64` | no (needs a Mac) | no | yes (macos-15-intel, packaged and launched) |
+| `macos-aarch64` | no (needs a Mac) | no | yes (macos-14, packaged and launched) |
+| `windows-x86_64` | yes (stub, cross) | no | yes (windows-2022, packaged and launched) |
 
 "builds here" and "runs here" are what this development machine (Linux x86_64) can do today;
-"runs on CI" is the job that runs it once the workflows have a remote to run on. The macOS and
-Windows launches, the catalog publishing and the provenance attestations are authored as CI jobs
-and run when the repository is published — see [docs/dev/v1-readiness.md](docs/dev/v1-readiness.md)
-for the phase-by-phase evidence and [CHANGELOG.md](CHANGELOG.md) for the release notes.
+"runs on CI" is the job that runs it, on every push. For the three targets this machine cannot
+run, "packaged and launched" means what it says: the job builds an artifact for that target, starts
+it, and asserts what it printed and the code it exited with. What is authored and has never
+executed is the release path alone — the catalog publishing and the provenance attestations wait
+on a release nobody has cut. See [docs/dev/v1-readiness.md](docs/dev/v1-readiness.md) for the
+phase-by-phase evidence and [CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 ## Quickstart
 
@@ -190,7 +192,26 @@ holds a BEAM runtime for that machine too. The stub half is "Stubs" below; the r
 that is not told refuses and quotes the table to write. An `erts` of `docker:` parses now and is
 refused at build time, naming the container-image milestone it arrives with — the same milestone
 `ginary doctor` prints for it, because both read it off the same value. A relative `dir:` or
-`tarball:` path is relative to the project, as `vm_args` and `sys_config` are. An entry of
+`tarball:` path is relative to the project, as `vm_args` and `sys_config` are.
+
+**A Windows path goes in a TOML literal string.** `\U`, `\t` and `\x` are escape sequences inside
+a TOML *basic* string — the double-quoted kind — so `erts = "dir:C:\Users\you\otp"` is not the
+path it looks like and is often not valid TOML at all. Single quotes make it a literal string,
+where a backslash is a backslash:
+
+```toml
+[tools.ginary.target."windows-x86_64"]
+erts = 'dir:C:\Users\you\otp'   # literal string: single quotes, no escapes
+```
+
+Forward slashes in a basic string work too — Windows accepts them — but the literal string is the
+spelling that survives copying a path out of a shell, and it is the one the `windows` CI job
+writes. One thing to know if the *build machine* is not the Windows one: "is this path absolute?"
+is answered by the machine ginary runs on, and `C:\…` is not absolute to a Linux one, so a
+drive-lettered path in a manifest built on Linux is joined onto the project root like any other
+relative path. The build then names the joined path when it cannot find the runtime, so it is
+visible rather than silent — but a Windows runtime tree unpacked on a Linux build machine is
+named by that machine's own path, which is what the cross-build section below assumes. An entry of
 `targets` that names no target is refused where the manifest is read, so `ginary doctor` reports
 the list rather than printing a row for a build nobody can run.
 
@@ -566,10 +587,12 @@ forwarding, and the application receives its arguments exactly as typed.
   source names. A target other than the host with no `erts` named for it is refused, quoting the
   table to write. Prebuilt runtime downloads and the musl variants are Phase C of
   [the roadmap](docs/dev/log/).
-- **Windows is built but not run.** `mise run stubs:build` produces the `windows-x86_64` stub
-  and `mise run build:windows` builds both flavors, but no Windows machine has ever started a
-  packaged application; see [Windows](#windows). No macOS stub can be built on Linux at all; the
-  two of them come from the release build on a macOS runner.
+- **Windows and macOS artifacts are built on Windows and macOS.** A Linux machine cross-builds
+  the `windows-x86_64` *stub* (`mise run stubs:build`) and compiles both flavors for it
+  (`mise run build:windows`), but it cannot produce a whole artifact for either platform: there
+  is no macOS stub a Linux toolchain can build at all, and no Windows or macOS runtime in the
+  catalog to bundle. Both are packaged, launched and checked on their own runners by CI — see
+  [Windows](#windows) and [macOS](#macos) — and the release binaries come from the same images.
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,
@@ -590,9 +613,14 @@ forwarding, and the application receives its arguments exactly as typed.
 
 ## Windows
 
-Windows support is **compiled, cross-checked and partly executed — and no Windows machine has
-run a packaged application yet.** The distinction matters, so here is exactly where the line
-falls.
+Windows support is **packaged, launched and exit-code-checked on a real Windows host, on every
+push.** The `windows` job of `.github/workflows/ci.yml` builds both flavors natively on
+`windows-2022`, runs the suite, then packages the `hello_ffi` fixture against the runtime
+`setup-beam` installs and starts the artifact it produced — as a `GINARY_CMD=selftest`, then
+(after `GINARY_CMD=uninstall` has thrown the cache away again) on a genuinely cold cache, on a warm
+one, and on `halt(3)`. That last one is the exit-code contract: the code the
+application halts with reaches `%ERRORLEVEL%` through ginary's own spawn-and-wait launcher.
+Everything below says where the line still falls.
 
 What works, and is checked on every run of the suite:
 
@@ -628,20 +656,27 @@ What works, and is checked on every run of the suite:
   the two flavours a tree is gets read off the tree — "does `erts-<vsn>/bin` hold `erl.exe`?" —
   in one place, so the resolver, `inspect_root` and assembly cannot disagree about it.
 
-What is **untested**, and is the GitHub Actions milestone on a `windows-latest` runner:
+What a **real Windows host** now does on every push, in the `windows` job:
 
-- **`erl.exe` has never been started by this launcher.** The spawn, the wait, the job object
-  that keeps a killed launcher from orphaning a runtime, the console control handler and the
-  share-mode lock are compiled and nothing more.
-- **No exit code has been propagated.** `halt(3)` reaching `%ERRORLEVEL%` as 3 is a claim this
-  repository states and does not yet check.
-- **No Windows artifact has been built end to end.** There is no `otp_win64_<version>.zip` on
-  the development machine to point `erts = "dir:…"` at, so what is covered is that such a tree
-  *resolves* — over a fabricated tree carrying real PE headers. `ginary build --target
-  windows-x86_64` over a real unpacked zip is the Actions run.
-- **The `otp_win64_<version>.zip` layout is an assumption.** The required-file probe is
-  data-driven for exactly that reason, and the DLL the emulator is named as — `beam.smp.dll` —
-  is what the documentation says rather than what a real zip was read for.
+- **The launcher starts the emulator.** The spawn, the wait, the job object that keeps a killed
+  launcher from orphaning a runtime and the console control handler are reached by a packaged
+  artifact starting a real runtime, and by nothing else — so a run of that artifact is the only
+  execution they have. The share-mode lock and `win32::process_is_alive` are reached separately,
+  by the `#[cfg(windows)]` tests the same job runs natively.
+- **An exit code crosses the launcher.** `halt(3)` reaches `%ERRORLEVEL%` as 3 twice over: once
+  from a bare `erl.exe`, which is the platform fact, and once through the packaged artifact,
+  which is ginary's own. Two probes, because a single failure that could be either is a failure
+  nobody can read.
+- **A Windows artifact is built end to end.** `ginary build --target windows-x86_64` runs against
+  the runtime `setup-beam` installed, named as `erts = 'dir:…'` in the fixture's `gleam.toml`,
+  and the artifact it produces is inspected, started and asserted on.
+- **The `otp_win64_<version>.zip` layout is read rather than assumed.** The required-file probe
+  is data-driven, and what it now measures is a real Windows runtime tree: `erl.exe`, the
+  `beam.smp.dll` the PE reader takes the target off, the `inet_gethost.exe` a runtime resolves
+  names with, and the `erl.ini` assembly deletes.
+
+What is still **untested**, or true and worth stating:
+
 - **A cache entry longer than `MAX_PATH` still cannot be launched.** The `\\?\` prefix covers
   everything ginary itself opens — the extraction, the cache-hit check, the lock, the manifest
   and the preflight — and `ROOTDIR`, `BINDIR` and the argument vector are handed to `erl.exe`
@@ -651,13 +686,14 @@ What is **untested**, and is the GitHub Actions milestone on a `windows-latest` 
 - **Nothing runs under a real wine either.** The image's wine has no `bcryptprimitives.dll`,
   which every Rust *test* binary imports through `std`, so `cross test` cannot start one; the
   stub, which imports only `kernel32`, `ntdll` and `msvcrt`, does.
-- **No ginary test target compiles for `x86_64-pc-windows-gnu` at all.** `tests/common` is
-  unix-only — `std::os::unix`, `Permissions::from_mode`, `OsStrExt::as_bytes` — and every test
-  target pulls it in, so porting it is the first thing the Actions milestone has to do.
-- **The two lock opens and the `\\?\` extraction are Windows-only code paths.** Their tests
-  are `#[cfg(windows)]` and run nowhere yet; they are type-checked on Linux by lifting the
-  `cfg` for one compile. What they claim: that two launchers of one entry both take the shared
-  lock, and that a prune can rename the entry it holds.
+- **The `x86_64-pc-windows-gnu` cross build is a compile check and stays one.** The whole suite
+  runs natively on `windows-2022`, against the host toolchain, which is also what the release
+  binaries are built with. What the `cross` build proves is that the crate still compiles for
+  Windows from a Linux machine, in both flavors, before anything reaches a runner.
+- **The two lock opens and the `\\?\` extraction are Windows-only code paths**, and they run on
+  the Windows runner rather than nowhere: their tests are `#[cfg(windows)]`, and the native
+  `cargo test` in that job is what executes them. What they claim: that two launchers of one
+  entry both take the shared lock, and that a prune can rename the entry it holds.
 
 One stated limitation, rather than a gap: **a Linux or macOS artifact cross-built *on* Windows
 records 0o644 for every file.** There is no mode word to read there, and the launcher repairs
@@ -669,10 +705,14 @@ runtime's parent, and `docs/dev/log/D2.md` records the build sizes and the wine 
 
 ## macOS
 
-macOS support is **verified structurally on Linux — the packaging half — and has never been run
-on a Mac.** The same distinction the Windows section draws applies here, with a different line:
-Windows has run its stub under wine; nothing built for macOS has run anywhere, because there is
-no way to execute a Mach-O on this host at all, wine included.
+macOS support is **packaged, launched and signature-checked on both Mac architectures, on every
+push.** The `macos` job of `.github/workflows/ci.yml` builds the darwin stub natively on
+`macos-15-intel` and `macos-14` — there is no macOS toolchain on Linux, so it comes from there and
+from nowhere else — packages the `hello_ffi` fixture, runs `codesign --verify --strict` over
+ginary's own output, starts the artifact, asserts its arguments, its `priv` file and its exit
+code, and verifies the signature *again* afterwards to prove the launcher did not touch its own
+file to extract itself. What a Linux machine still cannot do is any of that, which is why the
+packaging half below is the half this repository checks on every run of the suite.
 
 What macOS packaging *is*: ordinary self-contained-executable packaging, the technique Burrito
 and Bakeware both use and the same one any macOS app-bundler applies. A Mach-O has no room to
@@ -720,22 +760,22 @@ What works, and is checked on every run of the suite:
   is recorded in `docs/dev/log/D3.md` as scoped out of this pass: it needs `repack_one`
   generalised over object format and a Mach-O-aware strip, neither of which exists yet.
 
-What only a Mac can confirm, and is the GitHub Actions milestone on a `macos-15-intel`/`macos-14`
-runner:
+What only a Mac can confirm, and what the `macos-15-intel` and `macos-14` runners do confirm on
+every push:
 
 - **No darwin stub exists on this machine, because there is no macOS toolchain on Linux to build
   one with.** `--stub` and `GINARY_STUB_DIR` are the only ways a darwin build gets one here, and
   without either the honest answer is the same `StubError::NotFound` naming the CI release build,
   that every other missing stub gets.
-- **`codesign --verify --strict` has never been run against ginary's own output**, and neither
-  has Gatekeeper's quarantine check. An ad-hoc signature satisfies the kernel's load-time
-  requirement, which is what is checked here; it does **not** satisfy Gatekeeper on a file
-  downloaded from the network — a quarantined ad-hoc-signed binary still prompts the user, and
-  clearing that (or moving to a real Developer ID signature, later) needs a Mac to test against.
-- **No Mach-O artifact has ever been executed.** Structurally: the section is there, the
-  signature load command is there, the locator finds the payload back. Actually launching one —
-  the BEAM starting, the port programs resolving, the whole pipeline this repository packages —
-  is untested until a `macos-15-intel`/`macos-14` runner does it.
+- **Gatekeeper's quarantine check is not covered, and will not be.** `codesign --verify --strict`
+  runs against ginary's own output on both runners and passes; that is the kernel's load-time
+  requirement, which is what an ad-hoc signature is for. It does **not** satisfy Gatekeeper on a
+  file downloaded from the network — a quarantined ad-hoc-signed binary still prompts the user.
+  Clearing that needs a real Developer ID signature, which is out of scope for v1.
+- **Launching a Mach-O artifact is a runner's job, not this machine's.** The BEAM starting, the
+  port programs resolving and the whole packaged pipeline are exercised by the `macos` job on
+  `macos-15-intel` and `macos-14`; on Linux what is checked is structural — the section is there,
+  the signature load command is there, the locator finds the payload back.
 
 `docs/dev/log/D3.md` records why the crate the plan named did not end up as a dependency, the
 technique `sign_macos.rs` is built on instead, the injection and structural-verification

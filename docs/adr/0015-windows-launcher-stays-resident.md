@@ -123,25 +123,33 @@ The Windows launcher is **two processes where unix has one**. A `ps` on Windows 
 artifact and `erl.exe` beneath it; the artifact's own memory is the launcher's, which is small
 and idle for the whole run, and one extra process is the price of there being no `execve`.
 
-Most of the above is **compiled and not run**. `mise run build:windows` builds both flavors for
-`x86_64-pc-windows-gnu` and `stubs:build` produces the stub, and the stub *does* start under the
-`cross` image's wine — it prints its payloadless-stub sentence and exits 2, which exercises
-`target::Target::host`, `selfexe::open_self`'s `current_exe` route and `trailer::read_from`'s
-`seek_read` loop. Nothing beyond that runs on a Linux machine.
+**On a Linux machine most of the above is compiled and not run**, and that has not changed.
+`mise run build:windows` builds both flavors for `x86_64-pc-windows-gnu` and `stubs:build`
+produces the stub, and the stub *does* start under the `cross` image's wine — it prints its
+payloadless-stub sentence and exits 2, which exercises `target::Target::host`,
+`selfexe::open_self`'s `current_exe` route and `trailer::read_from`'s `seek_read` loop. Nothing
+beyond that runs here. What runs the rest is a Windows runner, and the paragraph after next says
+exactly how much of it.
 
-The `windows` job of `.github/workflows/ci.yml` runs the suite natively, and what that job
-reaches of this decision is **two of its mechanisms and not four**: the share-mode lock, through
-the `cfg(windows)` regression tests that take `SharedLock` twice over one entry, and
-`win32::process_is_alive`, through `cache::sweep`'s. **The spawn, the job object and the console
-handler have still never run**, anywhere: the job builds both flavors, runs `cargo test` and
-probes `erl.exe`, and it starts no packaged artifact, while no test in the tree constructs a
-`LaunchPlan` and calls `launch_windows::run` — the one call site is `launcher::start`, reached by
-a launching artifact and by nothing else. The pure rules underneath all of them — the cache root,
-the `\\?\` prefix, the two share modes, the exit-code mapping, the launch program and the Windows
-launch plan — are unit-tested on Linux precisely because that is all a Linux machine can honestly
-check.
+The `windows` job of `.github/workflows/ci.yml` runs the suite natively, and since E23 it reaches
+**every mechanism of this decision**. Two of them it has reached all along and cheaply: the
+share-mode lock, through the `cfg(windows)` regression tests that take `SharedLock` twice over one
+entry, and `win32::process_is_alive`, through `cache::sweep`'s. The other three — **the spawn, the
+job object and the console control handler** — are reached by one thing only, a real Windows
+artifact starting a real runtime, and that is what the job's `Package, run and verify a hello_ffi
+artifact` step now does: it packages the `hello_ffi` fixture against the runtime `setup-beam`
+installs and starts it four times: once as `GINARY_CMD=selftest`, then — after
+`GINARY_CMD=uninstall` has removed the entry the selftest just filled, so that the next start
+really does have to extract before it can spawn — once on a cold cache, once on a warm one, and
+once on `halt(3)`. The one call site of `launch_windows::run` is `launcher::start`,
+reached by a launching artifact and by nothing else, so no test constructs a `LaunchPlan` and none
+needs to: the artifact is the test. The pure rules underneath all of them — the cache root, the
+`\\?\` prefix, the two share modes, the exit-code mapping, the launch program and the Windows launch
+plan — stay unit-tested on Linux, because a pure function checked on the machine that changes it
+is checked sooner than one checked on a runner.
 `tests/regressions/e15_the_adr_credited_the_windows_job_with_a_spawn_that_never_ran.rs` derives
-both premises from the tree rather than trusting this paragraph.
+every premise of this paragraph from the tree rather than trusting it, and it derives them in both
+directions: a job that goes back to building without launching puts the "never run" sentence back.
 
 One of the platform facts `docs/dev/log/D2.md` left to a real Windows host is now **measured**
 rather than assumed — and the measurement is an inference from silence, not a number printed in a
@@ -163,8 +171,51 @@ step now captures the code, prints it and ends on a verdict of its own, so the n
 job records the number directly and this citation is to be replaced by that one.
 `docs/dev/log/E15.md` records the diagnosis, and
 `tests/regressions/e15_a_pwsh_step_ended_with_the_code_it_asserted.rs` holds every `pwsh` step to
-ending on a status of its own. What that milestone still owes is the `otp_win64_<version>.zip`
-layout and the end-to-end run of a real artifact, on the same runner.
+ending on a status of its own.
+
+**Both debts that milestone left are paid, and here is the run that paid them.** It owed the
+`otp_win64_<version>.zip` layout and the end-to-end run of a real artifact on the same runner, and
+E23 is both at once. The first execution was run
+[34015391532](https://github.com/P4suta/ginary/actions/runs/34015391532), job
+[101438136143](https://github.com/P4suta/ginary/actions/runs/34015391532/job/101438136143); the
+run cited below is [34018931746](https://github.com/P4suta/ginary/actions/runs/34018931746), job
+[101447799420](https://github.com/P4suta/ginary/actions/runs/34018931746/job/101447799420), which
+is the same job after review made its cold-cache launch genuinely cold. Both are green on
+`windows-2022`, OTP 29.0.5 / erts-17.0.5, and both printed what they did rather than leaving it to
+be inferred:
+
+```text
+== the erts source this build was given ==
+[tools.ginary.target."windows-x86_64"]
+erts = 'dir:D:\a\_temp\.setup-beam\otp'
+
+size: 11052039 bytes = 7170048 stub + 3881927 payload + 64 trailer
+5660672  erts-17.0.5/bin/beam.smp.dll
+ 185856  erts-17.0.5/bin/erlexec.dll
+ 138752  erts-17.0.5/bin/erl.exe
+  67072  erts-17.0.5/bin/inet_gethost.exe
+extract: PASS
+preflight: PASS
+run: PASS
+removed C:\Users\runneradmin\AppData\Local\ginary\hello_ffi\9e364e28cb42d1c4
+total: 1 removed, 0 kept
+args=0 hello world
+hello from priv
+cwd=d:/a/ginary/ginary
+the artifact exited 0 on its first run
+the artifact exited 0 on its second, warm-cache run
+halt(3) through the launcher left exit code 3
+```
+
+Three things in that transcript were assumptions before it. **`beam.smp.dll` is the name**,
+measured off a real tree rather than taken from documentation, and it sits beside `erl.exe` and
+`inet_gethost.exe` where `otp.rs` looks for them. **The cache root is
+`%LOCALAPPDATA%\ginary\<app>\<id>`**, printed by the `uninstall` that empties it — the rule
+`cache_dir` implements on Windows and which until now only a unit test had ever evaluated.
+And the launch itself: the artifact extracted, preflighted, started on a cache it had to fill
+itself, printed its arguments and its `priv` file, ran a second time out of a warm one, and left
+`3` behind for `%ERRORLEVEL%` — through `run`'s own spawn-and-wait, not through a bare `erl`. The
+layout is no longer an assumption and the spawn is no longer a claim.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows

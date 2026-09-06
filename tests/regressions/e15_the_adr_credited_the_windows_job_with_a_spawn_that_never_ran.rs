@@ -24,13 +24,22 @@
 //! `#[allow(unsafe_code)]` is supposed to get and then answer it with a job
 //! that never called the code.
 //!
-//! **The correct behaviour.** The claim is derivable, so it is derived: while
-//! no test calls `launch_windows::run` and no step of the `windows` job starts
-//! a packaged artifact, the ADR has to keep recording the spawn, the job
-//! object and the console handler as unrun. The day one of those premises
-//! stops holding, this test fails and points at the sentence to update.
+//! **The correct behaviour.** The claim is derivable, so it is derived, and in
+//! both directions: while no test calls `launch_windows::run` and no step of
+//! the `windows` job starts a packaged artifact, the ADR has to record the
+//! spawn, the job object and the console handler as unrun; once one of those
+//! premises stops holding it has to stop saying so, and name what reaches
+//! them instead.
+//!
+//! **E23 is the day that happened.** The `windows` job now packages a
+//! `hello_ffi` artifact against the runtime `setup-beam` installs and starts
+//! it, which is the only thing that constructs a `LaunchPlan` and calls
+//! `launch_windows::run` anywhere. This file did what it was written to do: it
+//! went red on the workflow change and pointed at the sentence to rewrite. It
+//! stays, aimed the other way, because a claim that drifted twice can drift
+//! back.
 
-use crate::common::repo::{read, root, workflow_steps};
+use crate::common::repo::{WorkflowStep, read, root, workflow_steps};
 
 /// The ADR this file holds to the tree.
 const ADR: &str = "docs/adr/0015-windows-launcher-stays-resident.md";
@@ -110,41 +119,126 @@ fn what_would_run_the_spawn() -> Vec<String> {
     reachable
 }
 
-/// Every command the `windows` job of the CI workflow runs.
-fn windows_job_commands() -> Vec<String> {
+/// The name of the packaged application the `windows` job builds and starts.
+///
+/// The same fixture the macOS job packages, so that what the two runners prove
+/// differs in the operating system and in nothing else.
+const ARTIFACT: &str = "hello_ffi-windows-x86_64";
+
+/// Every step of the `windows` job of the CI workflow, in file order.
+fn windows_steps() -> Vec<WorkflowStep> {
     workflow_steps(".github/workflows/ci.yml")
         .into_iter()
         .filter(|step| step.job == "windows")
-        .flat_map(|step| step.commands())
-        .filter(|command| !command.is_empty())
         .collect()
 }
 
+/// The variable a pwsh script assigns the packaged artifact's path to.
+///
+/// Reading the *mechanism* rather than a substring of a path is the whole
+/// difference between this scanner and the one it replaces. The first version
+/// asked whether any command of the job mentioned `ginary.exe`, which is true
+/// of `cp target/stub/release/ginary.exe …` and of the line that resolves the
+/// command line tool — neither of which starts anything. A job that copies a
+/// file is not a job that launches an application, and a rule that cannot tell
+/// them apart reports the ADR as stale on a tree where it is exact.
+fn artifact_variable(script: &str) -> Option<String> {
+    for line in script.lines() {
+        let line = line.trim();
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        if !right.contains(ARTIFACT) {
+            continue;
+        }
+        let name = left.trim();
+        if let Some(bare) = name.strip_prefix('$')
+            && !bare.is_empty()
+            && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Some(name.to_owned());
+        }
+    }
+    None
+}
+
+/// Whether the `windows` job packages an application and then starts it.
+///
+/// Two facts, both required. A job that builds an artifact and never runs it
+/// is what this repository had before E23, and it leaves `launch_windows::run`
+/// unexecuted however much it builds; a job that runs something it did not
+/// package is not running this launcher.
+fn windows_job_starts_a_packaged_artifact() -> bool {
+    let steps = windows_steps();
+    let packages = steps.iter().any(|step| {
+        step.commands()
+            .iter()
+            .any(|command| command.contains("build --target windows-x86_64"))
+    });
+    let starts = steps.iter().any(|step| {
+        let Some(variable) = artifact_variable(&step.run) else {
+            return false;
+        };
+        // `& $artifact …` — pwsh's call operator, the one way a script runs a
+        // program it has a path to.
+        step.commands().iter().any(|command| {
+            command
+                .trim()
+                .strip_prefix("& ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .is_some_and(|word| word == variable)
+        })
+    });
+    packages && starts
+}
+
 #[test]
-fn no_test_and_no_ci_step_reaches_the_windows_spawn() {
+fn the_scanner_tells_a_copy_from_a_launch() {
+    // The half that made the old rule wrong. Both of these name a ginary
+    // binary and neither starts an application.
+    assert_eq!(
+        artifact_variable("cp target/stub/release/ginary.exe target/stubs/ginary-stub.exe\n"),
+        None,
+        "a copy assigns nothing and starts nothing"
+    );
+    assert_eq!(
+        artifact_variable(
+            "$ginary = Join-Path $env:GITHUB_WORKSPACE 'target\\release\\ginary.exe'"
+        ),
+        None,
+        "the path of the command line tool is not the path of a packaged application"
+    );
+    assert_eq!(
+        artifact_variable(
+            "$artifact = Join-Path $project 'build\\ginary\\hello_ffi-windows-x86_64.exe'"
+        )
+        .as_deref(),
+        Some("$artifact"),
+        "and the one assignment that does name the packaged application is found"
+    );
+}
+
+#[test]
+fn the_windows_job_reaches_the_spawn_and_the_adr_says_which_step_does() {
     let reachable = what_would_run_the_spawn();
     assert!(
         reachable.is_empty(),
         "`{THE_SPAWN}..)` is reachable from the suite now — {reachable:?}. That is a better \
          tree than the one this test was written against, and it means the sentence in {ADR} \
-         recording the spawn as unrun has to be rewritten around what those tests prove"
+         naming the CI job as the only thing that reaches the spawn has to be rewritten around \
+         what those tests prove"
     );
-
-    let commands = windows_job_commands();
     assert!(
-        !commands.is_empty(),
+        !windows_steps().is_empty(),
         "the `windows` job of .github/workflows/ci.yml runs nothing, so this test is measuring \
          a job that no longer exists"
     );
-    let starts_an_artifact: Vec<&String> = commands
-        .iter()
-        .filter(|command| command.contains("ginary.exe") || command.contains("release\\ginary"))
-        .collect();
     assert!(
-        starts_an_artifact.is_empty(),
-        "the `windows` job starts a packaged artifact now — {starts_an_artifact:?} — which is \
-         the end-to-end run {ADR} says that milestone still owes. Both statements in the ADR \
-         change together"
+        windows_job_starts_a_packaged_artifact(),
+        "the `windows` job no longer packages an application and starts it. That step is the \
+         only execution the spawn, the job object and the console control handler have \
+         anywhere, and {ADR} rests an `#[allow(unsafe_code)]` on describing them accurately: \
+         without it the ADR has to go back to recording all three as unrun"
     );
 }
 
@@ -160,30 +254,59 @@ fn flowed(text: &str) -> String {
 #[test]
 fn the_adr_credits_the_windows_job_with_what_it_actually_runs() {
     let adr = flowed(&read(ADR));
+    let exercised = windows_job_starts_a_packaged_artifact();
+
+    // The sentence this file was written to defend, and the reason it is now
+    // forbidden rather than required: while nothing started a packaged
+    // artifact it was the exact truth, and the moment something does it is a
+    // stale claim about an `#[allow(unsafe_code)]`. Both readings are wrong at
+    // the other time, so the premise decides which one the ADR must carry.
+    let unrun = "The spawn, the job object and the console handler have still never run";
+    if exercised {
+        assert!(
+            !adr.contains(unrun),
+            "the `windows` job packages an application and starts it, so {ADR} may no longer \
+             say `{unrun}`: that step is the first execution those three mechanisms have ever \
+             had"
+        );
+        for needle in [
+            // Which job, so the claim can be re-read rather than believed.
+            "`windows` job",
+            // And what it does there, so a job that goes back to building
+            // without launching is a visible difference rather than a silent
+            // one.
+            "hello_ffi",
+        ] {
+            assert!(
+                adr.contains(needle),
+                "{ADR} rests an `#[allow(unsafe_code)]` on saying what exercises the spawn, the \
+                 job object and the console control handler, and it does not mention `{needle}`"
+            );
+        }
+    } else {
+        assert!(
+            adr.contains(unrun),
+            "nothing in the tree starts a packaged Windows artifact, so {ADR} has to say so: \
+             `{unrun}`"
+        );
+    }
+
     for forbidden in [
         "the console handler and the share-mode lock run nowhere but the",
         "console handler and the share-mode lock run nowhere",
     ] {
         assert!(
             !adr.contains(forbidden),
-            "{ADR} credits the `windows` job with the spawn, the job object and the console \
-             handler. That job runs two `cargo build`s, one `cargo test` and the exit-code \
-             probe: nothing in it constructs a `LaunchPlan`, and the same paragraph goes on to \
-             say the end-to-end run of a real artifact is still owed. Offending text: \
-             `{forbidden}`"
+            "{ADR} credits the `windows` job with more than one sentence can carry. What that \
+             job reaches has to be named step by step, because the same paragraph once claimed \
+             a spawn it never ran. Offending text: `{forbidden}`"
         );
     }
-    assert!(
-        adr.contains("The spawn, the job object and the console handler have still never run"),
-        "{ADR} has to keep saying that the spawn, the job object and the console handler have \
-         run nowhere, because {} calls `{THE_SPAWN}..)` and no test does",
-        ONLY_CALLER
-    );
     for needle in ["share-mode lock", "win32::process_is_alive"] {
         assert!(
             adr.contains(needle),
-            "{ADR} names what the `windows` job does reach of this decision, and `{needle}` is \
-             one of the two: a reader who is told the spawn is unrun has to be told what is not"
+            "{ADR} names what the `windows` job reaches of this decision, and `{needle}` is one \
+             of them: a reader told about the spawn has to be told about the rest"
         );
     }
 }

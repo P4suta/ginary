@@ -30,7 +30,9 @@ no Erlang installation. Five phases, A through E, built it:
   catalog (`ginary otp`), and native-code reconciliation for the NIFs and port programs a
   shipment carries.
 - **Phase D — Windows and macOS.** The resident Windows launcher, and the Mach-O section payload
-  with ad-hoc signing for macOS.
+  with ad-hoc signing for macOS. Both are packaged, launched and checked on their own runners:
+  `windows-2022` builds an artifact and starts it, and `macos-15-intel` and `macos-14` do the
+  same with `codesign --verify --strict` on either side of the run.
 - **Phase E — the verification matrix.** The CI job matrix, the release-please and distribute
   workflows, the coverage and version-consistency gates, and the v1 readiness sweep.
 
@@ -108,5 +110,22 @@ no Erlang installation. Five phases, A through E, built it:
 - The payload's compressor is flushed after `ginary.json` and `ginary.index.json`, so the two
   entries every reader takes on their own decode without the rest of the stream. `ginary inspect`
   can therefore still say what a damaged artifact was supposed to be.
+- The `windows` CI job packages a real application and starts it, which it did not do before. It
+  built both flavors, ran the suite and probed a bare `erl.exe`, so the Windows launcher — the
+  spawn, the job object and the console control handler — had never executed anywhere. It now
+  builds an artifact against the runtime `setup-beam` installs and runs it as a
+  `GINARY_CMD=selftest`, then — after `GINARY_CMD=uninstall` empties the cache the selftest
+  filled — on a genuinely cold cache, on a warm one, and on `halt(3)`: the exit code reaches
+  `%ERRORLEVEL%` through ginary's own launcher rather than through the emulator alone. Both
+  probes are kept, because a failure that could be either is a failure nobody can read.
+- The documents say what the runners prove. `README.md` and `docs/dev/v1-readiness.md` described
+  the macOS launch as something that had never happened, while both Mac runners had been
+  packaging, launching and signature-checking an artifact on every push;
+  `docs/dev/v1-readiness.md` carried it as `CI-gated`, which it defines as never marked done. The
+  release provenance is now the one deferred item, because it is the one thing that has never
+  run: no release has been cut.
+- A Windows runtime path in `gleam.toml` is documented as a TOML *literal* string —
+  `erts = 'dir:C:\Users\you\otp'`. `\U`, `\t` and `\x` are escapes inside a basic string, so the
+  double-quoted spelling is not the path it looks like and is usually not valid TOML at all.
 
 [Unreleased]: https://github.com/P4suta/ginary/commits/main

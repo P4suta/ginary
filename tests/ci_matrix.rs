@@ -413,6 +413,145 @@ fn the_windows_exit_code_probe_records_the_code_it_observed() {
     );
 }
 
+/// The fixture the Windows job packages, and the artifact `ginary build`
+/// leaves behind for it.
+///
+/// The same fixture the macOS job packages, so that what the two runners prove
+/// differs in the platform and in nothing else.
+const WINDOWS_ARTIFACT: &str = "hello_ffi-windows-x86_64";
+
+/// Every step of the `windows` job of the CI workflow, in file order.
+fn windows_steps() -> Vec<WorkflowStep> {
+    let steps: Vec<WorkflowStep> = workflow_steps(".github/workflows/ci.yml")
+        .into_iter()
+        .filter(|step| step.job == "windows")
+        .collect();
+    assert!(
+        !steps.is_empty(),
+        "the `windows` job of .github/workflows/ci.yml declares no steps"
+    );
+    steps
+}
+
+/// The step that packages a real application and starts it.
+///
+/// Looked up by the artifact it produces rather than by its name, so renaming
+/// the step keeps the rules and deleting it fails them.
+///
+/// # Panics
+///
+/// If no step of the Windows job builds a packaged application any more.
+fn windows_artifact_step() -> WorkflowStep {
+    windows_steps()
+        .into_iter()
+        .find(|step| {
+            step.commands().iter().any(|command| {
+                // As words, not as a substring: `commands()` joins a backslash
+                // continuation with one space and leaves the next line's
+                // indentation in the middle of the command, so a build wrapped
+                // for width reads `build   --target` and a substring rule
+                // silently stops matching the job it exists to watch.
+                command
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("build --target windows-x86_64")
+            })
+        })
+        .expect(
+            "the `windows` job has to keep the step that runs `ginary build --target \
+             windows-x86_64`: it is the only execution `launch_windows::run` — the spawn, the \
+             job object and the console control handler — has anywhere",
+        )
+}
+
+#[test]
+fn the_windows_job_packages_and_runs_an_artifact() {
+    let step = windows_artifact_step();
+    let commands = step.commands();
+    let script = commands.join("\n");
+
+    // The runtime is the one this job installed, named as a `dir:` source in
+    // the fixture's own `gleam.toml`. `ginary build` has no `--erts` flag and
+    // never had one — the macOS job died at argument parsing on two
+    // consecutive runs for assuming it did
+    // (`tests/regressions/e6_the_macos_job_passed_a_flag_the_cli_does_not_have.rs`)
+    // — so a Windows tree reaches the build the same way a darwin one does.
+    assert!(
+        script.contains("INSTALL_DIR_FOR_OTP"),
+        "{step} has to package against the runtime `setup-beam` installed, whose root that job \
+         exports as `INSTALL_DIR_FOR_OTP`:\n{script}"
+    );
+    assert!(
+        script.contains("dir:"),
+        "{step} has to name that runtime as a `dir:` erts source in the fixture's `gleam.toml`; \
+         a `windows-x86_64` build accepts no other kind:\n{script}"
+    );
+    assert!(
+        script.contains("GINARY_STUB_DIR") || step.env.contains_key("GINARY_STUB_DIR"),
+        "{step} has to point `ginary build` at the stub this job built; without one the build \
+         falls back to the running executable, which is the command line tool:\n{script}"
+    );
+
+    // And it starts what it packaged. This is the whole point of the job: the
+    // spawn, the job object and the console control handler are reached by a
+    // real Windows artifact starting a real runtime and by nothing else.
+    let starts_it = commands.iter().any(|command| {
+        command.contains(WINDOWS_ARTIFACT) && !command.trim_start().starts_with("cp ")
+    });
+    assert!(
+        starts_it,
+        "{step} builds `{WINDOWS_ARTIFACT}` and never runs it. Packaging alone is what the job \
+         did before this milestone, and it left `launch_windows::run` unexecuted:\n{script}"
+    );
+}
+
+#[test]
+fn the_windows_artifact_run_asserts_the_code_the_launcher_carried() {
+    let step = windows_artifact_step();
+    let script = step.commands().join("\n");
+    assert_eq!(
+        step.shell, "pwsh",
+        "{step} decides what its last line means by naming its shell, the way every other \
+         Windows step in this job does"
+    );
+    // `halt(3)` through the launcher, not through `erl`. The bare probe next
+    // door proves the emulator leaves 3 behind; this one proves ginary's own
+    // spawn-and-mirror carries it to `%ERRORLEVEL%`, which is the contract
+    // `launch_windows::run` states and the one D2 left to a real Windows host.
+    assert!(
+        script.contains("$LASTEXITCODE"),
+        "{step} has to read the code its artifact left; a run whose exit status nobody looks at \
+         proves the process started and nothing else:\n{script}"
+    );
+    assert!(
+        script.contains("::error::"),
+        "{step} has to name what went wrong in a line GitHub renders as an error, so a failure \
+         arrives as a sentence rather than as a number:\n{script}"
+    );
+    assert!(
+        script.contains("GINARY_DEBUG"),
+        "{step} has to print the launcher's own phase log when the artifact fails. It is the \
+         only view of a launch this repository can get off a runner it does not own:\n{script}"
+    );
+}
+
+#[test]
+fn the_windows_job_keeps_the_bare_runtime_probe_beside_the_artifact_run() {
+    // Two probes, two facts, and the pair is what makes a failure readable.
+    // The bare `erl` proves the platform fact — `halt(3)` reaches a parent as
+    // the process exit code — and the artifact proves ginary's fact, that its
+    // launcher carries that code across a spawn it owns. With only the second,
+    // a red job says "3 did not arrive" and cannot say which of the two broke.
+    let probe = exit_code_probe();
+    let artifact = windows_artifact_step();
+    assert_ne!(
+        probe.position, artifact.position,
+        "the bare runtime probe and the artifact run have collapsed into one step, and a single \
+         failure can no longer tell an emulator that lost the code from a launcher that did"
+    );
+}
+
 #[test]
 fn the_smoke_matrix_job_bootstraps_binfmt_and_runs_the_committed_script() {
     let ci = read(".github/workflows/ci.yml");

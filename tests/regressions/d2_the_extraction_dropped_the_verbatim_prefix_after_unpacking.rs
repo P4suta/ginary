@@ -20,8 +20,10 @@
 //!
 //! **This test does not run on Linux.** `long_path` is the identity here by
 //! design, so there is no length limit to hit and nothing to observe; it
-//! compiles for `x86_64-pc-windows-gnu` and `docs/dev/log/D2.md` lists the
-//! claim among the ones the GitHub Actions milestone has to check.
+//! compiles for `x86_64-pc-windows-gnu` here, and it *runs* in the `windows`
+//! job of `.github/workflows/ci.yml`, whose `cargo test` is native.
+//! `docs/dev/log/D2.md` listed the claim among the ones a real Windows host had
+//! to check; that host now checks it on every push.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
