@@ -136,18 +136,19 @@ jobs:
           cp target/release/ginary "dist/release/ginary-$version-${{ matrix.target }}"
           cargo build --release --locked --no-default-features
           cp target/release/ginary "dist/release/ginary-stub-$version-${{ matrix.target }}"
-      - name: Repack the OTP catalog tarball for this target
-        run: |
-          cargo run --quiet --locked -- otp repack \
-            --upstream-tag OTP-29.0.5 --targets "${{ matrix.target }}" --out dist/release
-        env:
-          # `ginary otp repack` reads the upstream release through the GitHub
-          # API. An unauthenticated read is limited to 60 an hour by source
-          # address, which every hosted runner in a pool shares, and the answer
-          # over it is a 403 nothing retries its way out of. `contents: read` is
-          # all this needs; the token moves the read onto this repository's own
-          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
-          GITHUB_TOKEN: ${{ github.token }}
+      # No repack step, and that is the codebase's own answer rather than an
+      # omission. `catalog::upstream_asset` is the one mapping the repack
+      # pipeline takes a target through, and it names `linux-*` and nothing
+      # else: `ginary otp repack --targets macos-aarch64` exits non-zero with
+      # `gleam-community/erlang-linux-builds has no asset for
+      # macos-aarch64:default`. `catalog::erlef_upstream_asset` names what
+      # `erlef/otp_builds` publishes and is called by nothing — it is a pinned
+      # fact, not a code path — because running the repack end to end needs
+      # `repack_one` generalised over object format and a Mach-O-aware strip,
+      # which `docs/dev/log/D3.md` records as scoped out. This job asked for it
+      # anyway and would have died here on the first release anybody cut. See
+      # tests/regressions/e23_the_release_asked_repack_for_a_target_it_cannot_build.rs,
+      # which derives the rule from that mapping rather than from a list.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}

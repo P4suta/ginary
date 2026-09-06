@@ -515,3 +515,6 @@ mod e22_an_unauthenticated_api_read_was_refused_without_saying_why;
 mod e22_the_release_state_was_read_from_a_document_the_release_cannot_edit;
 #[path = "regressions/e23_the_documents_said_the_launches_had_never_happened.rs"]
 mod e23_the_documents_said_the_launches_had_never_happened;
+#[cfg(feature = "cli")]
+#[path = "regressions/e23_the_release_asked_repack_for_a_target_it_cannot_build.rs"]
+mod e23_the_release_asked_repack_for_a_target_it_cannot_build;

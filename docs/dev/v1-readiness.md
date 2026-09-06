@@ -183,9 +183,12 @@ failure.
 - **There is no Windows runtime in the catalog, so a Windows artifact is built on Windows.**
   `ginary otp repack` produces the Linux and macOS catalog tarballs and no `windows-x86_64` one,
   and `distribute.yml` therefore publishes none: the upstream a Windows entry would be repacked
-  from is `otp_win64_<version>.zip`, a different shape from the tarballs the other targets take
-  (Linux comes from `gleam-community/erlang-linux-builds`, macOS from `erlef/otp_builds`), and
-  reading it is a milestone of its own rather than a line of this one. What that costs is
+  from is `otp_win64_<version>.zip`, a different shape from the tarballs `gleam-community/erlang-linux-builds`
+  publishes, and reading it is a milestone of its own rather than a line of this one. **The
+  catalog is Linux-only**, and macOS is in the same position for a different reason:
+  `catalog::erlef_upstream_asset` names what `erlef/otp_builds` publishes and nothing calls it,
+  because running the repack end to end needs `repack_one` generalised over object format and a
+  Mach-O-aware strip, which `docs/dev/log/D3.md` records as scoped out. What that costs is
   `erts = "catalog"` for Windows and nothing else. **Cross-building to Windows still works**: a
   `windows-x86_64` build takes `erts = 'dir:…'` naming a tree somebody unpacked from
   `otp_win64_<version>.zip`, and that tree may sit on a Linux or macOS build machine — assembly
