@@ -371,7 +371,13 @@ fn a_project_whose_manifest_is_unreadable_is_a_failure() {
 fn sbom_writes_the_document_beside_the_artifact_and_says_where() {
     let dir = tempdir();
     let artifact = SyntheticArtifact::build(dir.path());
-    let expected: PathBuf = dir.path().join(format!("{APP}.spdx.json"));
+    // The native Windows fixture needs an executable suffix. The SBOM name
+    // retains that suffix instead of deriving its name only from the app name.
+    let expected: PathBuf = dir.path().join(if cfg!(windows) {
+        format!("{APP}.exe.spdx.json")
+    } else {
+        format!("{APP}.spdx.json")
+    });
 
     let assert = ginary().arg("sbom").arg(artifact.path()).assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");

@@ -790,6 +790,7 @@ jobs:
           path: |
             target/assurance/formal
             .cache/tla/states
+          include-hidden-files: true
           retention-days: 30
           if-no-files-found: warn
   required:

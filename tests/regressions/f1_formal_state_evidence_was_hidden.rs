@@ -4,7 +4,13 @@
 
 #[test]
 fn formal_upload_retains_the_scoped_hidden_model_states() {
-    let workflow = crate::common::repo::yaml(".github/workflows/nightly.yml");
+    for workflow in [".github/workflows/ci.yml", ".github/workflows/nightly.yml"] {
+        assert_formal_upload(workflow);
+    }
+}
+
+fn assert_formal_upload(workflow_path: &str) {
+    let workflow = crate::common::repo::yaml(workflow_path);
     let steps = workflow["jobs"]["formal"]["steps"]
         .as_sequence()
         .expect("formal job steps");
@@ -30,6 +36,6 @@ fn formal_upload_retains_the_scoped_hidden_model_states() {
             .as_mapping_get("include-hidden-files")
             .and_then(saphyr::YamlOwned::as_bool),
         Some(true),
-        "TLC states below .cache must survive upload-artifact's default hidden filtering"
+        "{workflow_path}: TLC states below .cache must survive upload-artifact's default hidden filtering"
     );
 }

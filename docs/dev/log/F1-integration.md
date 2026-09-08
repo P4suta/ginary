@@ -68,3 +68,30 @@ count fixture and E21 timing fixture are unchanged. The 80 canonical divisions,
 946 candidates and 94 native jobs in the earlier F1 logs describe their recorded
 snapshots; they are not claims about this integrated enumeration. No new mutation
 baseline or mutation execution is claimed by this recount.
+
+The integrated native planner then preserved and routed all 960 candidates exactly once:
+920 Linux, 38 Windows and two macOS candidates across 95 nonempty native jobs. The canonical
+empty payload tail remains in the plan. This is discovery qualification, not mutant execution;
+`integration-mutation-plan/qualification.json` retains the plan and source identities.
+
+## First integrated execution and corrections
+
+The full Windows fault-injection run completed every planned test with 2,134 successful,
+37 explicitly skipped, one failed and none unrun or interrupted. E23's Windows synthetic
+artifact is named `hello.exe`; one pre-existing SBOM assertion still expected `hello.spdx.json`.
+The actual `hello.exe.spdx.json` output follows the F1 artifact-filename contract. The assertion
+now explicitly accounts for the Windows executable suffix. All 23 SBOM tests and the complete
+CI-matrix/assurance targets passed on rerun; the original full failure remains available in
+`integration-tests-faults/`, with corrected targets in `integration-repair-faults/`.
+
+[The first PR CI run](https://github.com/P4suta/ginary/actions/runs/34279370766) completed
+17 jobs successfully, with that same single assertion failing Windows and therefore the
+Required CI aggregate. Both real macOS build/launch/signature jobs, all three Linux test
+configurations, cross-platform stubs, cross-Linux smoke, MSRV 1.88 and both coverage gates
+passed. CodeQL passed independently. These successes do not make the failed run a passing gate.
+
+Downloading the first CI run's `formal-evidence` confirmed that it contained the Java/TLC logs
+but no states. The hidden-state regression was extended to both CI and nightly, observed to
+fail for CI, and then passed after the same narrowly scoped upload option was added to CI.
+The downloaded incomplete artifact and RED/GREEN logs remain in
+`integration-formal-upload-red/` and `integration-ci-formal-{red,green}/`.
