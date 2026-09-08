@@ -23,9 +23,11 @@ use ginary::cache;
 
 /// Builds `<root>/hello/<key>/ginary.json`, a cache with one entry in it.
 fn cache_with_one_entry(root: &Path) {
-    let entry = root.join("hello").join("0123456789abcdef");
-    std::fs::create_dir_all(&entry).expect("create the entry");
-    std::fs::write(entry.join("ginary.json"), b"{}").expect("write the manifest");
+    crate::common::cachefs::plant_entry(
+        &root.join("hello"),
+        "0123456789abcdef",
+        std::time::Duration::ZERO,
+    );
 }
 
 /// Every `--app` value that is not a single path component.
@@ -86,7 +88,7 @@ fn clean_still_empties_the_application_it_was_named() {
     cache_with_one_entry(&root);
 
     let report = cache::clean(&root, Some("hello")).expect("a name that is one component");
-    assert_eq!(report.removed, vec![root.join("hello")]);
+    assert_eq!(report.removed, vec![root.join("hello/0123456789abcdef")]);
     assert!(!root.join("hello").exists());
     assert!(root.is_dir(), "the cache root itself stays");
 }

@@ -1,4 +1,5 @@
 /target/
+/tools/mutation-plan/target/
 /.cache/
 /build/
 # The repack pipeline writes 40 MB tarballs and one small catalog into dist/otp.
@@ -13,3 +14,4 @@ tests/fixtures/*/build/
 *.log
 *.snap.new
 *.profraw
+__pycache__/

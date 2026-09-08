@@ -147,18 +147,19 @@ fn the_readme_carries_a_target_status_matrix() {
             "the README status matrix has no row for `{target}`"
         );
     }
-    // The three axes the spec names, distinct from the prose that already
-    // mentions the targets: a matrix says, per target, whether it builds here,
-    // runs here, and runs on CI.
-    assert!(
-        readme.contains("runs on CI"),
-        "the status matrix has to distinguish `runs here` from `runs on CI`, which the current \
-         prose does not"
-    );
-    assert!(
-        readme.contains("builds") && readme.contains("runs here"),
-        "the matrix columns name where each target builds and runs"
-    );
+    // F1 separates the evidence required for each target from evidence actually
+    // observed for a particular commit; an old author's host is not a product status.
+    assert!(readme.contains("| target | required execution evidence |"));
+    for target in ginary::target::ALL {
+        assert!(
+            readme
+                .lines()
+                .any(|line| line.starts_with(&format!("| `{}` |", target.name()))),
+            "every supported target needs its own execution evidence row"
+        );
+    }
+    assert!(readme.contains("do not establish that a particular"));
+    assert!(readme.contains("execution evidence"));
 }
 
 /// Markdown with every HTML comment removed.
@@ -230,18 +231,14 @@ fn the_readme_badges_point_at_the_published_repository() {
 }
 
 #[test]
-fn the_readme_carries_the_one_paragraph_v1_summary() {
+fn the_readme_reports_the_development_version_without_claiming_a_release() {
     let readme = read("README.md");
-    // The README top no longer calls the project Alpha; it states what v1
-    // delivers, mirroring the readiness sweep's `## What v1 delivers`.
-    assert!(
-        !readme.contains("**Alpha.**"),
-        "the README still calls the project Alpha; v1 replaces that with the delivery summary"
-    );
-    assert!(
-        readme.contains("v1"),
-        "the README top carries the one-paragraph v1 summary"
-    );
+    assert!(readme.contains(&format!(
+        "**Development version {}.**",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(readme.contains("There is no release yet"));
+    assert!(readme.contains("Workflow definitions describe the required checks"));
 }
 
 // ---------------------------------------------------------- CHANGELOG --

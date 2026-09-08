@@ -216,10 +216,11 @@ fn every_statement_of_the_exception_covers_the_call_that_is_not_the_launchers() 
 /// The comment is the fourth statement of the same fact the three prose ones
 /// carry, and the one that decides what the crate may reach: a call that is
 /// made and not named here is a call nobody agreed to.
-const RUSTIX_CALLS: [(&str, &str); 5] = [
+const RUSTIX_CALLS: [(&str, &str); 6] = [
     ("fcntl_setfd", "`fcntl`"),
     ("flock", "`flock`"),
     ("getuid", "`getuid`"),
+    ("renameat_with", "`renameat_with`"),
     ("syncfs", "`syncfs`"),
     ("test_kill_process", "`kill(pid, 0)`"),
 ];

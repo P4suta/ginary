@@ -1,119 +1,125 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Running a child process under a deadline, from a test.
+//! The configured subprocess executor used by the integration-test harness.
 //!
-//! Two helpers spawn a real program: `fixture::FixtureProject::export_shipment`
-//! runs `gleam`, and `erl::run_staged` boots a whole BEAM. Neither may hang the
-//! test binary. `Command::output` would: it waits forever, and a runtime that
-//! fails to halt would cost the suite its own timeout with no diagnosis at all.
-//!
-//! `src/process.rs` is the product-side answer to the same hazard, and it is
-//! deliberately not what this calls. `run_with_timeout` takes a program and
-//! `&str` arguments and returns captured text; both callers here need an
-//! environment built from nothing, a working directory, `OsString` arguments
-//! and the child's exit *code*. What they borrow is the discipline rather than
-//! the signature, and the two are the same discipline: stdin is the null
-//! device, so `-noshell` can never block on the harness's terminal; both pipes
-//! are drained by their own threads, so a chatty child cannot fill one and
-//! stop; and a child that outlives its budget is killed and reported.
+//! Tests and product probes share bounded capture and child cleanup. A harness
+//! failure prints the retained evidence and, when `GINARY_TEST_EVIDENCE_DIR` is
+//! configured, saves exact stream bytes and a machine-readable report there.
 
-use std::io::Read;
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output};
+use std::time::Duration;
 
-/// How often a running child is polled for completion.
-const POLL: Duration = Duration::from_millis(20);
+use ginary::process::{CAPTURE_LIMIT, ProcessReport, run_command, wait_child};
 
-/// How long the readers get to reach end of file after the child has exited.
-///
-/// Exiting closes the child's own ends of the pipes, so this is slack for the
-/// reader threads to be scheduled rather than a second budget.
-const DRAIN_GRACE: Duration = Duration::from_secs(10);
-
-/// Runs `command` to completion within `budget`, capturing both output streams.
-///
-/// `what` names the child in every panic message, because a test that fails
-/// here has usually failed for a reason outside its own assertions.
+/// Runs a configured command within `budget`, capturing both output streams.
 ///
 /// # Panics
 ///
-/// If the program cannot be spawned or waited for, if it does not exit within
-/// `budget` — it is killed first — or if its output cannot be drained within
-/// [`DRAIN_GRACE`] of its exit, which means something the child left running
-/// still holds the pipes.
+/// If spawning, waiting, cleanup, or complete capture fails. A nonzero exit is
+/// returned to the caller, with evidence saved when its directory is configured.
 pub fn run_bounded(command: &mut Command, budget: Duration, what: &str) -> Output {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot run {what}: {error}"));
-    wait_bounded(child, budget, what)
+    collect(run_command(command, budget, CAPTURE_LIMIT), what)
 }
 
-/// Waits for an already-spawned `child` within `budget`, capturing both output
-/// streams.
+/// Observes an already-spawned child, retaining its output even on timeout.
 ///
-/// The half of [`run_bounded`] that a caller which had to spawn the child
-/// itself still needs. `tests/common/artifact.rs` is one: a launcher spawn
-/// retries on `ETXTBSY` before there is a child to wait for, and
-/// `tests/launcher.rs` starts eight children at once and waits for them
-/// afterwards. Neither may wait forever, because a launcher that deadlocks on
-/// the cache is exactly the bug these tests exist to catch and a suite that
-/// hung would report it as a timeout with no diagnosis.
-///
-/// `child` must have been spawned with both output streams piped; a stream
-/// that was not is read as empty.
+/// The budget starts now. Both output streams should have been piped when the
+/// child was spawned. Callers running several children concurrently account for
+/// the time each has already been running before they start waiting for it.
 ///
 /// # Panics
 ///
 /// As [`run_bounded`].
-pub fn wait_bounded(mut child: Child, budget: Duration, what: &str) -> Output {
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+pub fn wait_bounded(child: Child, budget: Duration, what: &str) -> Output {
+    collect(wait_child(child, budget, CAPTURE_LIMIT), what)
+}
 
-    let deadline = Instant::now() + budget;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!(
-                    "{what} did not exit within {}s and was killed",
-                    budget.as_secs()
-                );
+/// Saves a failure before turning the detailed product report into `Output`.
+fn collect(report: ProcessReport, what: &str) -> Output {
+    let complete = report.stdout.is_complete() && report.stderr.is_complete();
+    let cleanup_ok = report
+        .cleanup
+        .as_ref()
+        .is_none_or(|cleanup| cleanup.reaped && cleanup.error.is_none());
+    let healthy = report.error.is_none() && report.status.is_some() && complete && cleanup_ok;
+    let saved = if !healthy || !report.success() {
+        std::env::var_os("GINARY_TEST_EVIDENCE_DIR").map(|directory| {
+            match persist_evidence(&report, what, Path::new(&directory)) {
+                Ok(path) => format!("evidence saved in {}", path.display()),
+                Err(error) => format!(
+                    "cannot save evidence in {}: {error}",
+                    Path::new(&directory).display()
+                ),
             }
-            Err(error) => panic!("cannot wait for {what}: {error}"),
-        }
-    };
-
-    Output {
-        status,
-        stdout: collect(stdout, what, "standard output"),
-        stderr: collect(stderr, what, "standard error"),
-    }
-}
-
-/// Reads a pipe to the end on a thread of its own.
-fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
-    if let Some(mut pipe) = pipe {
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            let _ = sender.send(buffer);
-        });
+        })
     } else {
-        let _ = sender.send(Vec::new());
+        None
+    };
+    if let Some(saved) = &saved {
+        eprintln!("{what}: {saved}");
     }
-    receiver
+    assert!(
+        healthy,
+        "{what}: {}; elapsed={}ms; status={:?}; cleanup={:?}; stdout omitted={} EOF={} error={:?}: {}; stderr omitted={} EOF={} error={:?}: {}; {}",
+        report
+            .error
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "incomplete process observation".to_owned()),
+        report.elapsed.as_millis(),
+        report.status,
+        report.cleanup,
+        report.stdout.omitted_bytes,
+        report.stdout.complete,
+        report.stdout.error,
+        report.stdout.text(),
+        report.stderr.omitted_bytes,
+        report.stderr.complete,
+        report.stderr.error,
+        report.stderr.text(),
+        saved
+            .as_deref()
+            .unwrap_or("set GINARY_TEST_EVIDENCE_DIR to retain evidence files")
+    );
+    Output {
+        status: report.status.expect("healthy report has an exit status"),
+        stdout: report.stdout.bytes,
+        stderr: report.stderr.bytes,
+    }
 }
 
-/// Takes what a reader thread collected, or says who is still holding the pipe.
-fn collect(reader: Receiver<Vec<u8>>, what: &str, stream: &str) -> Vec<u8> {
-    reader.recv_timeout(DRAIN_GRACE).unwrap_or_else(|error| {
-        panic!("cannot read the {stream} of {what}: {error}; something it started still holds it")
-    })
+/// Stores bounded, exact output and metadata in a unique directory for this call.
+fn persist_evidence(
+    report: &ProcessReport,
+    what: &str,
+    directory: &Path,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    let evidence = tempfile::Builder::new()
+        .prefix(&format!("process-{}-", std::process::id()))
+        .tempdir_in(directory)?;
+    std::fs::write(evidence.path().join("stdout.bin"), &report.stdout.bytes)?;
+    std::fs::write(evidence.path().join("stderr.bin"), &report.stderr.bytes)?;
+    let stream = |output: &ginary::process::CapturedOutput| {
+        serde_json::json!({
+            "retained_bytes": output.bytes.len(), "omitted_bytes": output.omitted_bytes,
+            "eof": output.complete, "read_error": output.error,
+        })
+    };
+    let cleanup = report.cleanup.as_ref().map(|cleanup| serde_json::json!({
+        "pid": cleanup.pid, "kill_requested": cleanup.kill_requested,
+        "reaped": cleanup.reaped, "background_reaper": cleanup.background_reaper, "error": cleanup.error,
+    }));
+    let metadata = serde_json::json!({
+        "schema_version": 1, "what": what, "elapsed_ms": report.elapsed.as_millis(),
+        "success": report.success(), "status": report.status.map(|status| status.to_string()),
+        "exit_code": report.status.and_then(|status| status.code()),
+        "cause": report.error.as_ref().map(ToString::to_string), "cleanup": cleanup,
+        "stdout": stream(&report.stdout), "stderr": stream(&report.stderr),
+    });
+    std::fs::write(
+        evidence.path().join("report.json"),
+        serde_json::to_vec_pretty(&metadata)?,
+    )?;
+    Ok(evidence.keep())
 }

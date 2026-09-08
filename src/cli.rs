@@ -66,7 +66,7 @@ pub const CACHE_FORMAT_VERSION: u32 = 1;
 pub const SIZE_REPORT_FORMAT_VERSION: u32 = 1;
 
 /// Version of the `build --report json` schema.
-pub const BUILD_FORMAT_VERSION: u32 = 1;
+pub const BUILD_FORMAT_VERSION: u32 = 2;
 
 /// Width of the label column in the `elf deps` table.
 ///
@@ -98,7 +98,8 @@ windows onto the individual phases of a build.
 Seven targets are supported: Linux gnu and musl on x86_64 and aarch64, macOS on x86_64
 and arm64, and Windows on x86_64. A cross build needs a stub and a runtime for the
 target it names — `ginary otp` manages the runtimes and `ginary doctor` reports what
-this machine already has.",
+this machine already has.
+Use `build --target` to select targets and `verify` to check the resulting artifacts.",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -121,6 +122,20 @@ pub enum Command {
         /// Print a JSON object instead of human-readable lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Write a local diagnostic summary and JSON without executing the artifact.
+    Diagnose {
+        /// Optional packaged application to inspect.
+        artifact: Option<PathBuf>,
+        /// Optional JSON Lines trace to summarize.
+        #[arg(long, value_name = "PATH")]
+        trace: Option<PathBuf>,
+        /// Optional Erlang crash dump to summarize.
+        #[arg(long, value_name = "PATH")]
+        crashdump: Option<PathBuf>,
+        /// New directory for summary.txt and report.json.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
     },
     /// Package the Gleam project in this directory into one executable.
     ///
@@ -223,7 +238,7 @@ pub enum Command {
         /// Write an SPDX 2.3 bill of materials beside the artifact.
         #[arg(long)]
         sbom: bool,
-        /// Where the bill of materials goes. Implies `--sbom`.
+        /// SBOM file for one target, or directory for multiple targets. Implies `--sbom`.
         #[arg(long = "sbom-out", value_name = "PATH")]
         sbom_out: Option<PathBuf>,
         /// Say what each phase is doing, on standard error.
@@ -265,7 +280,7 @@ pub enum Command {
         /// The artifact to describe.
         #[arg(value_name = "EXE")]
         path: PathBuf,
-        /// Where to write the document. Defaults to `<app>.spdx.json` beside
+        /// Where to write the document. Defaults to `<artifact-filename>.spdx.json` beside
         /// the artifact.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
@@ -493,6 +508,21 @@ pub enum OtpCommand {
         /// is fetched into this directory, so a second run costs nothing.
         #[arg(long, value_name = "DIR")]
         upstream_dir: Option<PathBuf>,
+        /// Installed OTP root to repack locally; requires exactly one target.
+        #[arg(long, value_name = "DIR", conflicts_with = "upstream_dir")]
+        root: Option<PathBuf>,
+    },
+    /// Validate and merge target distribution folders locally. Publishes nothing.
+    Merge {
+        /// Directory holding `dist-<target>` folders.
+        #[arg(long, value_name = "DIR")]
+        inputs: PathBuf,
+        /// New destination directory for the verified distribution inventory.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Release version recorded in the inventory.
+        #[arg(long)]
+        version: String,
     },
 }
 
@@ -827,7 +857,78 @@ pub fn value_conflict(command: &Command) -> Option<String> {
 pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
     match command {
         Command::Version { json } => write_version(&VersionReport::current(), *json, out),
-        Command::Doctor { json } => write_doctor(&doctor::Report::gather(), *json, out),
+        Command::Doctor { json } => {
+            let report = doctor::DetailedReport::gather();
+            if *json {
+                write_json(out, &report)
+            } else {
+                out.write_all(report.render_text().as_bytes())
+                    .context("cannot write doctor report")
+            }
+        }
+        Command::Diagnose {
+            artifact,
+            trace,
+            crashdump,
+            out: directory,
+        } => {
+            anyhow::ensure!(
+                !directory.exists(),
+                "diagnostic destination already exists: {}",
+                directory.display()
+            );
+            let parent = directory
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            anyhow::ensure!(
+                parent.is_dir(),
+                "diagnostic parent is not a directory: {}",
+                parent.display()
+            );
+            let report = crate::diagnose::gather(
+                artifact.as_deref(),
+                trace.as_deref(),
+                crashdump.as_deref(),
+            );
+            let work = tempfile::Builder::new()
+                .prefix(".ginary-diagnose-")
+                .tempdir_in(parent)?;
+            crate::output::atomic_write(
+                &work.path().join("report.json"),
+                &serde_json::to_vec_pretty(&report)?,
+            )?;
+            crate::output::atomic_write(
+                &work.path().join("summary.txt"),
+                report.render_text().as_bytes(),
+            )?;
+            // Creating the destination reserves it atomically. A concurrent
+            // directory is refused on every OS, including Unix where rename
+            // would otherwise replace an existing empty directory.
+            std::fs::create_dir(directory).with_context(|| {
+                format!(
+                    "cannot reserve new diagnostic directory {}",
+                    directory.display()
+                )
+            })?;
+            for name in ["report.json", "summary.txt"] {
+                std::fs::rename(work.path().join(name), directory.join(name)).with_context(
+                    || {
+                        format!(
+                            "diagnostic output is incomplete at {}: cannot publish {name}",
+                            directory.display()
+                        )
+                    },
+                )?;
+            }
+            writeln!(
+                out,
+                "diagnostics: {}\nsummary: {}",
+                directory.join("report.json").display(),
+                directory.join("summary.txt").display()
+            )?;
+            Ok(())
+        }
         Command::Build {
             out: dir,
             no_strip,
@@ -969,9 +1070,9 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                 anyhow::bail!("{}", cache::AppNameRefusal(app));
             }
             let dirs = cache::resolve_here(&cache::Env::from_env());
-            let report = cache::clean(&dirs.root, app.as_deref())
+            let report = cache::clean_detailed(&dirs.root, app.as_deref())
                 .with_context(|| format!("cannot clean the cache at {}", dirs.root.display()))?;
-            write_cache_clean(&dirs, app.as_deref(), &report, *json, out)
+            write_cache_clean_detailed(&dirs, app.as_deref(), &report, *json, out)
         }
         Command::Cache {
             command: CacheCommand::Prune { days, all, app },
@@ -1035,8 +1136,27 @@ pub fn dispatch(command: &Command, out: &mut impl Write) -> anyhow::Result<()> {
                     targets,
                     out: dir,
                     upstream_dir,
+                    root,
                 },
-        } => write_otp_repack(upstream_tag, targets, dir, upstream_dir.as_deref(), out),
+        } => write_otp_repack(
+            upstream_tag,
+            targets,
+            dir,
+            upstream_dir.as_deref(),
+            root.as_deref(),
+            out,
+        ),
+        Command::Otp {
+            command:
+                OtpCommand::Merge {
+                    inputs,
+                    out: dir,
+                    version,
+                },
+        } => {
+            let report = catalog::assemble_distribution(inputs, dir, version)?;
+            write_json(out, &report)
+        }
     }
 }
 
@@ -1103,6 +1223,34 @@ fn write_cache_clean(
     };
     writeln!(out, "total: {count} {noun}, {} bytes", report.bytes)
         .context("cannot write the cache summary to standard output")
+}
+
+fn write_cache_clean_detailed(
+    dirs: &cache::CacheDirs,
+    app: Option<&str>,
+    report: &cache::DetailedCleanReport,
+    json: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if json {
+        return write_json(
+            out,
+            &serde_json::json!({
+                "format_version": 2, "root": dirs.root, "app": app,
+                "removed": report.removed, "bytes": report.bytes,
+                "kept": report.kept.iter().map(|(path, reason)| serde_json::json!({"path": path, "reason": reason.describe()})).collect::<Vec<_>>()
+            }),
+        );
+    }
+    let legacy = cache::CleanReport {
+        removed: report.removed.clone(),
+        bytes: report.bytes,
+    };
+    write_cache_clean(dirs, app, &legacy, false, out)?;
+    for (path, reason) in &report.kept {
+        writeln!(out, "kept {}: {}", path.display(), reason.describe())?;
+    }
+    Ok(())
 }
 
 /// Turns the four stripping flags into the two booleans the module takes.
@@ -1520,6 +1668,7 @@ fn write_version(report: &VersionReport, json: bool, out: &mut impl Write) -> an
 /// Rendering is separated from [`doctor::Report::gather`] so that tests can
 /// assert on the output of a report they built themselves, without running the
 /// external programs `gather` probes.
+#[cfg(test)]
 fn write_doctor(report: &doctor::Report, json: bool, out: &mut impl Write) -> anyhow::Result<()> {
     if json {
         write_json(out, report)
@@ -1544,7 +1693,7 @@ pub struct BuildJsonReport {
     /// when the document could not be written — in which case the command
     /// fails and says why on standard error. The text report's last line is
     /// `sbom: <path>`, so both forms name every file the command produced and
-    /// a machine consumer never has to re-derive `<out dir>/<app>.spdx.json`
+    /// a machine consumer never has to re-derive `<artifact path>.spdx.json`
     /// or remember what it passed to `--sbom-out`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sbom: Option<String>,
@@ -1557,9 +1706,6 @@ fn write_build(
     sbom_request: &SbomRequest,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let project = gleam::find_project(&flags.start)?;
-    let config = ProjectConfig::read(&project.manifest())?;
-    let options = BuildOptions::merge(project.root(), &config, flags)?;
     // Layered rather than replaced: `-v` is a request for the phases on
     // standard error, and it may not take away a `GINARY_TRACE` file the user
     // asked for in the same breath. `-v` is exactly `GINARY_DEBUG=1` for the
@@ -1570,35 +1716,202 @@ fn write_build(
     }
     let diag = Diag::from_env(&env);
 
-    // Before the build and not after it: a `--sbom-out` in a directory that
-    // does not exist is a mistake in the command line, and a build is minutes
-    // of work to spend discovering one.
-    if let Some(destination) = sbom_request.out.as_deref() {
-        check_sbom_destination(destination)?;
-    }
+    let operation = diag.operation("build");
+    let mut unattempted = Vec::new();
+    let preparation = (|| -> anyhow::Result<_> {
+        let project = gleam::find_project(&flags.start)?;
+        let config = ProjectConfig::read(&project.manifest())?;
+        let options = BuildOptions::merge(project.root(), &config, flags)?;
+        unattempted = options.targets.clone();
+        let destinations = plan_build_sboms(&options, sbom_request)?;
+        let stub = std::env::current_exe().context("cannot resolve the build executable")?;
+        bundle::validate_output_paths(&options, &stub, &destinations)?;
+        if !destinations.is_empty()
+            && options.otp_root.is_none()
+            && options.targets.iter().any(|target| {
+                matches!(
+                    options.erts_spec(*target),
+                    Ok(crate::erts_source::ErtsSourceSpec::Host)
+                )
+            })
+        {
+            let mut host_options = options.clone();
+            host_options.otp_root = Some(otp::discover(None)?.root);
+            bundle::validate_output_paths(&host_options, &stub, &destinations)?;
+        }
+        if options.targets.len() > 1
+            && sbom_request.wanted
+            && let Some(directory) = &sbom_request.out
+        {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("cannot create SBOM directory {}", directory.display()))?;
+        }
+        Ok((project, options, destinations))
+    })();
+    let (project, options, destinations) = match preparation {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            operation.finish(false, &[("stage", "preflight"), ("completed", "0")]);
+            if report == ReportFormat::Json {
+                write_json(
+                    out,
+                    &serde_json::json!({
+                        "format_version": BUILD_FORMAT_VERSION, "status": "failed",
+                        "stage": "preflight", "targets": [], "failed_target": null,
+                        "unattempted": unattempted, "requested_targets": flags.targets,
+                        "staging": null, "warnings": [], "sboms": [], "sbom_errors": [],
+                        "error": error.to_string(), "causes": error_causes(error.as_ref())
+                    }),
+                )?;
+            }
+            return Err(error);
+        }
+    };
 
-    let built = bundle::build(&options, &diag)?;
-    let artifact = built.out.clone();
-
-    // The document is written before the report, so that the report can name
-    // it: `--report json` is one JSON document and a path appended after it
-    // would not be in it. An artifact that is on disk still has to be named on
-    // standard output whatever happens next, though — a caller that saw only
-    // `cannot write the SBOM` could not tell this run from a build that
-    // produced nothing — so a failure emits the report without the SBOM member
-    // first and returns the error after.
-    let written = if sbom_request.wanted {
-        match write_sbom_for(&artifact, Some(project.root()), sbom_request.out.as_deref()) {
-            Ok(written) => Some(written),
-            Err(error) => {
-                write_build_report(report, built, None, out)?;
-                return Err(error);
+    let mut written = Vec::new();
+    let mut sbom_errors = Vec::new();
+    let result = bundle::build_finalized(&options, &diag, |targets| {
+        for target in targets {
+            if !sbom_request.wanted {
+                break;
+            }
+            let Some((_, destination)) = options
+                .targets
+                .iter()
+                .zip(&destinations)
+                .find(|(value, _)| **value == target.target)
+            else {
+                sbom_errors.push(serde_json::json!({ "target": target.target, "reason": "completed target has no planned SBOM destination" }));
+                continue;
+            };
+            match write_sbom_for(&target.out, Some(project.root()), Some(destination)) {
+                Ok(path) => {
+                    written.push(serde_json::json!({ "target": target.target, "path": path }))
+                }
+                Err(error) => sbom_errors.push(
+                    serde_json::json!({ "target": target.target, "reason": format!("{error:#}") }),
+                ),
             }
         }
-    } else {
-        None
+    });
+    let targets = match &result {
+        Ok(built) => &built.targets,
+        Err(error) => &error.completed,
     };
-    write_build_report(report, built, written.as_deref(), out)
+    let successful = result.is_ok() && sbom_errors.is_empty();
+    operation.finish(successful, &[("completed", &targets.len().to_string())]);
+    if report == ReportFormat::Json {
+        let mut value = match &result {
+            Ok(built) => serde_json::to_value(BuildJsonReport {
+                format_version: BUILD_FORMAT_VERSION,
+                report: built.clone(),
+                sbom: written
+                    .first()
+                    .and_then(|row| row["path"].as_str())
+                    .map(str::to_owned),
+            })?,
+            Err(error) => serde_json::json!({
+                "format_version": BUILD_FORMAT_VERSION, "targets": error.completed,
+                "failed_target": error.failed_target, "unattempted": error.unattempted,
+                "staging": error.staging, "warnings": error.warnings,
+                "error": error.source.to_string(), "causes": error_causes(error.source.as_ref())
+            }),
+        };
+        value["status"] = serde_json::json!(if successful { "success" } else { "failed" });
+        value["sboms"] = serde_json::json!(written);
+        value["sbom_errors"] = serde_json::json!(sbom_errors);
+        write_json(out, &value)?;
+    } else {
+        match &result {
+            Ok(built) => write_build_report(report, built.clone(), None, out)?,
+            Err(error) => {
+                for completed in &error.completed {
+                    writeln!(out, "{}", completed.artifact_line())?;
+                }
+                if let Some(target) = error.failed_target {
+                    writeln!(out, "failed target: {target}")?;
+                }
+                for target in &error.unattempted {
+                    writeln!(out, "not run: {target}")?;
+                }
+                if let Some(staging) = &error.staging {
+                    writeln!(out, "staging: {}", staging.display())?;
+                }
+                for warning in &error.warnings {
+                    writeln!(out, "warning: {warning}")?;
+                }
+            }
+        }
+        for row in &written {
+            writeln!(
+                out,
+                "sbom: {} ({})",
+                row["path"].as_str().unwrap_or_default(),
+                row["target"].as_str().unwrap_or_default()
+            )?;
+        }
+        for row in &sbom_errors {
+            writeln!(
+                out,
+                "SBOM failed: {}",
+                row["reason"].as_str().unwrap_or_default()
+            )?;
+        }
+    }
+    result?;
+    anyhow::ensure!(
+        sbom_errors.is_empty(),
+        "{} SBOM output(s) failed; completed artifacts are listed in the report",
+        sbom_errors.len()
+    );
+    Ok(())
+}
+
+fn error_causes(error: &dyn std::error::Error) -> Vec<String> {
+    let mut causes = Vec::new();
+    let mut current = error.source();
+    while let Some(cause) = current {
+        causes.push(cause.to_string());
+        current = cause.source();
+    }
+    causes
+}
+
+fn plan_build_sboms(options: &BuildOptions, request: &SbomRequest) -> anyhow::Result<Vec<PathBuf>> {
+    if !request.wanted {
+        return Ok(Vec::new());
+    }
+    let multiple = options.targets.len() > 1;
+    if let Some(destination) = &request.out {
+        if multiple {
+            anyhow::ensure!(
+                !destination.exists() || destination.is_dir(),
+                "multiple targets require --sbom-out to name a directory: {}",
+                destination.display()
+            );
+        } else {
+            check_sbom_destination(destination)?;
+            anyhow::ensure!(
+                !destination.is_dir(),
+                "--sbom-out names a directory for a single target: {}",
+                destination.display()
+            );
+        }
+    }
+    Ok(options
+        .targets
+        .iter()
+        .map(|target| {
+            let default = sbom::out_path(&options.artifact_path(*target), &options.app);
+            match &request.out {
+                Some(directory) if multiple => {
+                    directory.join(default.file_name().unwrap_or_default())
+                }
+                Some(path) => path.clone(),
+                None => default,
+            }
+        })
+        .collect())
 }
 
 /// Writes one build's report in `report`'s form, naming `sbom` when there is
@@ -1769,15 +2082,37 @@ pub struct VerifyJsonReport {
 /// the command is the table, and a caller that only saw the exit code would
 /// not know which file was wrong.
 fn write_verify(path: &Path, json: bool, out: &mut impl Write) -> anyhow::Result<()> {
-    let report = verify::verify(path)?;
+    let detailed = match verify::verify_detailed(path) {
+        Ok(report) => report,
+        Err(error) => {
+            let checks = error.checks();
+            let error = anyhow::Error::new(error);
+            if json {
+                write_json(
+                    out,
+                    &serde_json::json!({
+                        "format_version": verify::VERIFY_FORMAT_VERSION,
+                        "path": path.display().to_string(),
+                        "status": "failed",
+                        "checks": checks,
+                        "error": error.to_string(),
+                        "causes": error.chain().skip(1).map(ToString::to_string).collect::<Vec<_>>(),
+                    }),
+                )?;
+            }
+            return Err(
+                error.context(if checks.contents == verify::CheckOutcome::NotRun {
+                    "verification incomplete; deep verification was not run"
+                } else {
+                    "payload integrity passed; deep verification incomplete"
+                }),
+            );
+        }
+    };
+    let report = &detailed.report;
 
     if json {
-        write_json(
-            out,
-            &VerifyJsonReport {
-                report: report.clone(),
-            },
-        )?;
+        write_json(out, &detailed)?;
     } else {
         out.write_all(report.render_text().as_bytes())
             .context("cannot write the verification to standard output")?;
@@ -1785,6 +2120,11 @@ fn write_verify(path: &Path, json: bool, out: &mut impl Write) -> anyhow::Result
 
     if report.ok() {
         Ok(())
+    } else if !report.payload.ok() {
+        anyhow::bail!(
+            "{}: payload integrity check failed; deep verification was not run",
+            path.display()
+        )
     } else {
         anyhow::bail!("{}: {} issue(s) found", path.display(), report.issues.len())
     }
@@ -1811,6 +2151,12 @@ fn write_sbom_for(
         // the artifact.
         None => sbom::out_path(artifact, sbom::application_name(&document)),
     };
+    anyhow::ensure!(
+        !crate::output::aliases(artifact, &path)?,
+        "SBOM output {} aliases input artifact {}",
+        path.display(),
+        artifact.display()
+    );
     sbom::write(&document, &path)?;
     Ok(path)
 }
@@ -2225,13 +2571,14 @@ fn write_otp_fetch(
     let dir = env.cache_root.join(selected.dir_name());
     let net = download::Net::from_vars(false, &download::Net::env_vars());
 
-    // Fetching is the network command, so an offline one is refused before it
-    // starts rather than after it has looked at a cache that cannot help.
-    if !catalog::is_complete(&dir) && net.offline {
-        let url = match catalog::resolve_url(&selected.entry.url, loaded.origin.dir()) {
-            catalog::SourceUrl::Remote(url) => url,
-            catalog::SourceUrl::File(path) => path.display().to_string(),
-        };
+    // Refuse remote cache misses before acquiring the extraction lock. A local
+    // archive remains usable offline and passes the same digest/size checks in
+    // ensure_otp as an archive downloaded over the network.
+    if !catalog::is_complete(&dir)
+        && net.offline
+        && let catalog::SourceUrl::Remote(url) =
+            catalog::resolve_url(&selected.entry.url, loaded.origin.dir())
+    {
         anyhow::bail!(download::DownloadError::Offline {
             url,
             dest_hint: dir,
@@ -2299,6 +2646,7 @@ fn write_otp_repack(
     targets: &[String],
     dir: &Path,
     upstream_dir: Option<&Path>,
+    root: Option<&Path>,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     let mut selectors = Vec::with_capacity(targets.len());
@@ -2321,7 +2669,10 @@ fn write_otp_repack(
     };
     let net = download::Net::from_vars(false, &download::Net::env_vars());
     let diag = Diag::from_env(&diag::EnvSnapshot::from_env());
-    let report = catalog::repack(&options, &net, &diag)?;
+    let report = match root {
+        Some(root) => catalog::repack_from_root(&options, root, &diag)?,
+        None => catalog::repack(&options, &net, &diag)?,
+    };
 
     for outcome in &report.outcomes {
         writeln!(

@@ -763,6 +763,162 @@ fn a_release_document_that_is_not_one_says_so_rather_than_guessing() {
     }
 }
 
+#[test]
+fn malformed_release_metadata_is_refused_before_downloading_or_publishing_an_asset() {
+    let cases = [
+        (b"{ invalid json".to_vec(), "line"),
+        (
+            serde_json::to_vec(
+                &serde_json::json!({"assets":[{"name":ASSET_NAME,"digest":"sha256:abc"}]}),
+            )
+            .unwrap(),
+            "no download URL",
+        ),
+        (
+            release_json(ASSET_NAME, Some("sha256:not-hex"), Some(1)),
+            "not a sha256",
+        ),
+    ];
+    for (document, reason) in cases {
+        let dir = tempdir();
+        let server = release_server(document, b"must not be requested");
+        let out = dir.path().join("out");
+        let error = repack_through(&server, &out, &dir.path().join("upstream")).unwrap_err();
+        assert!(
+            matches!(&error, RepackError::Api { message, .. } if message.contains(reason)),
+            "{error}"
+        );
+        assert_eq!(server.hits(ASSET_PATH), 0);
+        assert!(!out.join("catalog.json").exists());
+    }
+}
+
+#[test]
+fn repacking_preserves_dynamic_libc_and_native_feature_provenance() {
+    use std::io::Write;
+    for (selector, asset, interp, expected_kind, expected_min) in [
+        (
+            "linux-x86_64-gnu",
+            "erlang-29.0.5-x64-glibc.tar.gz",
+            "/lib64/ld-linux-x86-64.so.2",
+            "gnu",
+            Some("2.31"),
+        ),
+        (
+            "linux-x86_64-musl:dynamic",
+            "erlang-29.0.5-x64-musl.tar.gz",
+            "/lib/ld-musl-x86_64.so.1",
+            "musl",
+            None,
+        ),
+    ] {
+        let dir = tempdir();
+        let upstream = FakeUpstream::build("erlang-29.0.5", &[]);
+        // Independently supply the bytes from which the catalog derives JIT
+        // and OpenSSL provenance; the ELF inspection seam supplies only headers.
+        std::fs::write(
+            upstream
+                .root()
+                .join(format!("erts-{ERTS_VSN}/bin/beam.smp")),
+            b"beamasm\0OpenSSL incomplete\0OpenSSL 3.5.4 30 Sep 2025\0",
+        )
+        .unwrap();
+        let mut tar = tar::Builder::new(Vec::new());
+        tar.append_dir_all("erlang-29.0.5", upstream.root())
+            .unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&tar.into_inner().unwrap()).unwrap();
+        let upstream_dir = dir.path().join("upstream");
+        std::fs::create_dir(&upstream_dir).unwrap();
+        std::fs::write(upstream_dir.join(asset), gzip.finish().unwrap()).unwrap();
+        let info = ElfInfo {
+            interp: Some(interp.to_owned()),
+            needed: vec!["libc.so.6".to_owned()],
+            glibc_max: expected_min.map(str::to_owned),
+            ..static_x86_64()
+        };
+        let report = catalog::repack_with(
+            &options(&dir.path().join("out"), &upstream_dir, selector),
+            &Net::offline(),
+            &Diag::disabled(),
+            |_| Ok(info.clone()),
+        )
+        .unwrap();
+        let entry = &report.outcomes[0].entry;
+        assert_eq!(entry.linkage, "dynamic");
+        assert!(entry.nif_loading);
+        assert_eq!(entry.libc.kind, expected_kind);
+        assert_eq!(entry.libc.min.as_deref(), expected_min);
+        assert_eq!(entry.openssl, "3.5.4");
+        assert!(entry.jit);
+        assert_eq!(
+            entry.sha256,
+            crate::common::payload::sha256_hex(
+                &std::fs::read(&report.outcomes[0].tarball).unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn an_unknown_machine_or_hidden_dynamic_dependency_cannot_be_labeled_static() {
+    for (machine, needed, expected) in [
+        ("riscv64", Vec::new(), "machine"),
+        ("x86_64", vec!["libc.so.6".to_owned()], "linkage"),
+    ] {
+        let dir = tempdir();
+        let upstream = FakeUpstream::build("erlang-29.0.5", &[]);
+        let upstream_dir = dir.path().join("upstream");
+        upstream.write_in(&upstream_dir, ASSET_NAME);
+        let out = dir.path().join("out");
+        let info = ElfInfo {
+            machine: machine.to_owned(),
+            needed,
+            ..static_x86_64()
+        };
+        let error = catalog::repack_with(
+            &options(&out, &upstream_dir, "linux-x86_64-musl:static"),
+            &Net::offline(),
+            &Diag::disabled(),
+            |_| Ok(info.clone()),
+        )
+        .unwrap_err();
+        match (expected, error) {
+            ("machine", RepackError::UpstreamMismatch { actual, .. }) => {
+                assert!(actual.contains("riscv64"))
+            }
+            (
+                "linkage",
+                RepackError::UpstreamLinkage {
+                    claimed, actual, ..
+                },
+            ) => {
+                assert_eq!(claimed, "static");
+                assert_eq!(actual, "dynamic");
+            }
+            (_, error) => panic!("unexpected refusal: {error}"),
+        }
+        assert!(!out.join("catalog.json").exists());
+    }
+}
+
+#[test]
+fn the_public_repack_entry_point_refuses_non_native_emulator_bytes() {
+    let dir = tempdir();
+    let upstream = FakeUpstream::build("erlang-29.0.5", &[]);
+    let upstream_dir = dir.path().join("upstream");
+    upstream.write_in(&upstream_dir, ASSET_NAME);
+    let out = dir.path().join("out");
+    let error = catalog::repack(
+        &options(&out, &upstream_dir, "linux-x86_64-musl:static"),
+        &Net::offline(),
+        &Diag::disabled(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("beam.smp"), "{error}");
+    assert!(!out.join("catalog.json").exists());
+}
+
 // -------------------------------------------------------- the timestamps --
 
 #[test]

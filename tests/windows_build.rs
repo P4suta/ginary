@@ -4,12 +4,13 @@
 //! the scaffolding around all of it.
 //!
 //! The tree these tests read is a `FakeOtp::windows()`, which writes `erl.exe`,
-//! `beam.smp.dll`, `inet_gethost.exe` and `erl.ini` as plain files. That is the honest fixture: there is no
-//! Windows runtime on this machine and no way to make one, and every claim
-//! here is about *which names are in a directory* rather than about what any
-//! of them does. The one claim that needs a real `otp_win64_<version>.zip` —
-//! that the names in it are these names — is the GitHub Actions milestone, and
-//! `docs/dev/log/D2.md` records it as an open question rather than as a fact.
+//! `beam.smp.dll`, `inet_gethost.exe` and `erl.ini` as plain files. These
+//! structural fixtures run on every host: their claims concern directory
+//! contents, runtime-source validation and assembly. The real installed
+//! Windows runtime is exercised separately by `tests/e2e_hello.rs` and
+//! `tests/stage_run.rs` when Gleam and Erlang are available. The D2 log records
+//! the evidence and open questions at that historical milestone; it does not
+//! determine whether the current test machine has a real Windows runtime.
 //!
 //! The last five tests are the same shape as `tests/smoke_matrix.rs`: a task
 //! and four documents that nothing else would notice going stale.
@@ -166,17 +167,20 @@ fn the_erl_ini_beside_erl_exe_is_removed_and_its_size_accounted_for() {
 // ------------------------------------------ where a Windows runtime comes from --
 
 #[test]
-fn a_windows_build_may_only_take_its_runtime_from_a_directory() {
-    let unpacked = ErtsSourceSpec::Dir(PathBuf::from("/srv/otp_win64_29.0.5"));
-    assert!(
-        bundle::check_windows_erts(windows(), &unpacked, Os::Linux).is_ok(),
-        "a tree somebody unpacked from the upstream zip is the one source that can hold one"
-    );
+fn a_windows_cross_build_accepts_sources_whose_runtime_can_be_inspected() {
+    for source in [
+        ErtsSourceSpec::Dir(PathBuf::from("/srv/otp_win64_29.0.5")),
+        ErtsSourceSpec::Catalog,
+        ErtsSourceSpec::Tarball(PathBuf::from("/srv/otp-29.0.5-windows-x86_64.tar.zst")),
+    ] {
+        assert!(
+            bundle::check_windows_erts(windows(), &source, Os::Linux).is_ok(),
+            "an explicit source must reach verification of its actual Windows runtime"
+        );
+    }
 
     for spec in [
         ErtsSourceSpec::Host,
-        ErtsSourceSpec::Catalog,
-        ErtsSourceSpec::Tarball(PathBuf::from("/srv/otp-29.0.5-linux-x86_64-gnu.tar.zst")),
         ErtsSourceSpec::Docker("erlang:29".to_owned()),
     ] {
         let label = spec.label();
@@ -260,7 +264,7 @@ fn the_windows_build_task_builds_both_flavors_for_the_windows_triple() {
 }
 
 #[test]
-fn the_readme_records_what_windows_support_covers_and_what_is_untested() {
+fn the_readme_records_windows_runtime_contract_and_remaining_qualification() {
     let readme = read("README.md");
     let start = readme
         .find("\n## Windows")
@@ -268,10 +272,16 @@ fn the_readme_records_what_windows_support_covers_and_what_is_untested() {
     let rest = &readme[start + 1..];
     let section = rest.find("\n## ").map_or(rest, |end| &rest[..end]);
 
-    for needle in ["cross", "stub", "erl.exe", "GitHub Actions"] {
+    for needle in [
+        "share-mode",
+        "job object",
+        "erl.exe",
+        "native CI",
+        "MAX_PATH",
+    ] {
         assert!(
             section.contains(needle),
-            "the Windows section has to say what works and what has never been run: it mentions \
+            "the Windows section must state runtime behavior and qualification limits: it mentions \
              no `{needle}`"
         );
     }

@@ -93,16 +93,11 @@ abstractions, and each one is a place where the code is trusted rather than prov
   `pid != self_pid && is_alive(pid)` as "somebody is extracting into this very tree" rather than
   as "the owner is alive"; see the note on the operator. A model with a separate, recyclable pid
   space would also describe pid wraparound, which this one does not.
-- **A removal that a new extraction races.** `Trashed` is a state of the *entry*, so while a
-  prune holds one no launcher can act on that key at all. On disk the two are separate the moment
-  `PruneCheck` fires: `prune_app` renames `<app>/<key>` to `.<key>.trash-<pid>` and only then
-  removes the tree, so from that instant `<app>/<key>` does not exist and `ensure_extracted`
-  would take the miss and extract into it. An extraction concurrent with a `remove_dir_all` is
-  therefore outside the model. What makes that safe in the code is the same rename: the tree
-  being removed no longer has the name the new extraction is competing for, and the exclusive
-  lock the pruner holds is on the entry it renamed. Separating the trashed tree from the entry
-  name — a `trash` variable, with `entry[k]` going `Absent` at `PruneCheck` — is the way to model
-  it, and it is the first thing to do if this model is extended.
+- **A removal that a new extraction races is represented separately.** `PruneCheck` makes
+  `entry[k]` absent immediately and adds the old tree to `trash`. A new extractor may complete
+  the same key while the old tree is still being removed. `PruneRemove` only removes the trash
+  membership; it cannot delete the new entry or reset its rename count. Filesystem atomicity
+  and actual I/O failures remain assumptions as described above.
 - **More than one application.** The model is one `<app>` directory. Nothing in the protocol
   crosses application directories, and `cache::check_app` is what keeps it that way.
 
@@ -122,3 +117,12 @@ exist, that the configuration names the four invariants (one the `.cfg` does not
 never checks), that the task pins its checker, and that this document says what the model maps
 onto. None of that runs TLC; a model nobody runs is worse than no model, because it reads as
 evidence.
+
+The CI and Nightly workflows both execute the pinned checker through scripts/ci/formal.sh and
+retain its log and state directory for 30 days even on failure. Rust shape tests remain separate
+from actual TLC evidence. F1 found OpenJDK 25.0.2 outside PATH. The supported approval route
+allowed the official pinned JAR download and local execution after the ordinary sandbox
+refused network access and Java security-file initialization. TLC completed in 33 seconds:
+31,939 generated states, 7,860 distinct states, depth 29, all four temporal-property branches
+checked, and no error found. `.cache/assurance/F1/formal/availability.json` records the model,
+configuration and JAR hashes; `tlc-approved.log` preserves the actual checker output.

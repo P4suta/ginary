@@ -43,3 +43,12 @@ nightly workflow configures actually finish inside the budget it is given? A
 gate that cannot finish is not a gate. Re-measure and update the file when the
 suite's runtime changes materially; the workflow points at it by name so that
 the two move together.
+
+`mutants-F1-counts.json` preserves the earlier F1 discovery snapshot. The
+current source-count guard reads `mutants-F1-integration-counts.json`, which
+records a separate offline enumeration after integration with E23: 960
+candidates across the same seven modules. Verification grew from 107 to 121
+candidates, requiring ten canonical divisions to keep each at or below thirteen.
+The other module counts are unchanged. Source and discovery-output hashes are
+recorded for each module. Enumeration does not claim a baseline or an executed
+mutation, and neither count fixture replaces the historical timing measurements.

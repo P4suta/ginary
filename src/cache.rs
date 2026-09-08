@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! <root>/<app>/<key>/                 a complete entry; ginary.json proves it
-//! <root>/<app>/.<key>.tmp-<pid>/      one process's extraction in progress
+//! <root>/<app>/.<key>.tmp-<pid>-<id>/ one invocation's extraction in progress
 //! <root>/<app>/.<key>.corrupt-<pid>/  an entry that failed its own check
 //! ```
 //!
@@ -59,7 +59,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -542,9 +542,7 @@ pub fn prepare(env: &Env, uid: u32, warn: &mut dyn Write) -> Result<CacheDirs, L
 
 /// Resolves the Windows cache root and creates it.
 ///
-/// The shape of `prepare` — the unix half, and `#[cfg(unix)]`, so it is named
-/// here rather than linked: an intra-doc link to it is unresolvable in exactly
-/// the documentation build this function is documented in. The first
+/// The shape of Unix `prepare`, with the two differences Windows makes. The first
 /// is the fallback's name: `%TEMP%\ginary-<user>` rather than
 /// `${TMPDIR}/ginary-<uid>`, because there is no uid. The second is what
 /// creating it checks. The unix fallback lives in a directory every account on
@@ -781,11 +779,13 @@ fn reported(path: &Path) -> PathBuf {
 
 /// Removes the temporary and corrupt trees of dead processes from `app_dir`.
 ///
-/// A tree is `.<key>.tmp-<pid>` or `.<key>.corrupt-<pid>`, and it is removed
-/// when `is_alive` says no process with that id exists — or when the pid is
-/// this process's own, because a leftover of a previous run of *this* pid is
-/// by definition not in use. A tree whose process is alive is left alone and
-/// reported in
+/// A tree is `.<key>.tmp-<pid>-<id>` (or the legacy PID-only name) or
+/// `.<key>.corrupt-<pid>`, and it is removed
+/// when its exact cache name and manifest establish ownership, its owner is
+/// dead, and no runtime holds its lock. An unfinished residue may not have a
+/// manifest yet. Every live process is protected, including this process:
+/// concurrent library calls can still be extracting into its temporary tree.
+/// A tree whose process is alive is left alone and reported in
 /// [`SweepReport::kept`]: killing another launcher's extraction is worse than
 /// leaving a directory behind.
 ///
@@ -793,8 +793,21 @@ fn reported(path: &Path) -> PathBuf {
 ///
 /// [`LauncherError::Cache`] when `app_dir` exists and cannot be listed. A
 /// directory that is not there yet is an empty report, not an error.
-pub fn sweep(app_dir: &Path, self_pid: u32, diag: &Diag) -> Result<SweepReport, LauncherError> {
+pub fn sweep(app_dir: &Path, _self_pid: u32, diag: &Diag) -> Result<SweepReport, LauncherError> {
     let app_dir = walked(app_dir);
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Ok(SweepReport {
+                removed: Vec::new(),
+                kept: vec![reported(&app_dir)],
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SweepReport::default());
+        }
+        Err(error) => return Err(LauncherError::cache(reported(&app_dir), error)),
+    }
     let entries = match std::fs::read_dir(&app_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -804,24 +817,47 @@ pub fn sweep(app_dir: &Path, self_pid: u32, diag: &Diag) -> Result<SweepReport, 
     };
 
     let mut report = SweepReport::default();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                report.kept.push(reported(&app_dir));
+                continue;
+            }
+        };
         let name = entry.file_name();
         let Some(pid) = owner_pid(&name) else {
             continue;
         };
         let path = entry.path();
-        if pid != self_pid && is_alive(pid) {
+        if is_alive(pid) || !owned_sweep_tree(&path, &app_dir) {
             report.kept.push(reported(&path));
             continue;
         }
+        let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
+            report.kept.push(reported(&path));
+            continue;
+        };
+        if is_alive(pid) || !owned_sweep_tree(&path, &app_dir) {
+            report.kept.push(reported(&path));
+            continue;
+        }
+        // Windows cannot remove a directory while this lock file is open.
+        // Residues have no live writer and are not published runtime entries.
+        drop(lock);
         // Best effort: a removal that loses a race with another sweeper has
         // still reached the outcome this call was made for.
-        if std::fs::remove_dir_all(&path).is_ok() || !path.exists() {
-            report.removed.push(reported(&path));
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => report.removed.push(reported(&path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                report.removed.push(reported(&path));
+            }
+            Err(_) => report.kept.push(reported(&path)),
         }
     }
     report.removed.sort();
     report.kept.sort();
+    report.kept.dedup();
 
     diag.kv(
         "cache_sweep",
@@ -833,25 +869,26 @@ pub fn sweep(app_dir: &Path, self_pid: u32, diag: &Diag) -> Result<SweepReport, 
     Ok(report)
 }
 
-/// The process id a `.<key>.tmp-<pid>` or `.<key>.corrupt-<pid>` name carries.
+/// The process id a recognized temporary or corrupt residue name carries.
 ///
 /// [`None`] for every other name, which is how a complete entry and a
 /// directory somebody else put there are left alone.
 fn owner_pid(name: &OsStr) -> Option<u32> {
     let name = name.to_str()?;
-    if !name.starts_with('.') {
-        return None;
-    }
-    for prefix in [TMP_PREFIX, CORRUPT_PREFIX] {
-        let marker = format!(".{prefix}");
-        if let Some(position) = name.rfind(&marker) {
-            let digits = &name[position + marker.len()..];
-            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return digits.parse().ok();
-            }
-        }
-    }
-    None
+    let pid = residue_owner(name)?;
+    let (_, tail) = name.strip_prefix('.')?.split_once('.')?;
+    [TMP_PREFIX, CORRUPT_PREFIX]
+        .iter()
+        .any(|prefix| tail.starts_with(prefix))
+        .then_some(pid)
+}
+
+/// Automatic housekeeping never follows a directory link or overrides an
+/// existing invalid/foreign manifest, even if the name resembles a residue.
+fn owned_sweep_tree(path: &Path, app_dir: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        && maintenance_owns(path, app_dir, true)
 }
 
 /// Whether a process with this id exists.
@@ -955,14 +992,19 @@ pub fn ensure_extracted(
     create_app_dir(&writing)?;
     discard_incomplete(&writing, &key, pid);
 
-    // (2) Somebody else's leftovers, and our own from a previous run of this
-    // pid. A tree whose process is alive is another launcher's, and is left.
+    // (2) Dead owners' leftovers. A live PID includes other invocations of
+    // this library in this process, so its trees are always left alone.
     sweep(&writing, pid, diag)?;
 
-    // (3) The temporary tree this process extracts into.
-    let tmp = writing.join(format!(".{key}.{TMP_PREFIX}{pid}"));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir(&tmp).map_err(|source| LauncherError::cache(&tmp, source))?;
+    // (3) Exclusive ownership belongs to an invocation, not its PID. Never
+    // remove a preexisting candidate: tempfile retries with another random
+    // name, and a killed invocation leaves a recognizable owner-tagged tree.
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!(".{key}.{TMP_PREFIX}{pid}-"))
+        .rand_bytes(EXTRACTION_ID_LEN)
+        .tempdir_in(&writing)
+        .map_err(|source| LauncherError::cache(&writing, source))?
+        .keep();
     diag.kv("cache_tmp", &[("path", &tmp.display().to_string())]);
 
     // Every file the payload holds is written under this directory, and a cache
@@ -1054,12 +1096,13 @@ fn extract_into(
     tmp: &Path,
     diag: &Diag,
 ) -> Result<Manifest, LauncherError> {
-    let mut source = exe
-        .try_clone()
-        .map_err(|error| LauncherError::cache(tmp, error))?;
-    source
-        .seek(SeekFrom::Start(trailer.payload_offset))
-        .map_err(|error| LauncherError::cache(tmp, error))?;
+    // Cloning a File shares its cursor. Every read supplies this invocation's
+    // offset so two library calls can safely extract from the same open file.
+    let source = PayloadSource {
+        file: exe,
+        offset: trailer.payload_offset,
+        remaining: trailer.payload_len,
+    };
 
     let manifest = crate::payload::unpack(
         Corrupting::wrap(source),
@@ -1085,6 +1128,31 @@ fn extract_into(
     // test kills the process to prove the next run sweeps what is left.
     let _ = fault::point("after-extract");
     Ok(manifest)
+}
+
+/// A bounded reader whose offsets belong to this extraction invocation.
+struct PayloadSource<'a> {
+    file: &'a File,
+    offset: u64,
+    remaining: u64,
+}
+
+impl Read for PayloadSource<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = buffer
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        if count == 0 {
+            return Ok(0);
+        }
+        let end = self.offset.checked_add(count as u64).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "payload offset overflow")
+        })?;
+        crate::trailer::read_exact_at(self.file, &mut buffer[..count], self.offset)?;
+        self.offset = end;
+        self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 /// Renames the temporary tree onto the entry, or accepts the winner's.
@@ -1449,6 +1517,10 @@ pub enum KeptReason {
     /// away. It is reported rather than dropped, because a `kept` column that
     /// omits an entry makes the summary a count of nothing.
     Unremovable,
+    /// A live process owns this temporary, corrupt or trash tree.
+    Active,
+    /// The path is evidence or another file the cache does not own.
+    Unowned,
 }
 
 impl KeptReason {
@@ -1458,6 +1530,8 @@ impl KeptReason {
             Self::Locked => "locked",
             Self::Fresh => "fresh",
             Self::Unremovable => "unremovable",
+            Self::Active => "active",
+            Self::Unowned => "unowned",
         }
     }
 }
@@ -1531,6 +1605,13 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Answers whether the rename happened. `lock` is consumed either way, so a
 /// caller cannot keep holding a lock on a directory that is no longer there.
 fn rename_aside(path: &Path, aside: &Path, lock: crate::cache_lock::ExclusiveLock) -> bool {
+    // Unix rename may replace an empty destination directory. That directory
+    // can be residue another live operation still owns, so an existing name
+    // is a refusal even when this platform would permit replacing it.
+    match std::fs::symlink_metadata(aside) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) | Err(_) => return false,
+    }
     match rename_aside_order(crate::platform::HOST) {
         RenameAsideOrder::DropThenRename => {
             drop(lock);
@@ -1600,6 +1681,14 @@ pub fn prune_app(
         return report;
     }
     let app_dir = walked(app_dir);
+    if !std::fs::symlink_metadata(&app_dir)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        if app_dir.exists() {
+            report.kept.push((reported(&app_dir), KeptReason::Unowned));
+        }
+        return report;
+    }
     let Ok(entries) = std::fs::read_dir(&app_dir) else {
         return report;
     };
@@ -1623,6 +1712,14 @@ pub fn prune_app(
         if !manifest.is_file() {
             continue;
         }
+        if !is_cache_key(name)
+            || !std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || !maintenance_owns(&path, &app_dir, false)
+        {
+            report.kept.push((reported(&path), KeptReason::Unowned));
+            continue;
+        }
 
         if !options.all {
             let Ok(modified) = manifest.modified() else {
@@ -1643,6 +1740,11 @@ pub fn prune_app(
             report.kept.push((reported(&path), KeptReason::Locked));
             continue;
         };
+
+        if !maintenance_owns(&path, &app_dir, false) {
+            report.kept.push((reported(&path), KeptReason::Unowned));
+            continue;
+        }
 
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
         if !rename_aside(&path, &aside, lock) {
@@ -1701,56 +1803,132 @@ fn record_prune(report: &PruneReport, diag: &Diag) {
     );
 }
 
-/// Removes every trace of one application from the cache, lock permitting.
+/// Removes inactive runtime data of one application from the cache.
 ///
 /// This is what `GINARY_CMD=uninstall` runs. Unlike [`prune_app`] it has no
-/// age: everything goes, complete entries and the temporary, corrupt and
-/// trashed residue beside them, and the only thing that saves an entry is a
-/// process holding it. The application directory itself is removed when
-/// nothing is left in it.
+/// age: complete entries and residue are eligible, but a runtime lock or a
+/// live residue owner protects them. Crash dumps, unrelated paths and symlinks
+/// remain in place and are reported. An emptied application directory is
+/// removed only after at least one owned entry was reclaimed.
 ///
 /// Best effort throughout, and reported rather than fatal: a partial uninstall
 /// is a fact the caller has to be told, not a failure.
 pub fn uninstall(app_dir: &Path) -> PruneReport {
-    let mut report = PruneReport::default();
+    let report = clean_app(app_dir);
+    PruneReport {
+        removed: report.removed,
+        kept: report.kept,
+    }
+}
+
+/// Reclaims one application's owned directories without touching evidence.
+fn clean_app(app_dir: &Path) -> DetailedCleanReport {
+    let mut report = DetailedCleanReport::default();
     let app_dir = walked(app_dir);
-    let Ok(entries) = std::fs::read_dir(&app_dir) else {
-        return report;
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            report.kept.push((reported(&app_dir), KeptReason::Unowned));
+            return report;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(_) => {
+            report
+                .kept
+                .push((reported(&app_dir), KeptReason::Unremovable));
+            return report;
+        }
+    }
+    let entries = match std::fs::read_dir(&app_dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            report
+                .kept
+                .push((reported(&app_dir), KeptReason::Unremovable));
+            return report;
+        }
     };
     let pid = std::process::id();
 
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                report
+                    .kept
+                    .push((reported(&app_dir), KeptReason::Unremovable));
+                continue;
+            }
         };
         let path = entry.path();
-
-        // Residue is nobody's to hold: a `.<key>.tmp-<pid>` tree belongs to a
-        // process that is extracting or is gone, and neither state is one an
-        // uninstall asks permission from. Everything else in this directory is
-        // somebody else's — the crash dump the launcher points the runtime at
-        // lives here — and an uninstall that deleted it would be removing the
-        // very thing the directory is worth keeping for.
-        if !path.join(MANIFEST_NAME).is_file() {
-            if is_cache_residue(name) && remove_anything(&path) {
-                report.removed.push(reported(&path));
-            }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            report.kept.push((reported(&path), KeptReason::Unowned));
+            continue;
+        };
+        if !is_cache_residue(name) {
+            report.kept.push((reported(&path), KeptReason::Unowned));
             continue;
         }
-
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                report.kept.push((reported(&path), KeptReason::Unowned));
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                report.kept.push((reported(&path), KeptReason::Unremovable));
+                continue;
+            }
+        }
+        // Classify the name before the completeness marker: extraction writes
+        // the manifest before publishing its temporary directory by rename.
+        // Even this process's pid can belong to another live library call.
+        if residue_owner(name).is_some_and(is_alive) {
+            report.kept.push((reported(&path), KeptReason::Active));
+            continue;
+        }
+        let missing_marker_allowed = !is_cache_key(name);
+        if !maintenance_owns(&path, &app_dir, missing_marker_allowed) {
+            report.kept.push((reported(&path), KeptReason::Unowned));
+            continue;
+        }
         let Some(lock) = crate::cache_lock::try_exclusive(&path) else {
             report.kept.push((reported(&path), KeptReason::Locked));
             continue;
         };
+        if !maintenance_owns(&path, &app_dir, missing_marker_allowed) {
+            report.kept.push((reported(&path), KeptReason::Unowned));
+            continue;
+        }
+        let bytes = match measure(&path) {
+            Ok((_, bytes)) => bytes,
+            Err(_) => {
+                report.kept.push((reported(&path), KeptReason::Unremovable));
+                continue;
+            }
+        };
+        // A validated bare key is renamed before deletion so a
+        // launcher sees either the whole entry or no entry. Residue is already
+        // unpublished and its owner has gone, so it needs no second name.
+        if !is_cache_key(name) {
+            drop(lock);
+            if remove_anything(&path) {
+                report.bytes = report.bytes.saturating_add(bytes);
+                report.removed.push(reported(&path));
+            } else {
+                report.kept.push((reported(&path), KeptReason::Unremovable));
+            }
+            continue;
+        }
         let aside = app_dir.join(format!(".{name}.{TRASH_PREFIX}{pid}"));
         if !rename_aside(&path, &aside, lock) {
-            // Nobody holds it: the file system refused, which is a different
-            // thing to tell a user and a different thing to do about it.
             report.kept.push((reported(&path), KeptReason::Unremovable));
             continue;
         }
         if std::fs::remove_dir_all(&aside).is_ok() {
+            report.bytes = report.bytes.saturating_add(bytes);
             report.removed.push(reported(&path));
         } else {
             let _ = std::fs::rename(&aside, &path);
@@ -1759,44 +1937,99 @@ pub fn uninstall(app_dir: &Path) -> PruneReport {
     }
     report.removed.sort();
     report.kept.sort_by(|left, right| left.0.cmp(&right.0));
+    report.kept.dedup();
 
     // Only when it is empty: an application directory that still holds an
     // entry somebody is running out of is an application that is still
     // installed, and the crash dumps beside it are still worth reading.
-    if report.kept.is_empty() {
+    if !report.removed.is_empty() && report.kept.is_empty() {
         let _ = std::fs::remove_dir(&app_dir);
     }
     report
 }
 
+/// A key-shaped name alone is not evidence that an arbitrary tree is ours.
+/// A complete entry must identify this application with a supported manifest.
+/// An unfinished dead-owner residue may predate writing that manifest.
+fn maintenance_owns(entry: &Path, app_dir: &Path, missing_marker_allowed: bool) -> bool {
+    let marker = entry.join(MANIFEST_NAME);
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return missing_marker_allowed;
+        }
+        Err(_) => return false,
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > crate::payload::MAX_FRONT_ENTRY_BYTES
+    {
+        return false;
+    }
+    let Ok(file) = File::open(marker) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(crate::payload::MAX_FRONT_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > crate::payload::MAX_FRONT_ENTRY_BYTES
+    {
+        return false;
+    }
+    let Ok(manifest) = serde_json::from_slice::<Manifest>(&bytes) else {
+        return false;
+    };
+    app_dir.file_name().and_then(OsStr::to_str) == Some(manifest.app.as_str())
+        && manifest.check_version().is_ok()
+        && manifest.validate().is_ok()
+}
+
 /// Whether a name in an application directory is one the cache wrote.
 ///
 /// Two shapes and no others: a bare `<key>` directory, which is an entry
-/// whether or not it has a `ginary.json` in it, and the dotted
-/// `.<key>.<tmp-|corrupt-|trash-><pid>` a half-finished extraction, a rejected
+/// only after its manifest establishes ownership, and the dotted
+/// `.<key>.<tmp-|corrupt-|trash-><pid>` (with an invocation suffix for new
+/// temporary trees) a half-finished extraction, a rejected
 /// payload or an interrupted prune leaves behind. Anything else — an
 /// `erl_crash.dump`, a note somebody left, a directory another tool put here —
 /// is not the cache's to remove.
 fn is_cache_residue(name: &str) -> bool {
-    if is_cache_key(name) {
-        return true;
-    }
-    let Some(rest) = name.strip_prefix('.') else {
-        return false;
-    };
-    let Some((key, tail)) = rest.split_once('.') else {
-        return false;
-    };
+    is_cache_key(name) || residue_owner(name).is_some()
+}
+
+/// The live owner protection applies to all three named residue families.
+fn residue_owner(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('.')?;
+    let (key, tail) = rest.split_once('.')?;
     if !is_cache_key(key) {
-        return false;
+        return None;
     }
     [TMP_PREFIX, CORRUPT_PREFIX, TRASH_PREFIX]
         .iter()
-        .any(|prefix| match tail.strip_prefix(prefix) {
-            Some(digits) => !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
-            None => false,
+        .find_map(|prefix| {
+            let owner = tail.strip_prefix(prefix)?;
+            let digits = match owner.split_once('-') {
+                Some((digits, id))
+                    if *prefix == TMP_PREFIX
+                        && id.len() == EXTRACTION_ID_LEN
+                        && id.bytes().all(|byte| byte.is_ascii_alphanumeric()) =>
+                {
+                    digits
+                }
+                Some(_) => return None,
+                None => owner,
+            };
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse().ok()
         })
 }
+
+/// The random alphanumeric suffix tempfile uses for one extraction invocation.
+const EXTRACTION_ID_LEN: usize = 12;
 
 /// Whether a name is a cache key: [`crate::trailer::Trailer::cache_key`].
 ///
@@ -1881,21 +2114,55 @@ pub struct CleanReport {
     pub bytes: u64,
 }
 
-/// Removes cached extractions under `root`.
+/// What safe cleaning removed and why other paths were retained.
 ///
-/// With `app` set, only that application's directory is emptied; without it,
-/// every application under `root` is. The directories themselves go, temporary
-/// and corrupt trees included, and `root` stays. `app` is checked before it is
-/// joined: what this function does to a directory is remove it, so a value
-/// that could name one outside `root` is refused rather than acted on.
+/// The original [`CleanReport`] remains available through [`clean`]. New
+/// callers should use [`clean_detailed`] so a running entry or preserved
+/// crash dump remains visible in their report.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DetailedCleanReport {
+    /// The owned entry directories removed, sorted.
+    pub removed: Vec<PathBuf>,
+    /// Retained paths, sorted, with their reason.
+    pub kept: Vec<(PathBuf, KeptReason)>,
+    /// The measured size of directories successfully removed, in bytes.
+    pub bytes: u64,
+}
+
+/// Removes inactive, owned cache entries under `root`.
+///
+/// Locks and live residue owners are honored. Crash dumps, symlinks and
+/// unrelated files are preserved. The result retains the original report
+/// shape; use [`clean_detailed`] to see which paths were kept and why.
 ///
 /// # Errors
 ///
 /// [`LauncherError::Cache`] when `app` is not a single path component — see
-/// [`check_app`] — and when a directory cannot be listed or removed. A `root`
-/// that does not exist is an empty report, not an error: cleaning a cache that
-/// was never created is what the caller asked for.
+/// [`check_app`] — and when the cache root cannot be listed. A root that does
+/// not exist is an empty report. Per-application failures leave data in place.
 pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherError> {
+    let detailed = clean_detailed(root, app)?;
+    Ok(CleanReport {
+        removed: detailed.removed,
+        bytes: detailed.bytes,
+    })
+}
+
+/// Safely cleans one application, or every application under `root`.
+///
+/// Only recognized cache-key and residue directories may be removed. An
+/// application directory is removed when this cleaning emptied it; the root
+/// itself stays. All retained evidence, active work and inaccessible paths
+/// are included in the report rather than silently treated as an empty cache.
+///
+/// # Errors
+///
+/// [`LauncherError::Cache`] when `app` is not a single component or `root`
+/// cannot be listed. Missing roots and applications create nothing.
+pub fn clean_detailed(
+    root: &Path,
+    app: Option<&str>,
+) -> Result<DetailedCleanReport, LauncherError> {
     check_app_of(root, app)?;
     let root = walked(root);
     let targets: Vec<PathBuf> = match app {
@@ -1903,7 +2170,9 @@ pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherErro
         None => match std::fs::read_dir(&root) {
             Ok(entries) => {
                 let mut found: Vec<PathBuf> = entries
-                    .filter_map(Result::ok)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|source| LauncherError::cache(reported(&root), source))?
+                    .into_iter()
                     .map(|entry| entry.path())
                     .collect();
                 found.sort();
@@ -1914,19 +2183,16 @@ pub fn clean(root: &Path, app: Option<&str>) -> Result<CleanReport, LauncherErro
         },
     };
 
-    let mut report = CleanReport::default();
+    let mut report = DetailedCleanReport::default();
     for target in targets {
-        if !target.exists() {
-            continue;
-        }
-        let (_, bytes) =
-            measure(&target).map_err(|error| LauncherError::cache(reported(&target), error))?;
-        std::fs::remove_dir_all(&target)
-            .map_err(|source| LauncherError::cache(reported(&target), source))?;
-        report.bytes = report.bytes.saturating_add(bytes);
-        report.removed.push(reported(&target));
+        let one = clean_app(&target);
+        report.bytes = report.bytes.saturating_add(one.bytes);
+        report.removed.extend(one.removed);
+        report.kept.extend(one.kept);
     }
     report.removed.sort();
+    report.kept.sort_by(|left, right| left.0.cmp(&right.0));
+    report.kept.dedup();
     Ok(report)
 }
 

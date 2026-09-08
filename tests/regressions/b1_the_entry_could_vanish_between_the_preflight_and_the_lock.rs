@@ -21,15 +21,18 @@
 #![cfg(feature = "fault-injection")]
 
 use crate::common::artifact::{STUB_EXIT, SyntheticArtifact, read_trace};
+use crate::common::script::ShimStep;
 
 #[test]
 fn an_entry_removed_under_the_launcher_is_extracted_again_rather_than_executed() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let artifact = SyntheticArtifact::build(dir.path());
+    let artifact =
+        SyntheticArtifact::build_with_runtime_steps(dir.path(), &[ShimStep::Exit(STUB_EXIT)]);
     let trace = dir.path().join("vanish.jsonl");
 
     let run = artifact
         .run()
+        .env("GINARY_CACHE_DIR", artifact.cache_root())
         .env("GINARY_FAULT", "before-lock:on")
         .env("GINARY_TRACE", &trace)
         .output();

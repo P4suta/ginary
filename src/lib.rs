@@ -5,7 +5,24 @@
 //! The crate is a single binary that runs in two modes. A plain `ginary` is the
 //! command line tool that builds artifacts; a copy of the same binary with a
 //! payload appended to it is the *launcher* that a packaged application runs
-//! under. Only the command line half exists today.
+//! under. Both modes are implemented; disabling the default `cli` feature
+//! builds the launcher-only stub.
+//!
+//! Current build integrations can use `bundle::build_with_stub_detailed` to
+//! select an explicit stub and inspect completed targets after a failure.
+//! `bundle::build_with_stub_finalized` additionally keeps the project locked
+//! while the caller consumes completed artifacts or publishes auxiliary files.
+//! The original build functions remain compatibility entry points.
+//!
+//! Command-line diagnostics include `doctor`, read-only artifact `verify`, and
+//! local `diagnose` bundles. Process reports preserve bounded output and cleanup
+//! status; versioned traces identify concurrent runs and redact sensitive facts.
+//! `verify::verify_detailed` and `verify::VerifyError::checks` distinguish
+//! findings from incomplete and unperformed checks; the original verifier API
+//! remains available.
+//!
+//! The module introduction below records when each subsystem was introduced;
+//! it is implementation history, not the current list of supported features.
 //!
 //! Milestone A0 provides the scaffolding those two halves share:
 //!
@@ -131,7 +148,7 @@
 //!   stub and applying an ad-hoc code signature.
 //!
 //! See `docs/dev/architecture.md` for the module map of the finished tool and
-//! `docs/format.md` for the payload format the launcher will read.
+//! `docs/format.md` for the payload format the launcher reads.
 
 #![warn(missing_docs)]
 // `deny` rather than `forbid`, and the difference is one module. Every line of
@@ -140,9 +157,11 @@
 // the console control handler and the job object that keeps a killed launcher
 // from orphaning a runtime, and — since E12 — `process_is_alive`, the
 // `OpenProcess` probe `cache::sweep` asks whether the launcher that owns a
-// temporary tree is still extracting into it. None of them has a safe
-// counterpart anywhere, and `forbid` cannot be lifted for a single module. The
-// module is `pub(crate)` so that `cache` can reach that one probe, and it
+// temporary tree is still extracting into it. The build-side `rename_noreplace`
+// wrapper also uses `MoveFileExW` without replacement: std::fs::rename can
+// replace an existing empty directory and cannot provide stage publication's
+// exclusion guarantee. `forbid` cannot be lifted for a single module. The
+// module is `pub(crate)` so `cache` and `assemble` can reach these safe wrappers, and it
 // carries the only `#[allow(unsafe_code)]` in the crate; `deny` keeps every
 // other file, and every other target, exactly as strict as `forbid` was. The
 // calls and the blocks are enumerated in
@@ -171,6 +190,8 @@ pub mod config;
 pub mod crashdump;
 pub mod diag;
 #[cfg(feature = "cli")]
+pub mod diagnose;
+#[cfg(feature = "cli")]
 pub mod doctor;
 #[cfg(feature = "cli")]
 pub mod download;
@@ -194,6 +215,8 @@ pub mod manifest;
 pub mod native;
 #[cfg(feature = "cli")]
 pub mod otp;
+#[cfg(feature = "cli")]
+pub mod output;
 pub mod payload;
 pub mod platform;
 pub mod process;

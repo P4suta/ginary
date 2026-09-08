@@ -4,9 +4,11 @@ name: Release
 # release-please watches `main`: it maintains a release pull request that bumps
 # the version and updates CHANGELOG.md from the Conventional Commits since the
 # last release, and — when that pull request is merged — creates the draft
-# GitHub release and the tag. Publishing the artifacts is distribute.yml's job,
-# triggered when the draft release is published. Nothing here tags or publishes
-# on its own; the release-please pull request is a human decision.
+# GitHub release and the tag. Distribution is a separate explicit invocation of
+# distribute.yml with the existing tag. Its default run builds and verifies;
+# uploading and publishing the draft require publish=true. Publishing a release
+# does not trigger distribution. Merging the release-please pull request remains
+# a separate human decision from merging an ordinary implementation pull request.
 #
 # The two App credentials live in the `release` GitHub Environment rather than
 # at repository scope, and that decides the shape of the job below. An
@@ -148,7 +150,8 @@ jobs:
           # permitted to create or approve pull requests`.
           token: ${{ steps.app-token.outputs.token }}
           # The config and the manifest are committed at the repository root;
-          # `draft: true` in release-please-config.json is what makes the
-          # created release a draft, so distribute.yml runs on its publish.
+          # `draft: true` in release-please-config.json makes the created release
+          # a draft. Invoke distribute.yml explicitly with its existing tag;
+          # the default is verification only, and publication needs publish=true.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

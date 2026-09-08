@@ -740,8 +740,7 @@ pub enum RunIssue {
 /// because a maintenance command that hangs is what a user reports as a broken
 /// artifact.
 ///
-/// The plan is recorded to `diag` first, exactly as `exec` — which is
-/// `#[cfg(unix)]`, so it is named rather than linked — and [`supervise`]
+/// The plan is recorded to `diag` first, exactly as Unix `exec` and [`supervise`]
 /// record theirs, so a selftest that failed can be reproduced from its trace.
 ///
 /// # Errors

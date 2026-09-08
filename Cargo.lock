@@ -415,6 +415,7 @@ dependencies = [
  "predicates",
  "proptest",
  "rustix",
+ "same-file",
  "saphyr",
  "serde",
  "serde_json",

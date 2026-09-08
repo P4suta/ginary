@@ -395,10 +395,15 @@ fn locked_packages(path: &Path) -> Result<Vec<HexPackage>, SbomError> {
 
 /// Where the document goes when `--sbom-out` did not say.
 ///
-/// `<the artifact's directory>/<app>.spdx.json`, so a build writes its bill of
-/// materials beside the file it describes.
+/// The artifact's own file name followed by `.spdx.json`, including a target
+/// suffix and `.exe` when present. `app` is the fallback for a path without a
+/// file name. Different artifacts never default to the same document name.
 pub fn out_path(artifact: &Path, app: &str) -> PathBuf {
-    let name = format!("{app}{SBOM_SUFFIX}");
+    let mut name = artifact
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new(app))
+        .to_os_string();
+    name.push(SBOM_SUFFIX);
     match artifact.parent() {
         Some(parent) => parent.join(name),
         None => PathBuf::from(name),
@@ -424,7 +429,7 @@ pub fn to_json(document: &SbomDocument) -> Result<String, SbomError> {
 /// [`SbomError::Json`] when the document cannot be serialised.
 pub fn write(document: &SbomDocument, path: &Path) -> Result<(), SbomError> {
     let json = to_json(document)?;
-    std::fs::write(path, json).map_err(|source| SbomError::Write {
+    crate::output::atomic_write(path, json.as_bytes()).map_err(|source| SbomError::Write {
         path: path.to_path_buf(),
         source,
     })

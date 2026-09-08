@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -35,6 +36,365 @@ pub use crate::process::find_in_path;
 
 /// Version of the `doctor --json` schema.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// Version of the detailed doctor report, including probe outcomes.
+pub const DETAILED_FORMAT_VERSION: u32 = 2;
+
+/// An additive report preserving the original doctor's data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DetailedReport {
+    /// The established environment report.
+    #[serde(flatten)]
+    pub report: Report,
+    /// Bounded evidence and a classified result for every tool.
+    pub tool_probes: Vec<ToolProbe>,
+    /// Unavailable checks and actionable limitations.
+    pub findings: Vec<Finding>,
+}
+
+impl DetailedReport {
+    /// Probes the local environment with explicit failure evidence.
+    pub fn gather() -> Self {
+        let path = std::env::var_os("PATH");
+        let tool_probes: Vec<_> = PROBES
+            .iter()
+            .map(|probe| {
+                let executable = find_in_path(probe.name, path.as_deref());
+                probe_version(
+                    probe.name,
+                    executable.as_deref(),
+                    probe.args,
+                    PROBE_TIMEOUT,
+                    probe.parse,
+                )
+            })
+            .collect();
+        let mut report = Report::gather_environment(&[]);
+        report.tools = tool_probes.iter().map(|probe| probe.tool.clone()).collect();
+        report.format_version = DETAILED_FORMAT_VERSION;
+        let mut findings = Vec::new();
+        if report.otp.is_none() {
+            findings.push(Finding::new(
+                "otp_unavailable",
+                "The host OTP installation could not be discovered or validated.",
+                "Install a usable Erlang/OTP runtime or configure an explicit runtime source.",
+            ));
+        }
+        if report
+            .cache_probe
+            .as_ref()
+            .is_none_or(|probe| !probe.writable || !probe.executable)
+        {
+            findings.push(Finding::new(
+                "cache_unusable",
+                "The cache could not be proven writable and executable.",
+                "Set GINARY_CACHE_DIR to a writable directory that permits running executables.",
+            ));
+        }
+        if report
+            .cache_probe
+            .as_ref()
+            .is_some_and(|probe| probe.writable && probe.executable && probe.detail.is_some())
+        {
+            findings.push(Finding::new(
+                "cache_probe_cleanup_failed",
+                "The cache probe ran, but its temporary executable could not be removed.",
+                "Read cache detail, close programs holding the probe file, and remove that file.",
+            ));
+        }
+        match std::env::current_dir() {
+            Err(_) => findings.push(Finding::new(
+                "project_unreadable",
+                "The current directory could not be read.",
+                "Run doctor from an accessible project directory.",
+            )),
+            Ok(cwd) if report.project.is_none() && crate::gleam::find_project(&cwd).is_ok() => {
+                findings.push(Finding::new(
+                    "project_unreadable",
+                    "A project was found but its manifest could not be read.",
+                    "Check gleam.toml permissions and rerun doctor.",
+                ))
+            }
+            _ => {}
+        }
+        if let Some(project) = &report.project {
+            if matches!(project.config, ConfigStatus::Error { .. }) {
+                findings.push(Finding::new(
+                    "configuration_invalid",
+                    "The project configuration is invalid; dependent checks are incomplete.",
+                    "Correct the reported gleam.toml configuration error and rerun doctor.",
+                ));
+            }
+            for note in &project.native_notes {
+                findings.push(Finding::new("native_scan_incomplete", note, "Resolve the reported scan limitation, export the shipment again, and rerun doctor."));
+            }
+        }
+        for target in &report.targets {
+            if target.resolvable && target.erts != "host" {
+                findings.push(Finding::new("runtime_unchecked", &format!("{}: the configured runtime source has not been downloaded or validated.", target.name), "Build and verify this target to validate the selected runtime; doctor performs no downloads."));
+            }
+        }
+        Self {
+            report,
+            tool_probes,
+            findings,
+        }
+    }
+
+    /// Renders a report suitable for the terminal.
+    pub fn render_text(&self) -> String {
+        let mut text = self.report.render_text();
+        for probe in &self.tool_probes {
+            if probe.outcome != ProbeOutcome::Available {
+                text.push_str(&format!(
+                    "{} probe: {}\n  remedy: {}\n",
+                    probe.tool.name,
+                    crate::diag::safe_text(&probe.reason),
+                    crate::diag::safe_text(&probe.remedy)
+                ));
+                for (name, output) in [("stdout", &probe.stdout), ("stderr", &probe.stderr)]
+                    .into_iter()
+                    .filter(|_| probe.tool.found)
+                {
+                    if !output.text.is_empty() {
+                        text.push_str(&format!(
+                            "  {name}: {}\n",
+                            crate::diag::safe_text(&output.text)
+                        ));
+                    }
+                    if !output.complete {
+                        text.push_str(&format!(
+                            "  {name}: incomplete ({} bytes omitted)\n",
+                            output.omitted_bytes
+                        ));
+                    }
+                }
+            }
+        }
+        for finding in &self.findings {
+            text.push_str(&format!(
+                "{}: {}\n  remedy: {}\n",
+                finding.code,
+                crate::diag::safe_text(&finding.reason),
+                crate::diag::safe_text(&finding.remedy)
+            ));
+        }
+        text
+    }
+}
+
+/// An actionable diagnosis that does not imply a successful check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Finding {
+    /// Stable machine-readable classification.
+    pub code: String,
+    /// Why the check could not establish the desired property.
+    pub reason: String,
+    /// The next action that can resolve the finding.
+    pub remedy: String,
+}
+
+impl Finding {
+    fn new(code: &str, reason: &str, remedy: &str) -> Self {
+        Self {
+            code: code.into(),
+            reason: reason.into(),
+            remedy: remedy.into(),
+        }
+    }
+}
+
+/// The outcome of running and parsing a version probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeOutcome {
+    /// A complete successful response supplied a version.
+    Available,
+    /// No executable was found.
+    Missing,
+    /// The operating system refused to start the executable.
+    SpawnFailed,
+    /// The process exceeded the deadline.
+    TimedOut,
+    /// The process exited unsuccessfully.
+    NonzeroExit,
+    /// Complete output did not match the expected version response.
+    InvalidOutput,
+    /// Output exceeded the capture bound or never reached EOF.
+    IncompleteOutput,
+    /// Waiting for the child failed.
+    WaitFailed,
+}
+
+/// A bounded output tail and its observation limits.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProbeOutput {
+    /// Retained output, with invalid UTF-8 replaced for display.
+    pub text: String,
+    /// Whether every output byte was read, retained, and valid UTF-8.
+    pub complete: bool,
+    /// Observed bytes omitted from the retained tail.
+    pub omitted_bytes: u64,
+    /// Read or encoding failure, if any.
+    pub error: Option<String>,
+}
+
+impl From<&crate::process::CapturedOutput> for ProbeOutput {
+    fn from(output: &crate::process::CapturedOutput) -> Self {
+        let valid_utf8 = std::str::from_utf8(&output.bytes).is_ok();
+        Self {
+            text: output.text(),
+            complete: output.is_complete() && valid_utf8,
+            omitted_bytes: output.omitted_bytes,
+            error: output
+                .error
+                .clone()
+                .or_else(|| (!valid_utf8).then(|| "output is not valid UTF-8".into())),
+        }
+    }
+}
+
+/// Detailed evidence for one tool, additive to [`ToolReport`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ToolProbe {
+    /// Original tool identity and version fields.
+    #[serde(flatten)]
+    pub tool: ToolReport,
+    /// Classified execution or parse outcome.
+    pub outcome: ProbeOutcome,
+    /// Child exit code, when the platform supplied one.
+    pub exit_code: Option<i32>,
+    /// Wall-clock time in milliseconds.
+    pub elapsed_ms: u128,
+    /// Whether the direct child was reaped before the probe returned.
+    pub child_reaped: Option<bool>,
+    /// A cleanup failure, retained alongside the primary execution outcome.
+    pub cleanup_error: Option<String>,
+    /// Human-readable cause.
+    pub reason: String,
+    /// Suggested next action.
+    pub remedy: String,
+    /// Bounded standard output evidence.
+    pub stdout: ProbeOutput,
+    /// Bounded standard error evidence.
+    pub stderr: ProbeOutput,
+}
+
+/// Maximum retained bytes per version-probe output stream.
+pub const PROBE_CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// Probes an explicitly resolved executable with a bounded, injectable parser.
+///
+/// Passing no path records absence without starting a process. The parser only
+/// receives successful, complete UTF-8 output. This seam lets library callers
+/// diagnose custom toolchains without changing the process environment.
+pub fn probe_version(
+    name: &str,
+    path: Option<&Path>,
+    args: &[&str],
+    timeout: Duration,
+    parse: fn(&str) -> Option<String>,
+) -> ToolProbe {
+    let tool = ToolReport {
+        name: name.into(),
+        found: path.is_some(),
+        version: None,
+        path: path.map(Path::to_path_buf),
+    };
+    let mut probe = ToolProbe {
+        tool,
+        outcome: ProbeOutcome::Missing,
+        exit_code: None,
+        elapsed_ms: 0,
+        child_reaped: None,
+        cleanup_error: None,
+        reason: "No executable was found on PATH.".into(),
+        remedy: format!("Install {name} or add its executable directory to PATH."),
+        stdout: ProbeOutput::default(),
+        stderr: ProbeOutput::default(),
+    };
+    let Some(path) = path else {
+        return probe;
+    };
+    let output = crate::process::run_command(
+        std::process::Command::new(path).args(args),
+        timeout,
+        PROBE_CAPTURE_LIMIT,
+    );
+    probe.stdout = ProbeOutput::from(&output.stdout);
+    probe.stderr = ProbeOutput::from(&output.stderr);
+    probe.exit_code = output.status.and_then(|status| status.code());
+    probe.elapsed_ms = output.elapsed.as_millis();
+    probe.child_reaped = output.cleanup.as_ref().map(|cleanup| cleanup.reaped);
+    probe.cleanup_error = output
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup.error.clone());
+    let (outcome, reason, remedy) = if let Some(error) = &output.error {
+        let outcome = process_outcome(error);
+        let remedy = if outcome == ProbeOutcome::TimedOut {
+            "Run the version command directly to inspect the hang, then repair the tool or service it depends on."
+        } else {
+            "Check the executable's permissions, format, and runtime dependencies, then rerun doctor."
+        };
+        (outcome, error.to_string(), remedy)
+    } else if output
+        .cleanup
+        .as_ref()
+        .is_some_and(|cleanup| !cleanup.reaped || cleanup.error.is_some())
+    {
+        (
+            ProbeOutcome::WaitFailed,
+            "The version command's child cleanup could not be completed within the bounded wait."
+                .into(),
+            "Inspect the child process and its operating system error before retrying; a background reaper may still be waiting for it.",
+        )
+    } else if !output.success() {
+        (
+            ProbeOutcome::NonzeroExit,
+            format!(
+                "The version command exited unsuccessfully (status {}).",
+                output
+                    .status
+                    .map_or_else(|| "unknown".into(), |status| status.to_string())
+            ),
+            "Read the retained output, repair the tool or service it names, then rerun doctor.",
+        )
+    } else if !probe.stdout.complete || !probe.stderr.complete {
+        (ProbeOutcome::IncompleteOutput, "The version command's output was truncated, unreadable, invalid UTF-8, or did not close before the capture deadline.".into(), "Run the version command directly and inspect its complete output; check for excessive output or inherited pipes.")
+    } else if let Some(version) =
+        parse(&probe.stdout.text).filter(|version| !version.trim().is_empty())
+    {
+        probe.tool.version = Some(version);
+        (
+            ProbeOutcome::Available,
+            "The version command completed and its response was recognized.".into(),
+            "No action required.",
+        )
+    } else {
+        (
+            ProbeOutcome::InvalidOutput,
+            "The version command succeeded but did not produce a recognized version response."
+                .into(),
+            "Check that PATH selects the intended tool and that its version command uses the expected format.",
+        )
+    };
+    probe.outcome = outcome;
+    probe.reason = reason;
+    probe.remedy = remedy.into();
+    probe
+}
+
+fn process_outcome(error: &crate::process::ProcessError) -> ProbeOutcome {
+    use crate::process::ProcessError;
+    match error {
+        ProcessError::Spawn { .. } => ProbeOutcome::SpawnFailed,
+        ProcessError::Wait { .. } => ProbeOutcome::WaitFailed,
+        ProcessError::Timeout { .. } => ProbeOutcome::TimedOut,
+        ProcessError::Incomplete { .. } => ProbeOutcome::IncompleteOutput,
+        ProcessError::Captured { source, .. } => process_outcome(source),
+    }
+}
 
 /// How long a single tool probe may run before it is killed.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -261,7 +621,7 @@ fn probe_file_name(pid: u32, sequence: u64, os: Os) -> String {
     )
 }
 
-/// Creates a file in `dir`, makes it executable and tries to run it.
+/// Exclusively creates a temporary file in `dir` and tries to run it.
 ///
 /// The probe is the only honest answer: `access(2)` reports the permission
 /// bits and says nothing about the mount, and `noexec` is the failure that
@@ -271,6 +631,12 @@ fn probe_file_name(pid: u32, sequence: u64, os: Os) -> String {
 /// a launch would do: a `doctor` that reported "not writable" for a cache
 /// nobody has used yet would be reporting its absence rather than a problem.
 pub fn probe_cache_dir(dir: &Path) -> CacheProbe {
+    probe_cache_dir_with(dir, run_probe)
+}
+
+/// Keeps creation and cleanup together; the runner also permits cleanup faults
+/// to be exercised without changing the process environment.
+fn probe_cache_dir_with(dir: &Path, run: impl FnOnce(&Path) -> std::io::Result<()>) -> CacheProbe {
     let refused = |detail: std::io::Error| CacheProbe {
         writable: false,
         executable: false,
@@ -280,43 +646,74 @@ pub fn probe_cache_dir(dir: &Path) -> CacheProbe {
     if let Err(error) = std::fs::create_dir_all(dir) {
         return refused(error);
     }
-    let path = dir.join(probe_file_name(
-        std::process::id(),
-        PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-        crate::platform::HOST,
-    ));
-    if let Err(error) = write_probe(&path) {
-        let _ = std::fs::remove_file(&path);
-        return refused(error);
+    // PID and sequence describe the owner, but neither establishes exclusive
+    // ownership after PID reuse. tempfile uses create_new and random suffixes,
+    // so existing files, hard links and symbolic links are never opened to write.
+    // Ask for the suffix-free name here; the extension follows the random part.
+    let prefix = format!(
+        "{}-",
+        probe_file_name(
+            std::process::id(),
+            PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            Os::Linux,
+        )
+    );
+    let mut file = match tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(crate::platform::probe_suffix(crate::platform::HOST))
+        .tempfile_in(dir)
+    {
+        Ok(file) => file,
+        Err(error) => return refused(error),
+    };
+    if let Err(error) = write_probe(file.as_file_mut()) {
+        return cache_probe_result(false, Err(error), close_probe(file.into_temp_path()));
     }
+    // Close the write handle before executing, while the path guard continues
+    // owning cleanup on every return path.
+    let path = file.into_temp_path();
+    let outcome = run(&path);
+    cache_probe_result(true, outcome, close_probe(path))
+}
 
-    let outcome = run_probe(&path);
-    // Removed before the answer is returned, whatever the answer is: a probe
-    // that left an executable behind in a cache directory would be a probe
-    // nobody should run twice.
-    let _ = std::fs::remove_file(&path);
+/// Retains the exact owned path when cleanup needs a user's attention.
+fn close_probe(path: tempfile::TempPath) -> std::io::Result<()> {
+    let display = path.display().to_string();
+    path.close().map_err(|error| {
+        std::io::Error::new(error.kind(), format!("cannot remove {display}: {error}"))
+    })
+}
 
-    match outcome {
-        Ok(()) => CacheProbe {
-            writable: true,
-            executable: true,
-            detail: None,
-        },
-        Err(error) => CacheProbe {
-            writable: true,
-            executable: false,
-            detail: Some(error.to_string()),
-        },
+/// Reports cleanup separately so a useful capability answer does not hide a
+/// temporary executable that the operating system refused to remove.
+fn cache_probe_result(
+    writable: bool,
+    outcome: std::io::Result<()>,
+    cleanup: std::io::Result<()>,
+) -> CacheProbe {
+    let executable = writable && outcome.is_ok();
+    let mut detail = outcome.err().map(|error| error.to_string());
+    if let Err(error) = cleanup {
+        let cleanup = format!("probe cleanup failed: {error}");
+        detail = Some(match detail {
+            Some(primary) => format!("{primary}; {cleanup}"),
+            None => cleanup,
+        });
+    }
+    CacheProbe {
+        writable,
+        executable,
+        detail,
     }
 }
 
 /// Writes the probe program and makes it executable.
-fn write_probe(path: &Path) -> std::io::Result<()> {
-    std::fs::write(path, probe_program())?;
+fn write_probe(file: &mut std::fs::File) -> std::io::Result<()> {
+    file.write_all(probe_program())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(PROBE_MODE))?;
+        file.set_permissions(std::fs::Permissions::from_mode(PROBE_MODE))?;
     }
     Ok(())
 }
@@ -338,9 +735,23 @@ fn run_probe(path: &Path) -> std::io::Result<()> {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .spawn();
         match outcome {
-            Ok(_) => return Ok(()),
+            Ok(child) => {
+                let report = crate::process::wait_child(child, PROBE_TIMEOUT, 0);
+                if let Some(error) = report.error {
+                    return Err(std::io::Error::other(error));
+                }
+                if let Some(cleanup) = report.cleanup {
+                    if let Some(error) = cleanup.error {
+                        return Err(std::io::Error::other(error));
+                    }
+                    if !cleanup.reaped {
+                        return Err(std::io::Error::other("cache probe child was not reaped"));
+                    }
+                }
+                return Ok(());
+            }
             Err(error)
                 if error.kind() == std::io::ErrorKind::ExecutableFileBusy
                     && Instant::now() < deadline =>
@@ -875,10 +1286,10 @@ pub fn project_context(start: &Path, now: SystemTime) -> Option<ProjectReport> {
 
     let shipment_dir = project.shipment();
     let shipment = shipment_report(&shipment_dir, now);
-    let mut native = if shipment.is_some() {
+    let (mut native, mut native_notes) = if shipment.is_some() {
         native_objects(&shipment_dir)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     // The whole configuration this time, and not only whether it parsed: the
@@ -901,12 +1312,14 @@ pub fn project_context(start: &Path, now: SystemTime) -> Option<ProjectReport> {
     // Only when there is a shipment to walk: a project that has never
     // exported one has nothing to scan, and reporting that a directory which
     // was never created could not be read would be a note about nothing.
-    let native_notes = match (&config, &shipment) {
+    native_notes.extend(match (&config, &shipment) {
         (Some(config), Some(_)) => {
             fill_verdicts(&shipment_dir, &config.tools, &targets, &mut native)
         }
         _ => Vec::new(),
-    };
+    });
+    native_notes.sort();
+    native_notes.dedup();
 
     Some(ProjectReport {
         root: project.root().to_path_buf(),
@@ -1063,27 +1476,46 @@ fn shipment_report(shipment: &Path, now: SystemTime) -> Option<ShipmentReport> {
 /// anything. A file whose first bytes *are* the magic and which does not parse
 /// as an ELF is not listed — there is nothing this table could say about it —
 /// and `ginary verify` names it on the artifact that carries it.
-fn native_objects(shipment: &Path) -> Vec<NativeObject> {
+fn native_objects(shipment: &Path) -> (Vec<NativeObject>, Vec<String>) {
     let host = Target::host().arch.as_str();
     let mut found = Vec::new();
-    walk_shipment(shipment, shipment, 0, &mut |relative, path| {
+    let mut notes = Vec::new();
+    let mut file_notes = Vec::new();
+    walk_shipment(shipment, shipment, 0, &mut notes, &mut |relative, path| {
         if !relative.split('/').any(|component| component == PRIV_DIR) {
             return;
         }
         let Ok(metadata) = std::fs::metadata(path) else {
+            file_notes.push(format!(
+                "{relative}: file metadata could not be read; native scan incomplete"
+            ));
             return;
         };
-        if !metadata.is_file() || metadata.len() > MAX_NATIVE_BYTES {
+        if !metadata.is_file() {
+            return;
+        }
+        if metadata.len() > MAX_NATIVE_BYTES {
+            file_notes.push(format!("{relative}: exceeds the {MAX_NATIVE_BYTES}-byte inspection bound; native scan incomplete"));
             return;
         }
         // The magic first and the whole file only after it: a `priv` directory
         // holds assets as well as objects, and a ninety-megabyte one that is
         // not an ELF must not be read into memory to learn that it is not.
+        if let Err(error) = std::fs::File::open(path) {
+            file_notes.push(format!(
+                "{relative}: cannot open file ({error}); native scan incomplete"
+            ));
+            return;
+        }
         if !begins_with_elf_magic(path) {
             return;
         }
-        let Ok(info) = elf::inspect(path) else {
-            return;
+        let info = match elf::inspect(path) {
+            Ok(info) => info,
+            Err(error) => {
+                file_notes.push(format!("{relative}: native header could not be parsed ({error}); native scan incomplete"));
+                return;
+            }
         };
         found.push(NativeObject {
             path: relative.to_owned(),
@@ -1099,8 +1531,9 @@ fn native_objects(shipment: &Path) -> Vec<NativeObject> {
             verdicts: BTreeMap::new(),
         });
     });
+    notes.extend(file_notes);
     found.sort_by(|left, right| left.path.cmp(&right.path));
-    found
+    (found, notes)
 }
 
 /// Whether the first bytes of `path` are [`elf::ELF_MAGIC`].
@@ -1136,27 +1569,61 @@ fn begins_with_elf_magic(path: &Path) -> bool {
 /// symlink is followed only when it resolves to a regular *file*, which is how
 /// a NIF installed as a link reaches the table, and a symlink to a directory,
 /// to nothing, or to a device is passed over.
-fn walk_shipment(root: &Path, dir: &Path, depth: usize, visit: &mut impl FnMut(&str, &Path)) {
+fn walk_shipment(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    notes: &mut Vec<String>,
+    visit: &mut impl FnMut(&str, &Path),
+) {
     if depth >= MAX_SHIPMENT_DEPTH {
+        notes.push(format!(
+            "{}: stopped at depth {MAX_SHIPMENT_DEPTH}; native scan incomplete",
+            dir.strip_prefix(root).unwrap_or(dir).display()
+        ));
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            notes.push(format!(
+                "{}: cannot list directory ({error}); native scan incomplete",
+                dir.strip_prefix(root).unwrap_or(dir).display()
+            ));
+            return;
+        }
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => paths.push(entry.path()),
+            Err(error) => notes.push(format!(
+                "{}: cannot read directory entry ({error}); native scan incomplete",
+                dir.strip_prefix(root).unwrap_or(dir).display()
+            )),
+        }
+    }
     paths.sort();
     for path in paths {
         let Ok(kind) = std::fs::symlink_metadata(&path) else {
+            notes.push(format!(
+                "{}: metadata unavailable; native scan incomplete",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            ));
             continue;
         };
         if kind.is_dir() {
-            walk_shipment(root, &path, depth + 1, visit);
+            walk_shipment(root, &path, depth + 1, notes, visit);
             continue;
         }
         // `metadata` rather than `symlink_metadata`: this is where a symlink
         // is followed, and only a symlink whose target is a regular file gets
         // past it.
         if !std::fs::metadata(&path).is_ok_and(|target| target.is_file()) {
+            notes.push(format!(
+                "{}: non-file or unresolved symlink was not scanned",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            ));
             continue;
         }
         let Ok(relative) = path.strip_prefix(root) else {
@@ -1446,8 +1913,12 @@ impl Report {
     /// leaves a background process holding the pipes cannot stall the report
     /// either — see [`crate::process::run_with_timeout`].
     pub fn gather() -> Self {
+        Self::gather_environment(&PROBES)
+    }
+
+    fn gather_environment(probes: &[Probe]) -> Self {
         Self::gather_from(
-            &PROBES,
+            probes,
             std::env::var_os("PATH").as_deref(),
             &EnvSnapshot::from_env(),
             otp::discover(None)
@@ -1591,7 +2062,15 @@ fn probe_tool(probe: &Probe, path_var: Option<&OsStr>) -> ToolReport {
 
 /// Parses `gleam --version`, which prints `gleam <semver>`.
 fn parse_gleam_version(stdout: &str) -> Option<String> {
-    last_token_of_first_line(stdout)
+    let mut tokens = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .split_whitespace();
+    if tokens.next()? != "gleam" {
+        return None;
+    }
+    let version = tokens.next()?;
+    (version_token(version) && tokens.next().is_none()).then(|| version.to_owned())
 }
 
 /// Parses the OTP release and ERTS version printed by the `erl` probe.
@@ -1603,18 +2082,41 @@ fn parse_erl_version(stdout: &str) -> Option<String> {
     let mut tokens = line.split_whitespace();
     let release = tokens.next()?;
     let erts = tokens.next()?;
-    Some(format!("OTP {release}, erts {erts}"))
+    (release.parse::<u32>().is_ok_and(|release| release > 0)
+        && version_token(erts)
+        && tokens.next().is_none())
+    .then(|| format!("OTP {release}, erts {erts}"))
 }
 
 /// Parses `strip --version`, whose first line ends with the binutils version.
 fn parse_strip_version(stdout: &str) -> Option<String> {
-    last_token_of_first_line(stdout)
+    let line = stdout.lines().find(|line| !line.trim().is_empty())?;
+    if !line.to_ascii_lowercase().contains("strip") {
+        return None;
+    }
+    last_token_of_first_line(stdout).filter(|version| version_token(version))
 }
 
 /// Parses `docker version --format {{.Server.Version}}`, a bare version.
 fn parse_docker_version(stdout: &str) -> Option<String> {
     let line = stdout.lines().next()?.trim();
-    (!line.is_empty()).then(|| line.to_owned())
+    version_token(line).then(|| line.to_owned())
+}
+
+fn version_token(token: &str) -> bool {
+    let token = token.strip_prefix('v').unwrap_or(token);
+    token
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit())
+        && token.contains('.')
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
+        && token.split(['-', '+']).next().is_some_and(|core| {
+            core.split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
 }
 
 /// Returns the last whitespace-separated token of the first non-empty line.
@@ -1636,6 +2138,59 @@ mod tests {
 
     #[cfg(unix)]
     use crate::process::test_support::script;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_cache_probe_reports_an_actual_windows_cleanup_refusal() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut held = None;
+        let mut owned = None;
+        let report = probe_cache_dir_with(dir.path(), |path| {
+            run_probe(path)?;
+            // A real Windows handle denying deletion simulates antivirus or
+            // another reader retaining the executable after the probe exits.
+            held = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(path)?,
+            );
+            owned = Some(path.to_owned());
+            Ok(())
+        });
+        assert!(report.writable && report.executable, "{report:?}");
+        let path = owned.expect("created executable");
+        let detail = report.detail.expect("cleanup failure evidence");
+        assert!(detail.contains("probe cleanup failed"), "{detail}");
+        assert!(detail.contains(&path.display().to_string()), "{detail}");
+        assert!(path.is_file(), "refused deletion must not be hidden");
+        drop(held);
+        std::fs::remove_file(path).expect("release and clean test executable");
+    }
+
+    #[test]
+    fn a_refused_cache_execution_still_removes_only_its_owned_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let note = dir.path().join("user-note");
+        std::fs::write(&note, b"keep").expect("user note");
+        let report = probe_cache_dir_with(dir.path(), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "noexec",
+            ))
+        });
+        assert!(report.writable && !report.executable, "{report:?}");
+        assert!(report.detail.expect("execution refusal").contains("noexec"));
+        assert_eq!(std::fs::read(note).expect("user note survives"), b"keep");
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("probe removed")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn the_probe_file_is_named_the_way_its_platform_decides_what_to_start() {

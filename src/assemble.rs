@@ -20,8 +20,9 @@
 //!
 //! Four rules shape it, and each one has a test that would fail without it.
 //!
-//! **The result is atomic.** Staging happens in a sibling `<out>.tmp-<pid>`
-//! directory and is renamed onto `out` at the very end, so a failure half way
+//! **The result is atomic.** Staging happens in an exclusively created sibling
+//! `<out>.tmp-<pid>-<random>` directory and is renamed onto `out` at the very end,
+//! without replacing a competing output, so a failure half way
 //! through leaves neither a partial `out` nor a temporary tree behind. A caller
 //! that finds `out` finds it complete.
 //!
@@ -699,6 +700,23 @@ pub enum AssembleError {
     },
 }
 
+/// Both failures when staging fails and its exclusively owned temporary tree
+/// cannot be removed. Returned inside [`AssembleError::Io`]'s `source`, whose
+/// `get_ref().downcast_ref::<StageCleanupError>()` exposes these details without
+/// changing the variants existing callers match exhaustively.
+#[cfg(feature = "cli")]
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}; also could not remove owned staging directory `{path}`: {cleanup}")]
+pub struct StageCleanupError {
+    /// The original staging failure, retained as the error's source.
+    #[source]
+    pub operation: Box<AssembleError>,
+    /// The invocation's temporary tree which remains on disk.
+    pub path: PathBuf,
+    /// The filesystem refusal encountered while removing that tree.
+    pub cleanup: std::io::Error,
+}
+
 /// Renders a list of directory names, or `nothing` when it is empty.
 ///
 /// [`AssembleError::BootReferencesMissingApp`] names both halves of the
@@ -766,7 +784,7 @@ const DEBUG_EMULATOR_REASON: &str =
 ///
 /// `out` must not exist, or must be an empty directory, unless
 /// [`StageOptions::force`] is set. The tree is built in a sibling
-/// `<out>.tmp-<pid>` directory and renamed onto `out` once it is complete, so
+/// `<out>.tmp-<pid>-<random>` directory and renamed onto `out` once it is complete, so
 /// `out` either does not exist or is finished; a failure removes the temporary
 /// directory rather than leaving it behind.
 ///
@@ -791,56 +809,55 @@ pub fn stage(
     opts: &StageOptions,
     out: &Path,
 ) -> Result<StagedRoot, AssembleError> {
-    prepare_output(out, opts.force)?;
-
-    let temp = temp_root_for(out);
-    if let Some(parent) = temp.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        create_dir(parent)?;
-    }
-    if temp.exists() {
-        // A previous run of this process id died between creating the
-        // temporary tree and renaming it. Reusing it would stage into a tree
-        // that already holds files, so it goes.
-        remove_dir(&temp)?;
-    }
-
-    let staged = match build(set, otp, opts, &temp) {
-        Ok(staged) => staged,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&temp);
-            return Err(error);
-        }
-    };
-
-    match publish(&temp, out) {
-        Ok(()) => Ok(StagedRoot {
-            root: out.to_path_buf(),
-            ..staged
-        }),
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&temp);
-            Err(error)
-        }
-    }
-}
-
-/// The sibling directory the tree is built in before it is renamed onto `out`.
-///
-/// The process id keeps two concurrent stagings of the same output out of each
-/// other's way, and keeps the name predictable enough that a leftover from a
-/// killed run is recognisable rather than mysterious.
-#[cfg(feature = "cli")]
-fn temp_root_for(out: &Path) -> PathBuf {
-    let mut name = out
+    let accepted_empty = prepare_output(out, opts.force)?;
+    let parent = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    create_dir(parent)?;
+    let mut prefix = out
         .file_name()
         .unwrap_or(TEMP_FALLBACK.as_ref())
         .to_os_string();
-    name.push(format!(".tmp-{}", std::process::id()));
-    match out.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
-        _ => PathBuf::from(name),
+    prefix.push(format!(".tmp-{}-", std::process::id()));
+    // A PID identifies a process, not an invocation. Never remove an existing
+    // candidate: it can belong to another thread or to the caller. TempDir
+    // creates exclusively and only cleans up the directory this call acquired.
+    let temp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempdir_in(parent)
+        .map_err(|source| AssembleError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    let staged = match build(set, otp, opts, temp.path()) {
+        Ok(staged) => staged,
+        Err(error) => return Err(cleanup_failed_stage(temp, error)),
+    };
+    if let Err(error) = publish(temp.path(), out, accepted_empty) {
+        return Err(cleanup_failed_stage(temp, error));
+    }
+    Ok(StagedRoot {
+        root: out.to_path_buf(),
+        ..staged
+    })
+}
+
+/// Close only this invocation's tree, keeping both failures when cleanup also
+/// fails. RAII alone would silently discard the second error and its path.
+#[cfg(feature = "cli")]
+fn cleanup_failed_stage(temp: tempfile::TempDir, operation: AssembleError) -> AssembleError {
+    let path = temp.path().to_path_buf();
+    match temp.close() {
+        Ok(()) => operation,
+        Err(cleanup) => AssembleError::Io {
+            path: path.clone(),
+            source: std::io::Error::other(StageCleanupError {
+                operation: Box::new(operation),
+                path,
+                cleanup,
+            }),
+        },
     }
 }
 
@@ -862,10 +879,10 @@ const BOOT_NAME: &str = "no_dot_erlang.boot";
 /// leave the filesystem alone: the rename at the end of staging is what
 /// creates `out`, so a failure in between must not have destroyed anything.
 #[cfg(feature = "cli")]
-fn prepare_output(out: &Path, force: bool) -> Result<(), AssembleError> {
+fn prepare_output(out: &Path, force: bool) -> Result<bool, AssembleError> {
     let existing = match std::fs::symlink_metadata(out) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
             return Err(AssembleError::Io {
                 path: out.to_path_buf(),
@@ -875,7 +892,7 @@ fn prepare_output(out: &Path, force: bool) -> Result<(), AssembleError> {
     };
 
     if existing.is_dir() && is_empty_dir(out)? {
-        return Ok(());
+        return Ok(true);
     }
     if !force {
         return Err(AssembleError::OutputNotEmpty {
@@ -883,13 +900,14 @@ fn prepare_output(out: &Path, force: bool) -> Result<(), AssembleError> {
         });
     }
     if existing.is_dir() {
-        remove_dir(out)
+        remove_dir(out)?;
     } else {
         std::fs::remove_file(out).map_err(|source| AssembleError::Io {
             path: out.to_path_buf(),
             source,
-        })
+        })?;
     }
+    Ok(false)
 }
 
 /// Whether a directory holds no entries at all.
@@ -905,14 +923,33 @@ fn is_empty_dir(dir: &Path) -> Result<bool, AssembleError> {
 /// the empty one is removed here rather than earlier, so that a staging that
 /// fails leaves even that untouched.
 #[cfg(feature = "cli")]
-fn publish(temp: &Path, out: &Path) -> Result<(), AssembleError> {
-    if out.exists() {
+fn publish(temp: &Path, out: &Path, accepted_empty: bool) -> Result<(), AssembleError> {
+    if accepted_empty && out.exists() {
         std::fs::remove_dir(out).map_err(|source| AssembleError::Io {
             path: out.to_path_buf(),
             source,
         })?;
     }
-    std::fs::rename(temp, out).map_err(|source| AssembleError::Io {
+    // Unix rename would replace a directory that appeared after the check.
+    // Linux renameat2 and macOS renameatx_np both provide an atomic exclusion;
+    // rustix maps NOREPLACE to the native flag on each platform.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let renamed = rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        temp,
+        rustix::fs::CWD,
+        out,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(std::io::Error::from);
+    #[cfg(windows)]
+    let renamed = crate::launch_windows::win32::rename_noreplace(temp, out);
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let renamed = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive stage publication is unavailable on this platform",
+    ));
+    renamed.map_err(|source| AssembleError::Io {
         path: out.to_path_buf(),
         source,
     })
@@ -1979,6 +2016,94 @@ mod tests {
     use super::{listed_relative, relative};
     use crate::target::Os;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn publication_keeps_a_directory_created_after_the_initial_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(dir.path()).unwrap();
+        std::fs::write(temporary.path().join("finished"), b"complete stage").unwrap();
+        let out = dir.path().join("raced-output");
+        std::fs::create_dir(&out).unwrap();
+        assert!(super::publish(temporary.path(), &out, false).is_err());
+        assert!(out.is_dir());
+        assert!(std::fs::read_dir(&out).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read(temporary.path().join("finished")).unwrap(),
+            b"complete stage"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_handles_long_unicode_paths_and_refuses_embedded_nul() {
+        use std::os::windows::ffi::OsStringExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = (0..12).fold(dir.path().to_owned(), |path, _| {
+            path.join("long-path-segment-0123456789")
+        });
+        std::fs::create_dir_all(&parent).unwrap();
+        let source = parent.join("入力");
+        let destination = parent.join("完成");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("member"), b"finished contents").unwrap();
+        super::publish(&source, &destination, false).expect("long Unicode directory rename");
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read(destination.join("member")).unwrap(),
+            b"finished contents"
+        );
+
+        let invalid = dir.path().join(std::ffi::OsString::from_wide(&[
+            b'b' as u16,
+            0,
+            b'x' as u16,
+        ]));
+        for (from, to) in [(&invalid, &source), (&destination, &invalid)] {
+            let error = crate::launch_windows::win32::rename_noreplace(from, to).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(
+            std::fs::read(destination.join("member")).unwrap(),
+            b"finished contents"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_failure_retains_the_original_error_and_owned_residue_for_recovery() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(dir.path()).unwrap();
+        let residue = temporary.path().to_owned();
+        let locked_path = residue.join("held-by-external-reader");
+        std::fs::write(&locked_path, b"recoverable bytes").unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+        let primary = super::AssembleError::MissingExtraBinary {
+            name: "missing-program".into(),
+        };
+        let error = super::cleanup_failed_stage(temporary, primary);
+        let super::AssembleError::Io { path, source } = &error else {
+            panic!("cleanup must retain its path: {error}")
+        };
+        assert_eq!(path, &residue);
+        let detail = source
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::StageCleanupError>()
+            .expect("additive typed cleanup details");
+        assert!(
+            matches!(detail.operation.as_ref(), super::AssembleError::MissingExtraBinary { name } if name == "missing-program")
+        );
+        assert!(std::error::Error::source(detail).is_some());
+        assert_eq!(detail.path, residue);
+        assert!(error.to_string().contains("missing-program"));
+        drop(locked);
+        assert_eq!(std::fs::read(locked_path).unwrap(), b"recoverable bytes");
+    }
 
     #[test]
     fn listed_relative_respells_a_windows_row_and_leaves_a_unix_backslash_name_alone() {

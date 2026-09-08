@@ -33,10 +33,11 @@ are byte-identical, and renaming or copying an artifact does not change its key.
 **Extraction protocol.**
 
 1. `<cache>/<app>/<key>/ginary.json` existing as a regular file is a hit.
-2. Otherwise, sweep the application directory for `.<key>.tmp-<pid>` and `.corrupt-*` entries
-   whose `pid` is no longer alive, and delete them.
-3. Create `.<key>.tmp-<getpid()>`; the application directory is mode 0700.
-4. Stream `exe.seek(offset)` → `Take(len)` → hashing reader → zstd decoder → tar unpacker,
+2. Otherwise, sweep recognized `.<key>.tmp-<pid>-<id>` and legacy PID-only temporary/corrupt
+   residues whose owner is no longer alive. Live owners and invalid ownership are preserved.
+3. Exclusively create `.<key>.tmp-<getpid()>-<id>` with a twelve-character random alphanumeric
+   suffix per invocation; never remove a preexisting candidate. The application directory is mode 0700.
+4. Stream positional reads bounded to the payload range → hashing reader → zstd decoder → tar unpacker,
    with `preserve_permissions`, without `preserve_mtime` and without xattrs, refusing to
    overwrite.
 5. Enforce the entry rules of ADR 0004; entry 0 must be `ginary.json`.
@@ -65,7 +66,8 @@ the application; pruning deletes only directories on which an exclusive `flock` 
 
 Concurrent first runs are correct without a lock, because the only shared mutation is an atomic
 `rename` and the losers clean up after themselves. A process killed at any point leaves at most
-a `.tmp-<pid>` directory, which the next run removes once the pid is gone.
+a `.tmp-<pid>-<id>` directory, which a later run removes once the pid is gone. Concurrent
+library calls in the same process own different directories and independent read offsets.
 
 The working directory and `/tmp` stay clean, and `ERL_CRASH_DUMP` defaults into the cache rather
 than into wherever the user happened to be standing.

@@ -401,8 +401,8 @@ fn a_dead_process_s_temporary_tree_is_removed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let app_dir = dir.path().join(APP);
     std::fs::create_dir_all(&app_dir).expect("create the application directory");
-    let tmp = plant(&app_dir, "abc", "tmp", DEAD_PID);
-    let corrupt = plant(&app_dir, "abc", "corrupt", DEAD_PID);
+    let tmp = plant(&app_dir, "0123456789abcdef", "tmp", DEAD_PID);
+    let corrupt = plant(&app_dir, "0123456789abcdef", "corrupt", DEAD_PID);
 
     let report =
         cache::sweep(&app_dir, std::process::id(), &Diag::disabled()).expect("the sweep must run");
@@ -449,7 +449,7 @@ fn a_reaped_process_s_temporary_tree_is_removed() {
         // object's and is not free until the last handle to it is closed,
         // which is what dropping the child does.
         drop(child);
-        let tmp = plant(&app_dir, "abc", "tmp", pid);
+        let tmp = plant(&app_dir, "0123456789abcdef", "tmp", pid);
 
         let report = cache::sweep(&app_dir, std::process::id(), &Diag::disabled())
             .expect("the sweep must run");
@@ -491,7 +491,7 @@ fn a_live_process_s_temporary_tree_is_kept() {
     // all. `script::live_process` renders the same behaviour twice, as a
     // shell script and as the compiled shim.
     let mut child = crate::common::script::live_process(dir.path(), LIVE_MILLISECONDS);
-    let live = plant(&app_dir, "abc", "tmp", child.id());
+    let live = plant(&app_dir, "0123456789abcdef", "tmp", child.id());
 
     let report =
         cache::sweep(&app_dir, std::process::id(), &Diag::disabled()).expect("the sweep must run");
@@ -508,20 +508,21 @@ fn a_live_process_s_temporary_tree_is_kept() {
 }
 
 #[test]
-fn our_own_leftovers_are_swept_even_though_we_are_alive() {
+fn our_own_temporary_tree_is_kept_while_we_are_alive() {
     let dir = tempfile::tempdir().expect("tempdir");
     let app_dir = dir.path().join(APP);
     std::fs::create_dir_all(&app_dir).expect("create the application directory");
-    let mine = plant(&app_dir, "abc", "tmp", std::process::id());
+    let mine = plant(&app_dir, "0123456789abcdef", "tmp", std::process::id());
 
     let report =
         cache::sweep(&app_dir, std::process::id(), &Diag::disabled()).expect("the sweep must run");
 
     assert_eq!(
-        report.removed,
+        report.kept,
         vec![mine],
-        "a tree carrying this process's own id is a leftover of a previous run of that id"
+        "another thread can still be extracting into this process's temporary tree"
     );
+    assert!(report.removed.is_empty());
 }
 
 #[test]
@@ -530,7 +531,7 @@ fn the_sweep_leaves_complete_entries_and_unrecognised_names_alone() {
     let app_dir = dir.path().join(APP);
     std::fs::create_dir_all(app_dir.join("0123456789abcdef")).expect("a complete entry");
     std::fs::create_dir_all(app_dir.join(".not-a-tree")).expect("something else");
-    plant(&app_dir, "abc", "tmp", DEAD_PID);
+    plant(&app_dir, "0123456789abcdef", "tmp", DEAD_PID);
 
     let report =
         cache::sweep(&app_dir, std::process::id(), &Diag::disabled()).expect("the sweep must run");
@@ -920,15 +921,16 @@ fn clean_removes_one_application_and_leaves_the_others() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("cache");
     for app in ["hello", "other"] {
-        let entry = root.join(app).join("0123456789abcdef");
-        std::fs::create_dir_all(&entry).expect("create an entry");
-        std::fs::write(entry.join("ginary.json"), b"{}").expect("write a marker");
+        plant_entry(&root.join(app), "0123456789abcdef", DAY);
     }
+    let bytes = std::fs::metadata(root.join("hello/0123456789abcdef/ginary.json"))
+        .expect("manifest size")
+        .len();
 
     let report = cache::clean(&root, Some("hello")).expect("clean must run");
 
-    assert_eq!(report.removed, vec![root.join("hello")]);
-    assert_eq!(report.bytes, 2);
+    assert_eq!(report.removed, vec![root.join("hello/0123456789abcdef")]);
+    assert_eq!(report.bytes, bytes);
     assert_eq!(names(&root), vec!["other".to_owned()]);
 }
 
@@ -937,12 +939,18 @@ fn clean_without_an_application_empties_the_root_and_keeps_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("cache");
     for app in ["hello", "other"] {
-        std::fs::create_dir_all(root.join(app).join("key")).expect("create an entry");
+        plant_entry(&root.join(app), "0123456789abcdef", DAY);
     }
 
     let report = cache::clean(&root, None).expect("clean must run");
 
-    assert_eq!(report.removed, vec![root.join("hello"), root.join("other")]);
+    assert_eq!(
+        report.removed,
+        vec![
+            root.join("hello/0123456789abcdef"),
+            root.join("other/0123456789abcdef")
+        ]
+    );
     assert!(root.is_dir(), "the root itself stays");
     assert_eq!(names(&root), Vec::<String>::new());
 }
@@ -953,8 +961,8 @@ fn clean_removes_temporary_and_corrupt_trees_too() {
     let root = dir.path().join("cache");
     let app_dir = root.join(APP);
     std::fs::create_dir_all(&app_dir).expect("create the application directory");
-    plant(&app_dir, "abc", "tmp", DEAD_PID);
-    plant(&app_dir, "abc", "corrupt", std::process::id());
+    plant(&app_dir, "0123456789abcdef", "tmp", DEAD_PID);
+    plant(&app_dir, "0123456789abcdef", "corrupt", DEAD_PID);
 
     cache::clean(&root, Some(APP)).expect("clean must run");
 

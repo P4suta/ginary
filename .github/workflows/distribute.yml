@@ -1,17 +1,33 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 name: Distribute
 
-# Build every artifact of one release, check each one, and only then flip the
-# release out of draft. The discipline is verify-then-publish: an asset that
-# fails its checksum or its attestation never becomes part of a published
-# release. Triggered when release.yml's draft release is published, and callable
-# as a reusable workflow for a dry run.
+# Build and verify an existing tag. Hosted release mutation requires publish=true.
+# The default run produces only reviewable workflow artifacts.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and verify
+        required: true
+        type: string
+      publish:
+        description: Upload to an existing draft and publish after verification
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
 
 permissions: {}
+
+concurrency:
+  group: distribution-${{ inputs.tag }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +38,9 @@ jobs:
   # carry other internals. ginary is version-locked to its stubs.
   version-check:
     name: Version consistency
+    outputs:
+      commit: ${{ steps.revision.outputs.commit }}
+      epoch: ${{ steps.revision.outputs.epoch }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -30,13 +49,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: scripts/ci/version-consistency.sh "${GITHUB_REF_NAME}"
+          ref: ${{ inputs.tag }}
+      - run: scripts/ci/version-consistency.sh "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+      - id: revision
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
   # The full binary and the launcher-only stub for the four Linux targets, via
   # cross, each with the catalog OTP tarball its runtime comes from.
   build-linux:
     name: Build ${{ matrix.target }}
     needs: version-check
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -57,6 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.version-check.outputs.commit }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -96,12 +125,15 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
   # The two macOS targets, built natively on the two runner architectures: the
   # darwin stub comes from here and from nowhere else.
   build-macos:
     name: Build ${{ matrix.target }}
     needs: version-check
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
     strategy:
       fail-fast: false
       matrix:
@@ -121,6 +153,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.version-check.outputs.commit }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -139,7 +172,7 @@ jobs:
       - name: Repack the OTP catalog tarball for this target
         run: |
           cargo run --quiet --locked -- otp repack \
-            --upstream-tag OTP-29.0.5 --targets "${{ matrix.target }}" --out dist/release
+            --upstream-tag OTP-29.0.5 --targets "${{ matrix.target }}" --root "$INSTALL_DIR_FOR_OTP" --out dist/release
         env:
           # `ginary otp repack` reads the upstream release through the GitHub
           # API. An unauthenticated read is limited to 60 an hour by source
@@ -153,12 +186,15 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
   # The Windows target, built natively so the launcher path compiles and links
   # against the real toolchain.
   build-windows:
     name: Build windows-x86_64
     needs: version-check
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
     # windows-2022, matching ci.yml's `windows` job: the image a release is
     # built on is the image the launcher was proved on. windows-2025 is
     # offered; the two move together or not at all. See docs/dev/log/E4.md.
@@ -170,9 +206,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.version-check.outputs.commit }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
       - name: Build the full binary and the stub
         shell: bash
         run: |
@@ -182,90 +223,69 @@ jobs:
           cp target/release/ginary.exe "dist/release/ginary-$version-windows-x86_64.exe"
           cargo build --release --locked --no-default-features
           cp target/release/ginary.exe "dist/release/ginary-stub-$version-windows-x86_64.exe"
+      - name: Repack the native Windows runtime
+        shell: bash
+        run: |
+          cargo run --quiet --locked -- otp repack --upstream-tag OTP-29.0.5 \
+            --targets windows-x86_64 --root "$INSTALL_DIR_FOR_OTP" --out dist/release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-windows-x86_64
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 30
 
-  # Gather every target's assets, produce provenance attestations and a
-  # SHA256SUMS manifest, create the release as a draft, re-download the uploaded
-  # assets and check them against the manifest and the attestation, and only
-  # then flip the release out of draft.
+  # Assembly is a read-only rehearsal with respect to hosted releases by default.
   publish:
-    name: Verify and publish
-    needs: [build-linux, build-macos, build-windows]
+    name: Assemble and verify distribution
+    needs: [version-check, build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
-      # attest-build-provenance signs an in-toto attestation for each asset.
       id-token: write
       attestations: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ needs.version-check.outputs.commit }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: dist-*
-          merge-multiple: true
-          path: dist/release
-      - name: Compute SHA256SUMS
-        working-directory: dist/release
-        # Every published asset, not only the ginary binaries: `ginary otp
-        # repack` writes the OTP runtime tarballs (`otp-*.tar.zst`) and
-        # `catalog.json` here too, and those BEAM bytes a user executes must be
-        # checksummed like everything else. The manifest itself is the one file
-        # left out, so `sha256sum --check` below never checks the manifest
-        # against itself.
-        # Write the manifest under a scratch name and rename it into place: a
-        # pipeline that both reads and writes `SHA256SUMS` trips shellcheck
-        # SC2094, and this step must stay actionlint-clean.
+          path: dist/fragments
+      - name: Compute SHA256SUMS and merge every target catalog
         run: |
-          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' \
-            | LC_ALL=C sort \
-            | xargs -r sha256sum > SHA256SUMS.tmp
-          mv SHA256SUMS.tmp SHA256SUMS
+          cargo run --quiet --locked -- otp merge --inputs dist/fragments \
+            --out dist/release --version "${RELEASE_TAG#v}"
+          cd dist/release
+          sha256sum --check SHA256SUMS
+      - name: Require the existing release to be a draft
+        if: ${{ inputs.publish }}
+        run: bash scripts/ci/publish-distribution.sh check "$RELEASE_TAG" dist/release
       - name: Attest build provenance for every asset
+        if: ${{ inputs.publish }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          # Attest the ginary binaries, the OTP runtime tarballs, and
-          # catalog.json -- the same set SHA256SUMS covers.
           subject-path: |
             dist/release/ginary-*
             dist/release/otp-*.tar.zst
             dist/release/catalog.json
-      - name: Create the draft release and upload the assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --draft \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Draft release; assets are verified before this is published." \
-            dist/release/*
-      - name: Re-download the uploaded assets and check them
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p verify
-          cd verify
-          # Every asset, so the check below covers the OTP runtime tarballs and
-          # catalog.json as well as the ginary binaries.
-          gh release download "${GITHUB_REF_NAME}"
-          # The checksums re-check runs on the re-downloaded assets: a corrupt
-          # upload fails here, before the release is public.
-          sha256sum --check SHA256SUMS
-          # The provenance attestation is verified, not only produced, for every
-          # asset the manifest covers -- the loop is driven by SHA256SUMS, so it
-          # can never fall behind the checksummed set.
-          while read -r _ asset; do
-            gh attestation verify "$asset" --repo "${GITHUB_REPOSITORY}"
-          done < SHA256SUMS
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Only reached when every check above passed: flip the draft to a
-        # published release.
-        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
+            dist/release/inventory.json
+      - name: Upload to the existing draft, re-download and check, then publish
+        if: ${{ inputs.publish }}
+        run: bash scripts/ci/publish-distribution.sh publish "$RELEASE_TAG" dist/release
+      - name: Preserve the local distribution and inventory
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-distribution
+          path: dist/release
+          if-no-files-found: warn
+          retention-days: 30

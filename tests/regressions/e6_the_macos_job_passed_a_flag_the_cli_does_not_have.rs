@@ -159,7 +159,7 @@ fn every_long_flag_a_workflow_or_a_script_passes_to_ginary_is_one_the_cli_accept
     // defect above, and the matrix script's build, which no scan read at all
     // until the scripts were added.
     for (source, needle) in [
-        (".github/workflows/ci.yml", "release/ginary"),
+        ("scripts/ci/macos-smoke.sh", "release/ginary"),
         ("scripts/smoke-matrix.sh", "ginary build"),
     ] {
         assert!(

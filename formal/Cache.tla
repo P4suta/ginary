@@ -23,7 +23,9 @@ CONSTANTS
 (***************************************************************************)
 (* The four states one entry can be in.                                    *)
 (*                                                                         *)
-(* Absent, Complete and Trashed are what `<app>/<key>` itself is.           *)
+(* Absent and Complete describe `<app>/<key>` itself. Trashed describes    *)
+(* an old tree renamed away from that public entry and can coexist with   *)
+(* a new Complete entry under the same key.                               *)
 (* TmpPartial is not: a partial extraction lives beside the entry, as       *)
 (* `.<key>.tmp-<pid>`, which is why it is a set of process ids rather than  *)
 (* a value of `entry` and why a key can be TmpPartial and Complete at once  *)
@@ -34,7 +36,7 @@ TmpPartial == "TmpPartial"
 Complete   == "Complete"
 Trashed    == "Trashed"
 
-EntryValues == {Absent, Complete, Trashed}
+EntryValues == {Absent, Complete}
 EntryStates == {Absent, TmpPartial, Complete, Trashed}
 
 (***************************************************************************)
@@ -50,16 +52,17 @@ VARIABLES
     key,        \* Procs -> Keys: the entry the process is working on
     renames,    \* Keys -> Nat: winning renames since the entry was last absent
     pruner,     \* "Idle" or "Holding": whether the pruner holds the exclusive lock
+    trash,      \* SUBSET Keys: renamed trees, independent of current entry names
     pruneKey    \* Keys: the entry it holds it on
 
-vars == <<entry, tmps, alive, pc, key, renames, pruner, pruneKey>>
+vars == <<entry, tmps, alive, pc, key, renames, pruner, pruneKey, trash>>
 
 (***************************************************************************)
 (* The state one key is in, as the four names above spell it.               *)
 (***************************************************************************)
 StateOf(k) ==
     IF entry[k] = Complete THEN Complete
-    ELSE IF entry[k] = Trashed THEN Trashed
+    ELSE IF k \in trash THEN Trashed
     ELSE IF tmps[k] # {} THEN TmpPartial
     ELSE Absent
 
@@ -71,6 +74,7 @@ TypeOK ==
     /\ key \in [Procs -> Keys]
     /\ renames \in [Keys -> 0..2]
     /\ pruner \in {"Idle", "Holding"}
+    /\ trash \subseteq Keys
     /\ pruneKey \in Keys
     /\ \A k \in Keys : StateOf(k) \in EntryStates
 
@@ -82,6 +86,7 @@ Init ==
     /\ key = [p \in Procs |-> CHOOSE k \in Keys : TRUE]
     /\ renames = [k \in Keys |-> 0]
     /\ pruner = "Idle"
+    /\ trash = {}
     /\ pruneKey = CHOOSE k \in Keys : TRUE
 
 -----------------------------------------------------------------------------
@@ -97,7 +102,7 @@ Hit(p, k) ==
     /\ entry[k] = Complete
     /\ key' = [key EXCEPT ![p] = k]
     /\ pc' = [pc EXCEPT ![p] = "Locking"]
-    /\ UNCHANGED <<entry, tmps, alive, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, alive, renames, pruner, pruneKey, trash>>
 
 (* `ensure_extracted` steps 2 and 3: this process's own leftovers go first  *)
 (* — a `.<key>.tmp-<pid>` carrying this pid is by definition not in use —   *)
@@ -109,7 +114,7 @@ BeginExtract(p, k) ==
     /\ key' = [key EXCEPT ![p] = k]
     /\ pc' = [pc EXCEPT ![p] = "Extracting"]
     /\ tmps' = [j \in Keys |-> IF j = k THEN tmps[j] \cup {p} ELSE tmps[j] \ {p}]
-    /\ UNCHANGED <<entry, alive, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, alive, renames, pruner, pruneKey, trash>>
 
 (* The process is killed with the temporary tree on disk and nothing        *)
 (* renamed.  This is the `after-extract:pause` fault point, made a state.   *)
@@ -118,7 +123,7 @@ CrashMidExtract(p) ==
     /\ pc[p] = "Extracting"
     /\ alive' = [alive EXCEPT ![p] = FALSE]
     /\ pc' = [pc EXCEPT ![p] = "Crashed"]
-    /\ UNCHANGED <<entry, tmps, key, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, key, renames, pruner, pruneKey, trash>>
 
 (* `ensure_extracted` steps 9 and 10: the rename is the completion marker,  *)
 (* and there is no other one.  `rename(2)` will not replace a directory     *)
@@ -133,7 +138,7 @@ FinishExtract(p) ==
          THEN /\ entry' = [entry EXCEPT ![key[p]] = Complete]
               /\ renames' = [renames EXCEPT ![key[p]] = renames[key[p]] + 1]
          ELSE UNCHANGED <<entry, renames>>
-    /\ UNCHANGED <<alive, key, pruner, pruneKey>>
+    /\ UNCHANGED <<alive, key, pruner, pruneKey, trash>>
 
 (* Whether a temporary tree is one somebody is extracting into right now.   *)
 (*                                                                         *)
@@ -159,7 +164,7 @@ Sweep ==
          /\ pc[p] = "Idle"
          /\ \E k \in Keys : \E q \in tmps[k] : ~InUse(q, k)
          /\ tmps' = [k \in Keys |-> {q \in tmps[k] : InUse(q, k)}]
-    /\ UNCHANGED <<entry, alive, pc, key, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, alive, pc, key, renames, pruner, pruneKey, trash>>
 
 (* `launcher::lock_entry`: the shared `flock` is taken and the entry is     *)
 (* then re-checked, because a prune holds its exclusive lock only across    *)
@@ -172,7 +177,7 @@ TakeSharedLock(p) ==
     /\ IF entry[key[p]] = Complete
          THEN pc' = [pc EXCEPT ![p] = "Running"]
          ELSE pc' = [pc EXCEPT ![p] = "Idle"]
-    /\ UNCHANGED <<entry, tmps, alive, key, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, alive, key, renames, pruner, pruneKey, trash>>
 
 (* The shared lock is released when the process that `execve`d dies: the    *)
 (* descriptor survives the exec and the kernel closes it.                   *)
@@ -180,7 +185,7 @@ ReleaseOnExit(p) ==
     /\ alive[p]
     /\ pc[p] = "Running"
     /\ pc' = [pc EXCEPT ![p] = "Exited"]
-    /\ UNCHANGED <<entry, tmps, alive, key, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, alive, key, renames, pruner, pruneKey, trash>>
 
 (* The application is started again.  A real restart is a new pid; the      *)
 (* model reuses the identity, which is why `Sweep` treats a tree carrying   *)
@@ -189,30 +194,31 @@ Restart(p) ==
     /\ pc[p] \in {"Exited", "Crashed"}
     /\ alive' = [alive EXCEPT ![p] = TRUE]
     /\ pc' = [pc EXCEPT ![p] = "Idle"]
-    /\ UNCHANGED <<entry, tmps, key, renames, pruner, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, key, renames, pruner, pruneKey, trash>>
 
 (* `prune_app`: a complete entry, old enough, whose `.lock` can be taken    *)
 (* exclusively, is renamed aside.  The age is abstracted to "any entry may  *)
 (* be old enough"; the exclusive lock is the conjunct that matters, and a   *)
 (* lock that cannot be taken is a "leave this alone" rather than a retry.   *)
 (* The rename is what makes the removal atomic for a reader, so the entry   *)
-(* becomes Trashed here and Absent only when the tree is gone.              *)
+(* becomes Absent immediately; trash holds the old tree separately.       *)
 PruneCheck(k) ==
     /\ pruner = "Idle"
     /\ entry[k] = Complete
     /\ \A p \in Procs : ~(pc[p] = "Running" /\ key[p] = k)
-    /\ entry' = [entry EXCEPT ![k] = Trashed]
+    /\ entry' = [entry EXCEPT ![k] = Absent]
+    /\ trash' = trash \cup {k}
+    /\ renames' = [renames EXCEPT ![k] = 0]
     /\ pruner' = "Holding"
     /\ pruneKey' = k
-    /\ UNCHANGED <<tmps, alive, pc, key, renames>>
+    /\ UNCHANGED <<tmps, alive, pc, key>>
 
 (* The renamed tree is removed and the exclusive lock is dropped.           *)
 PruneRemove ==
     /\ pruner = "Holding"
-    /\ entry' = [entry EXCEPT ![pruneKey] = Absent]
-    /\ renames' = [renames EXCEPT ![pruneKey] = 0]
+    /\ trash' = trash \ {pruneKey}
     /\ pruner' = "Idle"
-    /\ UNCHANGED <<tmps, alive, pc, key, pruneKey>>
+    /\ UNCHANGED <<entry, tmps, alive, pc, key, renames, pruneKey>>
 
 Next ==
     \/ \E p \in Procs, k \in Keys : Hit(p, k) \/ BeginExtract(p, k)

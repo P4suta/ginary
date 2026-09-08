@@ -107,7 +107,9 @@ fn the_job_that_enforces_the_coverage_floor_obtains_the_stubs_it_measures_with()
         .find(|job| job.id == "coverage")
         .expect("ci.yml declares a coverage job");
     assert!(
-        coverage.runs("coverage-gate.sh"),
+        coverage.runs("bash scripts/ci/coverage.sh")
+            && crate::common::repo::read("scripts/ci/coverage.sh")
+                .contains("coverage-gate.sh \"$lcov\" 90"),
         "this test is about the job that enforces the floor; `coverage` no longer runs the gate \
          script, so the subject has moved"
     );

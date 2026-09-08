@@ -385,6 +385,14 @@ pub enum PayloadError {
         /// The entry's path, lossily converted.
         path: String,
     },
+    /// Two entries would require one destination to be both a file and a directory.
+    #[error("the payload destination `{path}` conflicts with `{existing}`")]
+    DestinationConflict {
+        /// The destination being added.
+        path: String,
+        /// The previously required destination.
+        existing: String,
+    },
     /// The tar crate declined to unpack an entry into the destination.
     ///
     /// It answers `false` rather than failing, and a skipped file is exactly
@@ -459,6 +467,21 @@ pub fn pack(
 ) -> Result<Packed, PayloadError> {
     let listing = read_listing(staging)?;
     check_no_reserved_names(&listing)?;
+    let mut destinations = Destinations::default();
+    let mut host_destinations = HostDestinations::default();
+    for file in &listing.files {
+        let path =
+            destined_path_for(Path::new(&file.path), manifest.target.os).ok_or_else(|| {
+                PayloadError::UnsafePath {
+                    path: file.path.clone(),
+                }
+            })?;
+        check_not_reserved(2, &path)?;
+        destinations
+            .insert(&path, false)
+            .map_err(|existing| PayloadError::DestinationConflict { path, existing })?;
+        host_destinations.insert(Path::new(&file.path), manifest.target.os, false)?;
+    }
     let index = Index::from_staged(staging, &listing.files)?;
     let manifest_bytes = to_json(MANIFEST_NAME, manifest)?;
     let index_bytes = to_json(INDEX_NAME, &index)?;
@@ -522,11 +545,33 @@ pub fn unpack(
 
         let mut front: Option<FrontMatter> = None;
         let mut index_seen = false;
+        let mut destinations = Destinations::default();
+        let mut host_destinations = HostDestinations::default();
         for (position, entry) in archive.entries()?.enumerate() {
             let mut entry = entry?;
             let name = entry_name(&entry);
             check_entry_type(&entry, &name)?;
-            let destined = check_entry_path(&entry, &name)?;
+            let os = front
+                .as_ref()
+                .map_or(crate::platform::HOST, |front| front.manifest.target.os);
+            let destined = check_entry_path(&entry, &name, os)?;
+            let entry_path = entry
+                .path()
+                .map_err(|_| PayloadError::UnsafePath { path: name.clone() })?;
+
+            // Reserved front matter has its own, more specific diagnostic.
+            if position >= 2 {
+                check_not_reserved(position, &destined)?;
+            }
+            if let Err(existing) =
+                destinations.insert(&destined, entry.header().entry_type().is_dir())
+            {
+                return Err(PayloadError::DestinationConflict {
+                    path: destined,
+                    existing,
+                });
+            }
+            host_destinations.insert(&entry_path, os, entry.header().entry_type().is_dir())?;
 
             if position == 0 {
                 expect_name(0, MANIFEST_NAME, &name)?;
@@ -546,7 +591,28 @@ pub fn unpack(
                 // without an index is a directory `ginary verify` cannot read.
                 if position == 1 {
                     expect_name(1, INDEX_NAME, &name)?;
+                    let mode = entry.header().mode().unwrap_or(0o644);
+                    let bytes = read_front_entry(&mut entry, INDEX_NAME)?;
+                    let index: Index = serde_json::from_slice(&bytes)
+                        .map_err(|source| PayloadError::IndexFormat { source })?;
+                    let mut indexed = Destinations::default();
+                    let mut indexed_host = HostDestinations::default();
+                    for file in &index.files {
+                        let path =
+                            destined_path_for(Path::new(&file.path), os).ok_or_else(|| {
+                                PayloadError::UnsafePath {
+                                    path: file.path.clone(),
+                                }
+                            })?;
+                        check_not_reserved(position, &path)?;
+                        indexed.insert(&path, false).map_err(|existing| {
+                            PayloadError::DestinationConflict { path, existing }
+                        })?;
+                        indexed_host.insert(Path::new(&file.path), os, false)?;
+                    }
+                    create_file(&dest.join(INDEX_NAME), &bytes, mode)?;
                     index_seen = true;
+                    continue;
                 } else {
                     // Entries 0 and 1 never reach `unpack_in`, so a later
                     // entry carrying one of their names is the one path in the
@@ -777,6 +843,7 @@ fn check_entry_type<R: Read>(entry: &tar::Entry<'_, R>, name: &str) -> Result<()
 fn check_entry_path<R: Read>(
     entry: &tar::Entry<'_, R>,
     name: &str,
+    os: crate::target::Os,
 ) -> Result<String, PayloadError> {
     let unsafe_path = || PayloadError::UnsafePath {
         path: name.to_owned(),
@@ -785,7 +852,7 @@ fn check_entry_path<R: Read>(
     let Ok(path) = entry.path() else {
         return Err(unsafe_path());
     };
-    destined_path(&path).ok_or_else(unsafe_path)
+    destined_path_for(&path, os).ok_or_else(unsafe_path)
 }
 
 /// The path an entry lands on, relative to the extracted root, or `None` when
@@ -813,6 +880,152 @@ pub fn destined_path(path: &Path) -> Option<String> {
         None
     } else {
         Some(parts.join("/"))
+    }
+}
+
+/// Destination identity under the target operating system's filesystem rules.
+/// Windows aliases are folded and names that Win32 cannot represent are refused,
+/// even when verification runs on a Unix build machine. Unix separators are
+/// parsed lexically, so a literal backslash or colon remains part of the name
+/// when verification runs on Windows. The legacy [`destined_path`] still uses
+/// the host's native path components.
+pub fn destined_path_for(path: &Path, os: crate::target::Os) -> Option<String> {
+    let normalized = lexical_destination(path, os)?;
+    if os != crate::target::Os::Windows {
+        return Some(normalized);
+    }
+    for part in normalized.split('/') {
+        if part.ends_with(['.', ' '])
+            || part.contains([':', '<', '>', '"', '|', '?', '*'])
+            || part.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let stem = part.split('.').next()?.to_ascii_uppercase();
+        if ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        {
+            return None;
+        }
+    }
+    Some(normalized.to_lowercase())
+}
+
+/// Target components before case folding, independent of the reader's host.
+fn lexical_destination(path: &Path, os: crate::target::Os) -> Option<String> {
+    let spelling = path.to_string_lossy();
+    let spelling = if os == crate::target::Os::Windows {
+        std::borrow::Cow::Owned(spelling.replace('\\', "/"))
+    } else {
+        spelling
+    };
+    if spelling.starts_with('/') || spelling.contains('\0') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in spelling.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            _ => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// Extraction needs the target's logical names and the host's actual names to
+/// agree. A Unix backslash filename must never turn into a Windows directory,
+/// and distinct Unix directories must not merge through host case folding.
+#[derive(Default)]
+struct HostDestinations {
+    destinations: Destinations,
+    names: std::collections::BTreeMap<String, String>,
+}
+
+impl HostDestinations {
+    fn insert(
+        &mut self,
+        path: &Path,
+        os: crate::target::Os,
+        directory: bool,
+    ) -> Result<(), PayloadError> {
+        let unsafe_path = || PayloadError::UnsafePath {
+            path: path.display().to_string(),
+        };
+        let logical = lexical_destination(path, os).ok_or_else(unsafe_path)?;
+        let native = destined_path(path).ok_or_else(unsafe_path)?;
+        if logical != native {
+            return Err(unsafe_path());
+        }
+        let target = destined_path_for(path, os).ok_or_else(unsafe_path)?;
+        let host =
+            destined_path_for(Path::new(&native), crate::platform::HOST).ok_or_else(unsafe_path)?;
+        self.destinations
+            .insert(&host, directory)
+            .map_err(|existing| PayloadError::DestinationConflict {
+                path: logical.clone(),
+                existing,
+            })?;
+        let mut host_prefix = String::new();
+        let mut target_prefix = String::new();
+        for (host_part, target_part) in host.split('/').zip(target.split('/')) {
+            if !host_prefix.is_empty() {
+                host_prefix.push('/');
+                target_prefix.push('/');
+            }
+            host_prefix.push_str(host_part);
+            target_prefix.push_str(target_part);
+            if let Some(existing) = self.names.get(&host_prefix) {
+                if existing != &target_prefix {
+                    return Err(PayloadError::DestinationConflict {
+                        path: target_prefix,
+                        existing: existing.clone(),
+                    });
+                }
+            } else {
+                self.names
+                    .insert(host_prefix.clone(), target_prefix.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Destination ownership shared by the verifier and the extracting reader.
+#[derive(Default)]
+pub(crate) struct Destinations(std::collections::BTreeMap<String, bool>);
+
+impl Destinations {
+    /// Records a normalized destination; `true` means a directory.
+    pub(crate) fn insert(&mut self, path: &str, directory: bool) -> Result<(), String> {
+        if let Some(previous) = self.0.get(path) {
+            if !directory || !previous {
+                return Err(path.to_owned());
+            }
+            return Ok(());
+        }
+        for (offset, _) in path.match_indices('/') {
+            let parent = &path[..offset];
+            if self.0.get(parent) == Some(&false) {
+                return Err(parent.to_owned());
+            }
+        }
+        if !directory {
+            let prefix = format!("{path}/");
+            if let Some((child, _)) = self.0.range(prefix.clone()..).next()
+                && child.starts_with(&prefix)
+            {
+                return Err(child.clone());
+            }
+        }
+        self.0.insert(path.to_owned(), directory);
+        Ok(())
     }
 }
 
@@ -933,7 +1146,7 @@ fn front_entry<R: Read>(
     let mut entry = entry?;
     let name = entry_name(&entry);
     check_entry_type(&entry, &name)?;
-    check_entry_path(&entry, &name)?;
+    check_entry_path(&entry, &name, crate::platform::HOST)?;
     expect_name(position, expected, &name)?;
     read_front_entry(&mut entry, expected)
 }

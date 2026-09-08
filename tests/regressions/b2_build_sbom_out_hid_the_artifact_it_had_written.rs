@@ -20,16 +20,18 @@
 //! document fails for a reason only the write can find, the build report is
 //! written first, so the artifact's path survives.
 
-use std::path::Path;
-
+#[cfg(feature = "fault-injection")]
 use crate::common::built::BuiltProject;
 use crate::common::project::TempProject;
+#[cfg(feature = "fault-injection")]
 use crate::common::tools::require_tools;
 
 /// The programs a build of the fixture needs.
-const TOOLS: [&str; 3] = ["gleam", "erl", "strip"];
+#[cfg(feature = "fault-injection")]
+const TOOLS: &[&str] = crate::common::built::HOST_BUILD_TOOLS;
 
 /// The fixture this file builds.
+#[cfg(feature = "fault-injection")]
 const APP: &str = "hello_ffi";
 
 #[test]
@@ -58,26 +60,41 @@ fn a_destination_in_a_missing_directory_is_refused_before_the_build_runs() {
 }
 
 #[test]
+#[cfg(feature = "fault-injection")]
 fn a_document_that_cannot_be_written_still_leaves_the_artifact_named() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
-    // An existing *directory* is a destination whose parent is there and which
-    // no writer can open: the failure the fail-fast check cannot see.
-    let destination = project.root().join("occupied");
-    std::fs::create_dir_all(&destination).expect("the directory");
+    // Directory destinations are now refused before the build. Fail the
+    // document's final replacement to exercise a failure after publication of
+    // the executable, while preserving a previous SBOM at a valid destination.
+    let destination = project.root().join("bill.json");
+    let previous = b"previous SBOM";
+    std::fs::write(&destination, previous).expect("the previous document");
 
-    let output = project.build_with(&["--sbom-out", &destination.display().to_string()], &[]);
+    let output = project.build_with(
+        &["--sbom-out", &destination.display().to_string()],
+        &[("GINARY_FAULT", "output-persist:fail-document")],
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let artifact: &Path = &project.artifact();
+    let artifact = project.artifact();
 
     assert!(
         !output.status.success(),
         "a document that could not be written is a failure\n{stdout}\n{stderr}"
     );
     assert!(artifact.is_file(), "the build wrote {}", artifact.display());
+    assert_eq!(
+        std::fs::read(&destination).expect("the previous document remains"),
+        previous,
+        "a failed replacement must preserve the previous document"
+    );
+    assert!(
+        stdout.contains("SBOM failed:") && stdout.contains("output-persist"),
+        "the failure reached document replacement\n{stdout}\n{stderr}"
+    );
     assert!(
         stdout.contains(&artifact.display().to_string()),
         "the artifact exists and its path is nowhere\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"

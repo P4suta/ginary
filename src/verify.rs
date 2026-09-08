@@ -49,7 +49,7 @@ use crate::manifest::IndexFile;
 use crate::payload::PayloadError;
 
 /// Version of the `verify --json` schema.
-pub const VERIFY_FORMAT_VERSION: u32 = 1;
+pub const VERIFY_FORMAT_VERSION: u32 = 2;
 
 /// The shared libraries a packaged application may name in `DT_NEEDED`.
 ///
@@ -375,6 +375,30 @@ pub struct ObjectInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "issue", rename_all = "snake_case")]
 pub enum Issue {
+    /// The native file format belongs to a different operating system.
+    #[error("{path}: object format {found}, but the target requires {expected}")]
+    FormatMismatch {
+        /// Path of the native object.
+        path: String,
+        /// Format found in the payload.
+        found: String,
+        /// Format required by the manifest target.
+        expected: String,
+    },
+    /// More than one index row names the same destination.
+    #[error("{path}: duplicate index destination")]
+    DuplicateIndex {
+        /// Repeated destination.
+        path: String,
+    },
+    /// Archive entries cannot coexist when extracted.
+    #[error("{path}: destination conflicts with {existing}")]
+    DestinationConflict {
+        /// Destination being added.
+        path: String,
+        /// Conflicting prior destination.
+        existing: String,
+    },
     /// A native object is for a machine the artifact does not target.
     #[error("{path}: built for {found}, and the artifact targets {expected}")]
     MachineMismatch {
@@ -400,7 +424,7 @@ pub enum Issue {
     /// either a damaged artifact or a hostile one, and either way it is the
     /// reader who has to decide. Its bytes are still checked against the
     /// index, so a file that is *only* damaged is named twice.
-    #[error("{path}: begins with the ELF magic and cannot be read as one ({message})")]
+    #[error("{path}: begins with native object magic and cannot be read ({message})")]
     UnreadableObject {
         /// The file's path inside the artifact.
         path: String,
@@ -542,7 +566,10 @@ impl Issue {
     /// The path the issue is about.
     pub fn path(&self) -> &str {
         match self {
-            Self::MachineMismatch { path, .. }
+            Self::FormatMismatch { path, .. }
+            | Self::DuplicateIndex { path }
+            | Self::DestinationConflict { path, .. }
+            | Self::MachineMismatch { path, .. }
             | Self::UnexpectedNeeded { path, .. }
             | Self::IndexMismatch { path, .. }
             | Self::IndexSizeMismatch { path, .. }
@@ -568,6 +595,9 @@ impl Issue {
     /// bookkeeping about it.
     fn rank(&self) -> u8 {
         match self {
+            Self::FormatMismatch { .. } => 15,
+            Self::DuplicateIndex { .. } => 13,
+            Self::DestinationConflict { .. } => 14,
             Self::MachineMismatch { .. } => 0,
             Self::UnexpectedNeeded { .. } => 1,
             Self::UnreadableObject { .. } => 2,
@@ -602,7 +632,59 @@ pub struct VerifyReport {
     pub issues: Vec<Issue>,
 }
 
+/// Whether a verification stage completed, found a problem, or could not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckOutcome {
+    /// The stage completed without findings.
+    Passed,
+    /// The stage completed and found a problem.
+    Failed,
+    /// A prerequisite prevented the stage from starting.
+    NotRun,
+    /// Reading or interpreting the input prevented completion.
+    Incomplete,
+}
+
+/// Separate outcomes for payload integrity and the deeper contents checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct VerificationChecks {
+    /// Whether the payload could be authenticated against the trailer.
+    pub integrity: CheckOutcome,
+    /// Whether index, archive destinations and native objects were checked.
+    pub contents: CheckOutcome,
+}
+
+/// A report with explicit stage outcomes, preserving the original report API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DetailedVerifyReport {
+    /// Findings and artifact metadata from the compatibility interface.
+    #[serde(flatten)]
+    pub report: VerifyReport,
+    /// Stages that ran, failed or were prevented from running.
+    pub checks: VerificationChecks,
+}
+
 impl VerifyReport {
+    /// Identifies unperformed checks separately from an empty findings list.
+    pub fn checks(&self) -> VerificationChecks {
+        if !self.payload.ok() {
+            VerificationChecks {
+                integrity: CheckOutcome::Failed,
+                contents: CheckOutcome::NotRun,
+            }
+        } else {
+            VerificationChecks {
+                integrity: CheckOutcome::Passed,
+                contents: if self.issues.is_empty() {
+                    CheckOutcome::Passed
+                } else {
+                    CheckOutcome::Failed
+                },
+            }
+        }
+    }
+
     /// Whether the artifact is intact and raised nothing.
     ///
     /// This is what decides the exit code: zero when it is true, one when it
@@ -644,6 +726,10 @@ impl VerifyReport {
                 )
             },
         );
+        if !self.payload.ok() {
+            field("deep", "not run: payload integrity failed");
+            return text;
+        }
         field(
             "files",
             &format!("{} checked against the index", self.files_checked),
@@ -693,6 +779,20 @@ pub fn verify(path: &Path) -> Result<VerifyReport, VerifyError> {
     verify_with(path, &VerifyOptions::default())
 }
 
+/// Verifies an artifact and explicitly identifies each stage's outcome.
+///
+/// # Errors
+///
+/// As [`verify`]. On error, [`VerifyError::checks`] identifies the incomplete
+/// stage and any stage prevented from running.
+pub fn verify_detailed(path: &Path) -> Result<DetailedVerifyReport, VerifyError> {
+    let report = verify(path)?;
+    Ok(DetailedVerifyReport {
+        checks: report.checks(),
+        report,
+    })
+}
+
 /// Verifies the artifact at `path` against the allowlist `options` names.
 ///
 /// # Errors
@@ -720,14 +820,22 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
 
     // Everything the index says, removed as the payload accounts for it: what
     // is left at the end is what the artifact promised and did not carry.
-    let mut expected: BTreeMap<&str, &IndexFile> = info
-        .index
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file))
-        .collect();
-
     let mut issues = Vec::new();
+    let mut expected: BTreeMap<String, &IndexFile> = BTreeMap::new();
+    for file in &info.index.files {
+        let Some(name) =
+            crate::payload::destined_path_for(Path::new(&file.path), info.manifest.target.os)
+        else {
+            issues.push(Issue::UnsafePath {
+                path: file.path.clone(),
+            });
+            continue;
+        };
+        if expected.insert(name.clone(), file).is_some() {
+            issues.push(Issue::DuplicateIndex { path: name });
+        }
+    }
+    let mut destinations = crate::payload::Destinations::default();
     let mut objects = Vec::new();
     let mut files_checked = 0usize;
 
@@ -749,7 +857,7 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
             // read both and checked that they are the two the format fixes.
             continue;
         }
-        let Some(name) = destination(&entry) else {
+        let Some(name) = destination(&entry, info.manifest.target.os) else {
             // First of the three, and before the index is consulted: an entry
             // that leaves the extracted root is one `payload::unpack` refuses
             // outright, so it is not a file the index can account for however
@@ -767,6 +875,14 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
                 fixed,
             });
             continue;
+        }
+        if (kind == tar::EntryType::Directory || kind == tar::EntryType::Regular)
+            && let Err(existing) = destinations.insert(&name, kind == tar::EntryType::Directory)
+        {
+            issues.push(Issue::DestinationConflict {
+                path: name.clone(),
+                existing,
+            });
         }
         if kind == tar::EntryType::Directory {
             // The format permits one, for a directory that would otherwise be
@@ -857,7 +973,13 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
 fn native_issues(info: &ArtifactInfo, objects: &[ObjectInfo]) -> Vec<Issue> {
     let mut issues = Vec::new();
     for row in &info.manifest.native {
-        if !info.index.files.iter().any(|file| file.path == row.path) {
+        let key = crate::payload::destined_path_for(Path::new(&row.path), info.manifest.target.os);
+        if key.is_none()
+            || !info.index.files.iter().any(|file| {
+                crate::payload::destined_path_for(Path::new(&file.path), info.manifest.target.os)
+                    == key
+            })
+        {
             issues.push(Issue::NativeRowMissing {
                 path: row.path.clone(),
             });
@@ -866,7 +988,9 @@ fn native_issues(info: &ArtifactInfo, objects: &[ObjectInfo]) -> Vec<Issue> {
         let Some(recorded) = row.machine.as_deref() else {
             continue;
         };
-        if let Some(object) = objects.iter().find(|object| object.path == row.path)
+        if let Some(object) = objects
+            .iter()
+            .find(|object| Some(object.path.as_str()) == key.as_deref())
             && object.machine != recorded
         {
             issues.push(Issue::NativeMachineLie {
@@ -991,6 +1115,14 @@ fn describe(
         .allowlist
         .unwrap_or_else(|| platform_allowlist(artifact.manifest.target.os));
     let mut issues = Vec::new();
+    let expected_format = crate::platform::object_format(artifact.manifest.target.os);
+    if object.format != expected_format {
+        issues.push(Issue::FormatMismatch {
+            path: name.to_owned(),
+            found: object.format.as_str().to_owned(),
+            expected: expected_format.as_str().to_owned(),
+        });
+    }
     if object.machine != expected {
         issues.push(Issue::MachineMismatch {
             path: name.to_owned(),
@@ -1114,9 +1246,12 @@ fn entry_name(entry: &tar::Entry<'_, impl std::io::Read>) -> String {
 /// The `Some` is what the tar crate would create — `./ginary.json` and
 /// `ginary.json` are one destination — so the name matched against the index
 /// is the name the launcher would write.
-fn destination(entry: &tar::Entry<'_, impl std::io::Read>) -> Option<String> {
+fn destination(
+    entry: &tar::Entry<'_, impl std::io::Read>,
+    os: crate::target::Os,
+) -> Option<String> {
     let path = entry.path().ok()?;
-    crate::payload::destined_path(&path)
+    crate::payload::destined_path_for(&path, os)
 }
 
 /// A reader over exactly the payload region of `path`.
@@ -1166,6 +1301,23 @@ pub enum VerifyError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl VerifyError {
+    /// Identifies the stage interrupted by this error without claiming that
+    /// unexamined contents have no issues.
+    pub fn checks(&self) -> VerificationChecks {
+        match self {
+            Self::Artifact(_) => VerificationChecks {
+                integrity: CheckOutcome::Incomplete,
+                contents: CheckOutcome::NotRun,
+            },
+            Self::Payload { .. } | Self::Io { .. } => VerificationChecks {
+                integrity: CheckOutcome::Passed,
+                contents: CheckOutcome::Incomplete,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1253,6 +1405,18 @@ mod tests {
                 recorded: "x86_64".to_owned(),
                 actual: "aarch64".to_owned(),
             },
+            Issue::DuplicateIndex {
+                path: path.to_owned(),
+            },
+            Issue::DestinationConflict {
+                path: path.to_owned(),
+                existing: "parent".into(),
+            },
+            Issue::FormatMismatch {
+                path: path.to_owned(),
+                found: "pe".into(),
+                expected: "elf".into(),
+            },
         ];
         for issue in &issues {
             match issue {
@@ -1268,7 +1432,10 @@ mod tests {
                 | Issue::ReservedEntry { .. }
                 | Issue::UnsupportedEntry { .. }
                 | Issue::NativeRowMissing { .. }
-                | Issue::NativeMachineLie { .. } => {}
+                | Issue::NativeMachineLie { .. }
+                | Issue::FormatMismatch { .. }
+                | Issue::DuplicateIndex { .. }
+                | Issue::DestinationConflict { .. } => {}
             }
         }
         let ranks: Vec<u8> = issues.iter().map(Issue::rank).collect();
@@ -1306,13 +1473,13 @@ mod tests {
         // second: only a comparison that reads the path first orders these.
         let mut issues: Vec<Issue> = vec![
             every_issue("b").swap_remove(0),
-            every_issue("a").pop().expect("thirteen variants"),
+            every_issue("a").pop().expect("all issue variants"),
         ];
 
         issues.sort_by(issue_order);
 
         assert_eq!(issues[0].path(), "a");
-        assert!(matches!(issues[0], Issue::NativeMachineLie { .. }));
+        assert!(matches!(issues[0], Issue::FormatMismatch { .. }));
         assert_eq!(issues[1].path(), "b");
     }
 

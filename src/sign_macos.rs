@@ -51,6 +51,9 @@ use sha2::{Digest, Sha256};
 
 use crate::trailer::{TRAILER_LEN, Trailer};
 
+mod verify;
+pub use verify::verify_ad_hoc;
+
 /// Whether [`inject_and_sign`] applies an ad-hoc signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeSign {
@@ -145,6 +148,12 @@ pub struct LoadCommandSlack {
 /// Why a Mach-O could not be written or signed.
 #[derive(Debug, thiserror::Error)]
 pub enum SignMacosError {
+    /// The finished artifact's layout, payload or ad-hoc signature did not verify.
+    #[error("the finished macOS artifact failed verification: {message}")]
+    InvalidSignature {
+        /// The independent verification check that failed.
+        message: String,
+    },
     /// `stub_bytes` is not a Mach-O this crate can read at all.
     #[error("the stub is not a Mach-O this ginary can read: {source}")]
     NotAMachO {

@@ -985,6 +985,218 @@ fn a_user_supplied_tarball_is_cached_under_its_own_digest() {
     );
 }
 
+#[test]
+fn gzip_runtime_inputs_reuse_the_cache_and_changed_bytes_get_a_new_entry() {
+    use std::io::Write;
+    let dir = tempdir();
+    let source = dir.path().join("source");
+    FakeOtp::new().build_in(&source);
+    let gzip = |root: &Path| {
+        let zstd = runtime_tarball(root);
+        let tar = zstd::stream::decode_all(zstd.as_slice()).expect("fixture tar bytes");
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&tar).expect("gzip fixture");
+        encoder.finish().expect("complete gzip")
+    };
+    let archive = dir.path().join("runtime.tar.gz");
+    std::fs::write(&archive, gzip(&source)).unwrap();
+    let cache = dir.path().join("cache");
+    let first = catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap();
+    std::fs::write(first.join("cache-reuse-sentinel"), b"keep").unwrap();
+    assert_eq!(
+        catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap(),
+        first
+    );
+    assert_eq!(
+        std::fs::read(first.join("cache-reuse-sentinel")).unwrap(),
+        b"keep"
+    );
+    std::fs::write(source.join("new-runtime-file"), b"new archive content").unwrap();
+    std::fs::write(&archive, gzip(&source)).unwrap();
+    let second = catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap();
+    assert_ne!(first, second);
+    assert!(catalog::is_complete(&first) && catalog::is_complete(&second));
+    assert!(!first.join("new-runtime-file").exists());
+    assert_eq!(
+        std::fs::read(second.join("new-runtime-file")).unwrap(),
+        b"new archive content"
+    );
+}
+
+#[test]
+fn a_stale_same_process_extraction_is_replaced_without_carrying_its_files_forward() {
+    let dir = tempdir();
+    let source = dir.path().join("source");
+    FakeOtp::new().build_in(&source);
+    let bytes = runtime_tarball(&source);
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, &bytes).unwrap();
+    let cache = dir.path().join("cache");
+    let entry = cache.join(catalog::tarball_dir_name(&sha256_hex(&bytes)));
+    let stale = PathBuf::from(format!("{}.tmp-{}", entry.display(), std::process::id()));
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("untrusted-residue"), b"partial prior extraction").unwrap();
+    assert_eq!(
+        catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap(),
+        entry
+    );
+    assert!(catalog::is_complete(&entry));
+    assert!(!entry.join("untrusted-residue").exists());
+    assert!(!stale.exists());
+}
+
+#[test]
+fn an_unexpected_regular_file_at_a_cache_entry_is_reported_and_preserved() {
+    let dir = tempdir();
+    let source = dir.path().join("source");
+    FakeOtp::new().build_in(&source);
+    let bytes = runtime_tarball(&source);
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, &bytes).unwrap();
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let entry = cache.join(catalog::tarball_dir_name(&sha256_hex(&bytes)));
+    std::fs::write(&entry, b"unrelated data").unwrap();
+    let error = catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap_err();
+    assert!(
+        matches!(&error, CatalogError::Io { path, .. } if path == &entry),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&entry).unwrap(), b"unrelated data");
+    assert_eq!(std::fs::read(&archive).unwrap(), bytes);
+}
+
+#[test]
+fn a_local_catalog_archive_must_match_its_declared_size_as_well_as_its_digest() {
+    let dir = tempdir();
+    let source = dir.path().join("source");
+    FakeOtp::new().build_in(&source);
+    let bytes = runtime_tarball(&source);
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, &bytes).unwrap();
+    let catalog = CatalogBuilder::new()
+        .entry(
+            VERSION,
+            RELEASE,
+            ERTS_VSN,
+            MUSL,
+            "static",
+            static_variant(
+                "runtime.tar.zst",
+                &sha256_hex(&bytes),
+                bytes.len() as u64 + 1,
+            ),
+        )
+        .build();
+    let selected = catalog.lookup(VERSION, MUSL, None, "fixture").unwrap();
+    let cache = dir.path().join("cache");
+    let error = catalog::ensure_otp(
+        &selected,
+        &EnsureContext {
+            cache_root: &cache,
+            catalog_dir: Some(dir.path()),
+            net: &Net::offline(),
+            diag: &Diag::disabled(),
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CatalogError::Download(DownloadError::SizeMismatch { expected, actual, .. })
+        if expected == bytes.len() as u64 + 1 && actual == bytes.len() as u64)
+    );
+    assert!(!catalog::is_complete(&cache.join(selected.dir_name())));
+    assert_eq!(std::fs::read(&archive).unwrap(), bytes);
+}
+
+#[test]
+fn a_programmatically_constructed_catalog_with_a_bad_digest_cannot_fill_the_cache() {
+    let dir = tempdir();
+    let catalog = CatalogBuilder::new()
+        .entry(
+            VERSION,
+            RELEASE,
+            ERTS_VSN,
+            MUSL,
+            "static",
+            static_variant("absent.tar.zst", "not-a-sha256", 1),
+        )
+        .build();
+    let selected = catalog
+        .lookup(VERSION, MUSL, None, "embedded library caller")
+        .unwrap();
+    let cache = dir.path().join("cache");
+    let error = catalog::ensure_otp(
+        &selected,
+        &EnsureContext {
+            cache_root: &cache,
+            catalog_dir: Some(dir.path()),
+            net: &Net::offline(),
+            diag: &Diag::disabled(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, CatalogError::BadDigest { value, .. } if value == "not-a-sha256"));
+    assert!(!catalog::is_complete(&cache.join(selected.dir_name())));
+}
+
+#[test]
+fn a_blocked_cache_lock_directory_reports_its_path_without_touching_the_archive() {
+    let dir = tempdir();
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, b"archive input").unwrap();
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(".locks"), b"unexpected existing file").unwrap();
+    let error = catalog::ensure_tarball(&archive, &cache, &Diag::disabled()).unwrap_err();
+    assert!(
+        matches!(&error, CatalogError::Io { path, .. } if path.starts_with(cache.join(".locks"))),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(cache.join(".locks")).unwrap(),
+        b"unexpected existing file"
+    );
+    assert_eq!(std::fs::read(&archive).unwrap(), b"archive input");
+}
+
+#[test]
+fn a_catalog_install_failure_preserves_the_destination_and_removes_its_temporary_file() {
+    let dir = tempdir();
+    let destination = dir.path().join("catalog.json");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("sentinel"), b"existing data").unwrap();
+    let error = catalog::install(&two_target_catalog().json(), &destination).unwrap_err();
+    assert!(
+        matches!(&error, CatalogError::Io { path, .. } if path == &destination),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("sentinel")).unwrap(),
+        b"existing data"
+    );
+    assert!(
+        !PathBuf::from(format!(
+            "{}.tmp-{}",
+            destination.display(),
+            std::process::id()
+        ))
+        .exists()
+    );
+}
+
+#[test]
+fn a_cached_catalog_path_that_is_a_directory_does_not_fall_back_to_embedded_defaults() {
+    let dir = tempdir();
+    let path = dir.path().join("catalog.json");
+    std::fs::create_dir(&path).unwrap();
+    let error = Catalog::load(&CatalogPaths {
+        explicit: None,
+        cache: Some(path.clone()),
+    })
+    .unwrap_err();
+    assert!(matches!(error, CatalogError::Io { path: named, .. } if named == path));
+}
+
 // ------------------------------------------- the extractor's refusals --
 
 /// Extracts a hand-built archive as a user-supplied tarball.

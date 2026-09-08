@@ -27,9 +27,10 @@
 //!
 //! **The correct behaviour.** The rule turns on the host as well as the
 //! target, so [`ginary::bundle::check_windows_erts`] is given it. A Windows
-//! target built on a Windows host may take the host runtime; every other
-//! source, and every host that is not Windows, is refused exactly as before
-//! and with the same sentence.
+//! target built on a Windows host may take the host runtime. Local catalog
+//! and tarball sources also reach their actual runtime inspection on every host;
+//! a filename alone cannot establish whether the enclosed emulator is valid.
+//! A non-Windows host still cannot supply a Windows runtime through `host`.
 
 use std::path::PathBuf;
 
@@ -65,13 +66,30 @@ fn a_host_that_is_not_windows_still_has_no_windows_runtime_to_offer() {
 }
 
 #[test]
-fn no_host_turns_a_linux_tarball_into_a_windows_runtime() {
-    let tarball =
-        ErtsSourceSpec::Tarball(PathBuf::from("/srv/otp-29.0.5-linux-x86_64-gnu.tar.zst"));
+fn every_host_checks_catalog_and_tarball_bytes_instead_of_refusing_the_source_kind() {
+    for source in [
+        ErtsSourceSpec::Catalog,
+        ErtsSourceSpec::Tarball(PathBuf::from("otp-29.0.5-windows-x86_64.tar.zst")),
+    ] {
+        for host in [Os::Linux, Os::Macos, Os::Windows] {
+            assert!(
+                bundle::check_windows_erts(windows(), &source, host).is_ok(),
+                "a locally repacked Windows runtime must reach header and required-file verification on {host}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_docker_source_remains_unavailable_for_windows_on_every_host() {
     for host in [Os::Linux, Os::Macos, Os::Windows] {
         assert!(
-            bundle::check_windows_erts(windows(), &tarball, host).is_err(),
-            "a {host} host does not make a Linux tarball run on Windows"
+            bundle::check_windows_erts(
+                windows(),
+                &ErtsSourceSpec::Docker("erlang:29".into()),
+                host
+            )
+            .is_err()
         );
     }
 }

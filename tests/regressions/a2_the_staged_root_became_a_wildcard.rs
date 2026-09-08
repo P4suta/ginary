@@ -37,17 +37,12 @@ use crate::common::tools::require_tools;
 /// of its neighbour.
 const STAR_ROOT: &str = "out*";
 
-/// The unstripped module every tree in this file is built from.
-fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/beam/gleam@list.beam")
-}
-
 /// Writes `<root>/lib/notify/ebin/gleam@list.beam` and answers its path.
-fn tree(root: &Path) -> PathBuf {
+fn tree(fixture: &Path, root: &Path) -> PathBuf {
     let ebin = root.join("lib/notify/ebin");
     std::fs::create_dir_all(&ebin).expect("an ebin directory");
     let module = ebin.join("gleam@list.beam");
-    std::fs::copy(fixture(), &module).expect("the fixture copies");
+    std::fs::copy(fixture, &module).expect("the fixture copies");
     module
 }
 
@@ -69,8 +64,9 @@ fn a_root_named_with_a_bracket_still_has_its_own_modules_stripped() {
     };
     let otp = ginary::otp::discover(None).expect("the host OTP installation");
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let staged = tree(&dir.path().join("out[1]"));
-    let neighbour = tree(&dir.path().join("out1"));
+    let fixture = crate::common::erl::compile_strip_fixture(&otp, &dir.path().join("compiler"));
+    let staged = tree(&fixture, &dir.path().join("out[1]"));
+    let neighbour = tree(&fixture, &dir.path().join("out1"));
     let neighbour_before = std::fs::read(&neighbour).expect("a readable module");
 
     let report = strip::strip(
@@ -115,8 +111,9 @@ fn a_root_named_with_a_star_leaves_its_neighbours_alone() {
     }
     let otp = ginary::otp::discover(None).expect("the host OTP installation");
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let staged = tree(&dir.path().join(STAR_ROOT));
-    let neighbour = tree(&dir.path().join("outer"));
+    let fixture = crate::common::erl::compile_strip_fixture(&otp, &dir.path().join("compiler"));
+    let staged = tree(&fixture, &dir.path().join(STAR_ROOT));
+    let neighbour = tree(&fixture, &dir.path().join("outer"));
     let neighbour_before = std::fs::read(&neighbour).expect("a readable module");
 
     let report = strip::strip(

@@ -16,35 +16,34 @@ trimmed BEAM runtime, to a copy of the ginary binary itself.
 [![CodeQL](https://github.com/P4suta/ginary/actions/workflows/codeql.yml/badge.svg)](https://github.com/P4suta/ginary/actions/workflows/codeql.yml)
 [![Nightly](https://github.com/P4suta/ginary/actions/workflows/nightly.yml/badge.svg)](https://github.com/P4suta/ginary/actions/workflows/nightly.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/P4suta/ginary/badge)](https://scorecard.dev/viewer/?uri=github.com/P4suta/ginary)
-![Coverage](https://img.shields.io/badge/coverage-90%25%2B-brightgreen)
+![Coverage gates](https://img.shields.io/badge/coverage_gates-90%25_lines_%2F_80%25_branches-blue)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
-**v1.** ginary packages a Gleam application and a trimmed BEAM runtime into a single executable
-that runs on a machine with no Erlang, no `PATH` entry and no unpacking step. v1 delivers the
-whole pipeline for seven targets — Linux gnu and musl on x86_64 and aarch64, macOS on x86_64 and
-arm64, and Windows on x86_64 — plus the tools to read, verify and cross-build an artifact: a
-version-locked stub per target, a local-first OTP catalog, native-code reconciliation for NIFs
-and port programs, `ginary verify` and `ginary sbom`, and a launcher whose cache protocol is
-modelled in TLA+. What runs where, and what a Mac or Windows runner still has to confirm, is the
-matrix below.
+**Development version 0.1.0.** The packaging pipeline supports seven target descriptions:
+Linux gnu and musl on x86_64 and aarch64, macOS on x86_64 and arm64, and Windows on x86_64.
+It includes version-locked stubs, a local-first OTP catalog, native-code reconciliation,
+`ginary verify`, `ginary sbom`, and a cache protocol modelled in TLA+.
 
-| target | builds here | runs here | runs on CI |
-|---|---|---|---|
-| `linux-x86_64-gnu` | yes (host) | yes (host) | yes (ubuntu-24.04) |
-| `linux-x86_64-musl` | yes (cross) | yes (alpine container) | yes (smoke matrix) |
-| `linux-aarch64-gnu` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
-| `linux-aarch64-musl` | yes (cross) | yes (binfmt container) | yes (smoke matrix) |
-| `macos-x86_64` | no (needs a Mac) | no | yes (macos-15-intel) |
-| `macos-aarch64` | no (needs a Mac) | no | yes (macos-14) |
-| `windows-x86_64` | yes (stub, cross) | yes (host, E23) | yes (windows-2022) |
+| target | required execution evidence |
+|---|---|
+| `linux-x86_64-gnu` | native and clean-room container tests |
+| `linux-x86_64-musl` | native and clean-room container tests |
+| `linux-aarch64-gnu` | cross-build and compatible native/emulated runtime checks |
+| `linux-aarch64-musl` | cross-build and compatible native/emulated runtime checks |
+| `macos-x86_64` | native packaging, execution and strict code-signature verification |
+| `macos-aarch64` | native packaging, execution and strict code-signature verification |
+| `windows-x86_64` | native Rust tests, runtime packaging, process and exit-code checks |
 
-"builds here" and "runs here" are what a development machine can do today — Linux x86_64 for
-every row but the last, which E23 measured on a Windows host, the first this project has had.
-"runs on CI" is the job that runs it once the workflows have a remote to run on. The macOS
-launch, the Windows launch *with a real `erl.exe`*, the catalog publishing and the provenance
-attestations are authored as CI jobs and run when the repository is published — see
-[docs/dev/v1-readiness.md](docs/dev/v1-readiness.md) for the phase-by-phase evidence and
-[CHANGELOG.md](CHANGELOG.md) for the release notes.
+Workflow definitions describe the required checks; they do not establish that a particular
+commit has passed them. Consult the current CI run and [development records](docs/dev/log/) for
+execution evidence. Local synthetic runtime tests verify format and isolation contracts without
+pretending to boot another operating system. This development session creates no tag, draft,
+release or hosted release asset.
+
+The distribution workflow now defaults to a rehearsal for an explicit existing tag. It builds
+all targets from one resolved commit, merges their catalogs without overwriting fragments, and
+checks the inventory before producing reviewable workflow artifacts. Hosted release mutation
+requires a separate explicit publish option and authorization; see [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Quickstart
 
@@ -115,8 +114,9 @@ lib/crypto-5.9.2/priv/lib/crypto.so         x86_64   64     2.34   libc.so.6
 ...
 ```
 
-`ginary build --sbom` writes the same document a build produces, as `<app>.spdx.json` beside the
-artifact, or wherever `--sbom-out` says. It is a function of the artifact and of the project's
+`ginary build --sbom` writes a document beside each completed artifact as
+`<artifact-filename>.spdx.json`. `--sbom-out` selects a file for one target or a directory for
+multiple targets. The document is a function of the artifact and of the project's
 `manifest.toml`: the document namespace comes from the payload's SHA-256 rather than from a
 random UUID and a clock, so a reproducible build has a reproducible bill of materials. A package
 whose origin the shipment does not record is `NOASSERTION` rather than a guess.
@@ -566,15 +566,9 @@ forwarding, and the application receives its arguments exactly as typed.
   proved — `--stub`, `$GINARY_STUB_DIR`, the cache — but the BEAM that goes into the payload is
   the one `erl` reports on the build machine, or the one `--otp-root` or a `dir:`/`tarball:`
   source names. A target other than the host with no `erts` named for it is refused, quoting the
-  table to write. Prebuilt runtime downloads and the musl variants are Phase C of
-  [the roadmap](docs/dev/log/).
-- **Windows runs a stub runtime, not a real one.** `mise run stubs:build` produces the
-  `windows-x86_64` stub and `mise run build:windows` builds both flavors; a Windows host now
-  starts packaged applications and the launcher's whole contract is asserted there, but the
-  runtime those artifacts carry is a test stub, because the development machine has no Erlang.
-  A real `erl.exe` inside a real artifact is the CI job's; see [Windows](#windows). No macOS
-  stub can be built on Linux at all; the two of them come from the release build on a macOS
-  runner.
+  table to write. The catalog provides checked prebuilt runtimes; a missing target or variant is an explicit error.
+- **Foreign-target execution needs its own runner.** Local structural tests do not replace
+  native Windows/macOS execution or Linux runtime qualification; see the platform sections.
 - **glibc, dynamically linked.** A host-OTP artifact needs the C library of the machine it was
   built on, or newer. The `needs:` line every build prints is the exact list — for the OTP 29.0.5
   runtime this repository is developed against it is `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`,
@@ -595,179 +589,68 @@ forwarding, and the application receives its arguments exactly as typed.
 
 ## Windows
 
-Windows support is **compiled, cross-checked and partly executed — and no Windows machine has
-run a packaged application yet.** The distinction matters, so here is exactly where the line
-falls.
+The Windows launcher remains resident as the runtime's parent. It uses Windows share-mode
+locks, a job object for child lifetime, and `erl.exe` with the runtime's own emulator DLL.
+The native CI job builds both flavors and runs Rust tests; synthetic process tests and actual
+OTP end-to-end tests provide different evidence and are reported separately.
 
-What works, and is checked on every run of the suite:
+Runtime resolution inspects the PE header, including catalog and tarball sources. A local OTP
+installation can be repacked with `ginary otp repack --root PATH --targets windows-x86_64
+--upstream-tag OTP-29.0.5 --out DIR`. The installation is copied before pruning and stripping;
+its target and exact OTP version must match. The catalog records an honest local-tree digest,
+not a claim that the installer was checked against an upstream archive digest.
 
-- **The crate compiles for `x86_64-pc-windows-gnu`, in both flavors.** `mise run build:windows`
-  runs `cross build --release` twice for that triple — the launcher-only stub
-  (`--no-default-features`) and the full command line tool. Everything the Unix launcher needs
-  and Windows does not have is split: `/proc/self/exe`, `flock`, `syncfs`, the uid in the
-  fallback cache root, the mode bits, `pread`, and `execve` itself.
-- **The stub builds and starts.** `mise run stubs:build` produces
-  `ginary-stub-<version>-windows-x86_64.exe`, and it runs under the `cross` image's wine: it
-  prints its payloadless-stub sentence and exits 2. That is a real execution of
-  `Target::host`, of `selfexe::open_self`'s `current_exe` route and of `trailer::read_from`'s
-  `seek_read` loop on a Windows binary.
-- **The rules underneath the launcher are unit-tested on Linux**, because they are pure
-  functions and a Linux machine can check them honestly: the cache root
-  (`GINARY_CACHE_DIR` > `%LOCALAPPDATA%\ginary` > `%TEMP%\ginary-<user>`), the `\\?\`
-  long-path prefix a deep cache entry is extracted under *and* the ordinary spelling `erl.exe`
-  is handed back, the two share modes the locks become, the exit-code mapping, `erl.exe` as the
-  launch program, and that a Windows launch plan is the Unix one with a different program name.
-  See `tests/windows.rs` and `tests/windows_build.rs`.
-- **A Windows runtime tree can be read.** `otp::inspect_root` measures a tree holding `erl.exe`
-  against the Windows required-file list rather than the four Unix programs, and
-  `erts_source::resolve` takes the target off the PE header of that tree's `beam.smp.dll` — the
-  emulator `erl.exe` loads — so a Windows tree in a Linux build is a target mismatch at build
-  time rather than a loader error on somebody else's machine.
-- **The build side refuses what it cannot do.** A `--target windows-x86_64` build whose runtime
-  is `host`, `catalog`, a Linux `tarball:` or a `docker:` image is refused by name; only a
-  `dir:` source holding a tree unpacked from `otp_win64_<version>.zip` is accepted. Assembly
-  reads the required files off the tree rather than off the request — `erl.exe`,
-  `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them — and deletes the `erl.ini` that
-  would point the artifact at the build machine's `Rootdir`. `distribution` and `heart` ask the
-  tree for `epmd.exe` and `heart.exe`, the names a Windows runtime spells them with. Which of
-  the two flavours a tree is gets read off the tree — "does `erts-<vsn>/bin` hold `erl.exe`?" —
-  in one place, so the resolver, `inspect_root` and assembly cannot disagree about it.
+Set `GINARY_CATALOG` to the generated `catalog.json` and configure
+`[tools.ginary.target.windows-x86_64] erts = "catalog"` to build from that runtime. A
+`tarball:<path>` source can consume the generated archive directly. Both paths verify the
+runtime's actual PE architecture, required files and catalog claims before packaging.
+These explicit runtime sources also work for Windows cross builds on other hosts;
+the target's matching ginary stub is required, and BEAM stripping uses the host's Erlang.
 
-What the launcher **does** on Windows is now tested there. E23 was worked on a Windows host, and
-`tests/launcher.rs` — which had been `#![cfg(unix)]` in its entirety, because the fixture's
-`erlexec` was a `#!/bin/sh` script — runs natively: the spawn, the wait, the exit code, the
-share-mode lock, the `\\?\` extraction, the cache, the argument vector, the environment
-difference, the five numbered failures, the `GINARY_CMD` commands, pruning and uninstalling. The
-job object has its own test: kill the resident launcher mid-run and the runtime goes with it.
+The launcher contract is exercised natively by `tests/launcher.rs`: process startup and exit
+codes, share-mode locks, cache extraction, arguments and environment, maintenance commands,
+and pruning. A separate test kills the resident launcher and checks that its job object also
+terminates the runtime. Synthetic runtime tests make those mechanisms observable independently
+of an OTP installation.
 
-What the GitHub Actions `windows-2022` runner proved, in run
-[34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195):
+The native CI job also packages and runs a real `hello_ffi` artifact. E23 recorded the hosted
+Windows run [34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195), which checked
+exit 0 with arguments, exit 3 from `halt(3)`, and exit 3 again on a warm cache. See
+[the E23 record](docs/dev/log/E23.md) for the original runner evidence.
 
-```text
-erl -noshell -eval halt(3) left exit code 3
-the artifact left exit code 0 for '0 hello world'
-the artifact left exit code 3 for halt(3)
-the second, warm run left exit code 3
-```
+F1 subsequently exercised the complete path on a Windows development machine: repacking the
+installed OTP 29.0.5 root, consuming the generated catalog offline, building a real application
+and SBOM, verifying its 214 files and four PE objects with zero findings, and running it with
+an empty tool PATH. Arguments, packaged `priv` data, working directory and exit 3 were checked.
+[The F1 build record](docs/dev/log/F1-build.md) retains the exact source, artifact and environment
+identities; these results do not stand in for a future commit's CI run.
 
-A real `erl.exe`, started by this launcher, inside a `hello_ffi` artifact packaged against the OTP
-`setup-beam` installs — cold, then warm, with `halt(3)` arriving as `%ERRORLEVEL%` 3. That
-discharges the exit-code contract end to end, the `otp_win64_<version>.zip` layout the
-required-file probe was written data-driven against, and `ginary build --target windows-x86_64`
-over a real unpacked runtime. Until E23 the job it replaced ran `erl.exe` directly and packaged
-nothing, so this row of `docs/dev/v1-readiness.md` had been booking a proof against a step that
-did not perform it.
+Console control-event delivery remains unqualified: installing `SetConsoleCtrlHandler` and
+checking its result does not prove delivery of a real Ctrl-C event. Runtime behavior for cache
+paths beyond `MAX_PATH` also needs native OTP qualification; synthetic PE-header and long-path
+extraction tests cannot establish that the runtime launches there.
 
-What is still **untested**:
-
-- **No console control event has ever reached the launcher.** `SetConsoleCtrlHandler` is called
-  on every launch, so the handler is installed and its return is checked; what has never happened
-  is an event arriving. Delivering a Ctrl-C to a process group a test owns needs
-  `GenerateConsoleCtrlEvent`, a Win32 call with no safe counterpart, and a new
-  `#[allow(unsafe_code)]` needs an ADR of its own — so E23 recorded it as declined rather than
-  faking it. It is the one mechanism of ADR 0015 still resting on argument.
-- **No Windows artifact has been built end to end on a development machine.** There is no
-  `otp_win64_<version>.zip` to point `erts = "dir:…"` at there, so what the local suite covers is
-  that such a tree *resolves* — over a fabricated tree carrying real PE headers — and what the
-  suite starts is a stub runtime, which is what makes the launcher's own behaviour observable
-  with no Erlang installed. The real build is the runner's, above.
-- **The `otp_win64_<version>.zip` layout is an assumption.** The required-file probe is
-  data-driven for exactly that reason, and the DLL the emulator is named as — `beam.smp.dll` —
-  is what the documentation says rather than what a real zip was read for.
-- **A cache entry longer than `MAX_PATH` still cannot be launched.** The `\\?\` prefix covers
-  everything ginary itself opens — the extraction, the cache-hit check, the lock, the manifest
-  and the preflight — and `ROOTDIR`, `BINDIR` and the argument vector are handed to `erl.exe`
-  in the ordinary spelling, because that program takes them apart and reassembles them. Past
-  `MAX_PATH` the entry is therefore extracted, found and locked, and the runtime will not start
-  out of it. That limit is `erl.exe`'s.
-- **Nothing runs under a real wine either.** The image's wine has no `bcryptprimitives.dll`,
-  which every Rust *test* binary imports through `std`, so `cross test` cannot start one; the
-  stub, which imports only `kernel32`, `ntdll` and `msvcrt`, does.
-- **The `MAX_PATH` limit above is still unmeasured.** Nothing has built an entry long enough to
-  reach it, on any host.
-
-One stated limitation, rather than a gap: **a Linux or macOS artifact cross-built *on* Windows
-records 0o644 for every file.** There is no mode word to read there, and the launcher repairs
-the execute bit only under the artifact's `erts-<vsn>/bin`, so a program shipped under
-`lib/<app>-<vsn>/priv/bin` would arrive without one. Build unix artifacts on a unix machine.
-
-`docs/adr/0015-windows-launcher-stays-resident.md` records why the launcher stays alive as the
-runtime's parent, and `docs/dev/log/D2.md` records the build sizes and the wine transcript.
+For Unix artifacts built on Windows, source executable mode bits are unavailable. Build Unix
+release assets on Unix runners. See [ADR 0015](docs/adr/0015-windows-launcher-stays-resident.md)
+for the process model and [the D2 record](docs/dev/log/D2.md) for the original cross-build and
+Wine limitations.
 
 ## macOS
 
-macOS support is **verified structurally on Linux — the packaging half — and has never been run
-on a Mac.** The same distinction the Windows section draws applies here, with a different line:
-Windows has run its stub under wine; nothing built for macOS has run anywhere, because there is
-no way to execute a Mach-O on this host at all, wine included.
+The current writer appends the payload within the Mach-O `__LINKEDIT` extent and produces an
+ad-hoc signature over the finished bytes. It preserves the mapped entry instructions; the
+older section-moving layout was replaced after native execution failures. Structural tests
+check the payload location, signature page hashes and segment bounds. The two native CI jobs
+also package and execute a fixture and run `codesign --verify --strict` before and after launch.
 
-What macOS packaging *is*: ordinary self-contained-executable packaging, the technique Burrito
-and Bakeware both use and the same one any macOS app-bundler applies. A Mach-O has no room to
-append bytes after its last segment without breaking code signing, so the payload goes into a
-dedicated `__GINARY,__payload` section instead, and the finished artifact gets a plain, unsigned,
-ad-hoc code signature over ginary's own output — no identity claimed, nothing stripped, nothing
-evaded. `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` records why a section and not
-an appended trailer: `codesign --strict` refuses appended bytes, and an arm64 kernel refuses to
-map any unsigned page at all, not merely a wrongly-signed one.
+An installed native OTP root can be repacked with `--root`, just as on Windows. The resolver
+checks the Mach-O architecture and refuses universal binaries and target/version mismatches.
+The Linux upstream download mapping remains Linux-specific; native distribution jobs use their
+installed OTP root instead of sending a macOS target through that mapping.
 
-What works, and is checked on every run of the suite:
-
-- **Read-only Mach-O inspection** (`macho.rs`): a file's `cputype`, whether it is a fat
-  (universal) binary, whether an `LC_CODE_SIGNATURE` load command is present, and where a named
-  section is. Checked against a committed real Mach-O (`tests/fixtures/macho/`, Erlang/OTP's own
-  `inet_gethost`, arm64, already ad-hoc signed by erlef's own build) and against hand-fabricated
-  headers for the cases a real binary does not conveniently carry — a fat header, a truncated
-  one, a section this crate itself planted.
-- **The payload locator** (`payload::locate`) reads a `__GINARY,__payload` section the same way
-  it reads the end-of-file trailer everywhere else: the trailer struct is identical, only
-  `payload_offset`'s meaning (relative to the section, not the file) and the geometry check
-  differ. Every existing ELF and PE test keeps passing unchanged, which is the abstraction's own
-  proof — nothing downstream of `locate` had to learn there are two containers. `launcher::mode`
-  (what `main()` calls to decide launcher versus CLI at all), `ginary inspect` and `ginary
-  verify` all go through it now, so a real darwin build of this launcher would recognise its own
-  section as a payload, and both commands can already open a Mach-O artifact on this host — they
-  just cannot run one.
-- **A macOS build's own arm** (`bundle::write_macos_artifact`) packs the payload and calls
-  `sign_macos::inject_and_sign` instead of appending a trailer. With no darwin stub on this
-  machine there is nothing to build one against, so the coverage here is the honest refusal:
-  `ginary build --target macos-aarch64` with no `--stub` and no `GINARY_STUB_DIR` gets the same
-  `StubError::NotFound`, naming every path it searched, that any other unstubbed cross target
-  gets.
-- **Section injection and ad-hoc signing** (`sign_macos::inject_and_sign`) is checked
-  structurally: the section lands at the offset and size `macho.rs` itself reports back, signing
-  adds exactly one `LC_CODE_SIGNATURE` load command, and `payload::locate` round-trips the exact
-  bytes and digest that went in. Run against the committed real Mach-O fixture as the stand-in
-  for a darwin stub, since none exists on this machine — see the next paragraph.
-- **The catalog knows a macOS release is committable before it is built.** `erlef_upstream_asset`
-  names the exact asset `erlef/otp_builds` publishes for each macOS arch, pinned against a real
-  release; `macos_catalog_admissible` is the stricter, commit-time version of the host-release
-  rule a build itself already applies, so `dist/otp/catalog.json` never gains a macOS entry this
-  repository's own host beams could not load. Running the repack end to end — the trust anchor
-  actually reading a repackaged `beam.smp` with `macho.rs`, the way a Linux repack reads an ELF —
-  is recorded in `docs/dev/log/D3.md` as scoped out of this pass: it needs `repack_one`
-  generalised over object format and a Mach-O-aware strip, neither of which exists yet.
-
-What only a Mac can confirm, and is the GitHub Actions milestone on a `macos-15-intel`/`macos-14`
-runner:
-
-- **No darwin stub exists on this machine, because there is no macOS toolchain on Linux to build
-  one with.** `--stub` and `GINARY_STUB_DIR` are the only ways a darwin build gets one here, and
-  without either the honest answer is the same `StubError::NotFound` naming the CI release build,
-  that every other missing stub gets.
-- **`codesign --verify --strict` has never been run against ginary's own output**, and neither
-  has Gatekeeper's quarantine check. An ad-hoc signature satisfies the kernel's load-time
-  requirement, which is what is checked here; it does **not** satisfy Gatekeeper on a file
-  downloaded from the network — a quarantined ad-hoc-signed binary still prompts the user, and
-  clearing that (or moving to a real Developer ID signature, later) needs a Mac to test against.
-- **No Mach-O artifact has ever been executed.** Structurally: the section is there, the
-  signature load command is there, the locator finds the payload back. Actually launching one —
-  the BEAM starting, the port programs resolving, the whole pipeline this repository packages —
-  is untested until a `macos-15-intel`/`macos-14` runner does it.
-
-`docs/dev/log/D3.md` records why the crate the plan named did not end up as a dependency, the
-technique `sign_macos.rs` is built on instead, the injection and structural-verification
-transcript, and the erlef release the catalog functions are pinned against.
-
+Ad-hoc signing does not provide a Developer ID identity or notarization. Gatekeeper behavior for
+downloaded files remains a separate qualification from kernel signature validity and execution.
+See [the E9 record](docs/dev/log/E9.md) and [assurance changes](docs/dev/log/F1-assurance.md).
 ## Documentation
 
 - [docs/format.md](docs/format.md) — the payload trailer and manifest specification.

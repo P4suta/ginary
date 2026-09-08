@@ -465,7 +465,7 @@ fn a_crash_dump_written_during_a_supervised_run_is_reported() {
         .expect("the dump must reach the trace as well as standard error");
     assert_eq!(
         crash.kv.get("slogan").map(String::as_str),
-        Some(STUB_SLOGAN)
+        Some("[redacted]")
     );
 }
 
@@ -1128,6 +1128,7 @@ fn the_trace_records_a_launch_that_can_be_reproduced() {
     ok(&artifact
         .run()
         .env("GINARY_TRACE", &trace)
+        .env("GINARY_TRACE_SENSITIVE", "1")
         .arg("--name")
         .arg("world")
         .output());
@@ -1875,6 +1876,7 @@ fn a_selftest_run_replaces_the_eval_and_drops_the_user_s_arguments() {
         .run()
         .env("GINARY_CMD", "selftest")
         .env("GINARY_TRACE", &trace)
+        .env("GINARY_TRACE_SENSITIVE", "1")
         .arg("--name")
         .arg("world")
         .output();

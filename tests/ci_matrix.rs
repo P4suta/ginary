@@ -251,8 +251,7 @@ fn the_macos_job_builds_the_darwin_stub_natively_and_verifies_the_signature() {
         "macos-15-intel",
         "macos-14",
         "--no-default-features",
-        "codesign",
-        "--verify",
+        "bash scripts/ci/macos-smoke.sh",
     ] {
         assert!(
             job.contains(needle),
@@ -260,6 +259,9 @@ fn the_macos_job_builds_the_darwin_stub_natively_and_verifies_the_signature() {
              gap"
         );
     }
+    let script = read("scripts/ci/macos-smoke.sh");
+    assert!(script.contains("codesign --verify --strict"));
+    assert!(ci.contains("shellcheck scripts/ci/macos-smoke.sh"));
 }
 
 #[test]
@@ -482,7 +484,7 @@ fn the_coverage_job_obtains_the_stubs_its_floor_is_measured_with() {
         // stubs but no repack they stop skipping and start failing instead.
         "otp repack",
         "--out dist/otp",
-        "coverage-gate.sh target/lcov.info 90",
+        "bash scripts/ci/coverage.sh",
     ] {
         assert!(
             job.contains(needle),
@@ -491,6 +493,10 @@ fn the_coverage_job_obtains_the_stubs_its_floor_is_measured_with() {
              tests skip or fail:\n{job}"
         );
     }
+    let helper = read("scripts/ci/coverage.sh");
+    assert!(helper.contains("coverage-gate.sh \"$lcov\" 90"));
+    assert!(helper.contains("coverage-gate.sh \"$lcov\" 80 branches"));
+    assert!(helper.contains("scripts/ci/test-evidence.py"));
 }
 
 // ------------------------------------------------------ the toolchains --
@@ -663,6 +669,8 @@ fn every_job_but_the_msrv_and_fuzz_ones_builds_on_stable() {
         let key = (site.workflow.as_str(), site.job.as_str());
         let expected = if key == MSRV_JOB {
             floor.clone()
+        } else if key == (".github/workflows/ci.yml", "coverage") {
+            "${{ matrix.toolchain }}".to_owned()
         } else if key == NIGHTLY_JOB {
             "nightly".to_owned()
         } else {
@@ -785,18 +793,34 @@ fn the_nightly_workflow_runs_mutants_fuzz_and_the_full_smoke_matrix() {
         nightly.contains("schedule:") && nightly.contains("cron:"),
         "nightly runs on a schedule so PR CI stays fast:\n{nightly}"
     );
-    for needle in ["cargo mutants", "cargo fuzz", "smoke-matrix.sh"] {
+    for needle in ["scripts/ci/mutation.py", "cargo fuzz"] {
         assert!(
             nightly.contains(needle),
             "the nightly workflow is missing `{needle}`"
         );
     }
+    assert!(
+        crate::common::repo::workflow_steps(".github/workflows/nightly.yml")
+            .iter()
+            .any(|step| step.job == "smoke-matrix"
+                && step
+                    .run
+                    .contains("bash scripts/ci/smoke-matrix-evidence.sh")),
+        "nightly must invoke the smoke evidence wrapper"
+    );
+    let smoke_wrapper =
+        read_opt("scripts/ci/smoke-matrix-evidence.sh").expect("the invoked smoke wrapper exists");
+    assert!(
+        smoke_wrapper.contains("scripts/smoke-matrix.sh"),
+        "the evidence wrapper must still run the complete smoke matrix"
+    );
+    let budget = crate::common::nightly::mutation_budget();
     for module in [
         "trailer", "payload", "cache", "closure", "appfile", "launch", "verify",
     ] {
         assert!(
-            nightly.contains(module),
-            "the mutants shard list is missing the high-value module `{module}`"
+            budget.modules.contains_key(module),
+            "the canonical mutation budget is missing the high-value module `{module}`"
         );
     }
 }
@@ -1432,15 +1456,33 @@ fn dependabot_watches_every_manifest_this_repository_actually_has() {
         .iter()
         .map(|u| (u.ecosystem.as_str(), u.directory.as_str()))
         .collect();
-    // `fuzz/` is a workspace of its own — deliberately not a member of the root
-    // one, see its Cargo.toml — so the root `cargo` entry does not reach its
-    // manifest and it needs an entry of its own.
+    // Both auxiliary tools are standalone workspaces. The root Cargo update
+    // cannot maintain their independent lockfiles.
     assert_eq!(
         watched,
-        vec![("cargo", "/"), ("cargo", "/fuzz"), ("github-actions", "/")],
-        "dependabot covers the crate, the fuzz workspace and the actions, and nothing this \
+        vec![
+            ("cargo", "/"),
+            ("cargo", "/fuzz"),
+            ("cargo", "/tools/mutation-plan"),
+            ("github-actions", "/"),
+        ],
+        "dependabot covers the crate, both standalone tools and the actions, and nothing this \
          repository does not have; it covers: {watched:?}"
     );
+    for directory in ["fuzz", "tools/mutation-plan"] {
+        let manifest = read(&format!("{directory}/Cargo.toml"));
+        assert!(
+            manifest
+                .lines()
+                .map(shell_code)
+                .any(|line| line.trim() == "[workspace]"),
+            "the separate update entry must belong to a real standalone workspace: {directory}"
+        );
+        assert!(
+            exists(&format!("{directory}/Cargo.lock")),
+            "the planner and fuzz tool must retain their reproducible dependency selections"
+        );
+    }
     for update in &updates {
         assert_eq!(
             (
@@ -2174,6 +2216,156 @@ fn the_mutants_job_points_at_the_record_its_budget_rests_on() {
 }
 
 #[test]
+fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost() {
+    use crate::common::nightly::{measured_mutants, mutants_plan, mutation_budget};
+
+    let budget = mutation_budget();
+    let expected: std::collections::BTreeMap<String, u64> = [
+        ("appfile", 16),
+        ("cache", 24),
+        ("closure", 8),
+        ("launch", 8),
+        ("payload", 12),
+        ("trailer", 3),
+        ("verify", 10),
+    ]
+    .into_iter()
+    .map(|(module, divisions)| (module.to_owned(), divisions))
+    .collect();
+    assert_eq!(
+        budget.modules, expected,
+        "the canonical workload may not silently shrink"
+    );
+    assert_eq!(budget.max_mutants_per_shard, 13);
+    assert_eq!(budget.build_timeout_seconds, 120);
+    assert_eq!(budget.test_timeout_seconds, 420);
+
+    let plan = mutants_plan();
+    assert_eq!(plan.shards.len(), 81);
+    let mut actual: std::collections::BTreeMap<&str, Vec<u64>> = std::collections::BTreeMap::new();
+    for shard in &plan.shards {
+        actual.entry(&shard.module).or_default().push(shard.index);
+        assert_eq!(shard.shards, budget.modules[&shard.module]);
+        assert_eq!(shard.timeout.as_deref(), Some("420"));
+    }
+    for (module, divisions) in &budget.modules {
+        assert_eq!(
+            actual[module.as_str()],
+            (0..*divisions).collect::<Vec<_>>(),
+            "routing must retain every canonical division exactly once: {module}"
+        );
+    }
+    let worst_case_minutes = measured_mutants().baseline_minutes
+        + (budget.max_mutants_per_shard
+            * (budget.build_timeout_seconds + budget.test_timeout_seconds))
+            .div_ceil(60)
+        + 15;
+    assert!(
+        worst_case_minutes <= plan.timeout_minutes,
+        "every build and test may consume its cap; evidence still needs time to be retained"
+    );
+}
+
+#[test]
+fn the_current_source_inventory_fits_every_canonical_mutation_division() {
+    use crate::common::nightly::{CURRENT_MUTANT_COUNTS, mutation_budget};
+
+    let current: serde_json::Value = serde_json::from_str(&read(CURRENT_MUTANT_COUNTS))
+        .expect("the integrated mutation inventory is JSON");
+    let counts = current["modules"].as_object().expect("per-module counts");
+    let budget = mutation_budget();
+    assert_eq!(current["schema_version"], 1);
+    assert_eq!(current["tool_version"], "27.1.0");
+    assert_eq!(current["executed_mutants"], 0);
+    assert_eq!(counts.len(), budget.modules.len());
+    let mut total = 0;
+    for (module, divisions) in &budget.modules {
+        let count = counts[module].as_u64().expect("a measured candidate count");
+        total += count;
+        assert!(
+            count.div_ceil(*divisions) <= budget.max_mutants_per_shard,
+            "{module}: {count} candidates over {divisions} divisions exceed the {}-candidate cap",
+            budget.max_mutants_per_shard
+        );
+    }
+    assert_eq!(total, 960);
+    assert_eq!(current["total_selected"], total);
+}
+
+#[test]
+fn the_mutants_job_consumes_the_planned_matrix_on_its_assigned_native_runner() {
+    let parsed = crate::common::repo::yaml(crate::common::nightly::NIGHTLY);
+    let jobs = parsed.as_mapping_get("jobs").expect("nightly jobs");
+    let planner = jobs
+        .as_mapping_get("mutation-plan")
+        .expect("mutation inventory planner");
+    let mutants = jobs
+        .as_mapping_get("mutants")
+        .expect("mutation execution job");
+    let matrix = mutants
+        .as_mapping_get("strategy")
+        .and_then(|strategy| strategy.as_mapping_get("matrix"))
+        .and_then(YamlOwned::as_str)
+        .expect("the execution matrix is generated from actual mutation inventory");
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    assert_eq!(
+        compact(matrix),
+        "${{fromJSON(needs.mutation-plan.outputs.matrix)}}",
+        "a handwritten matrix can omit platform-only mutants or retain stale assignments"
+    );
+    let needs = mutants.as_mapping_get("needs").expect("planner dependency");
+    assert!(
+        needs.as_str() == Some("mutation-plan")
+            || needs.as_vec().is_some_and(|dependencies| dependencies
+                .iter()
+                .any(|dependency| dependency.as_str() == Some("mutation-plan"))),
+        "execution must wait for the same inventory that supplied the matrix"
+    );
+    assert!(
+        planner
+            .as_mapping_get("outputs")
+            .and_then(|outputs| outputs.as_mapping_get("matrix"))
+            .and_then(YamlOwned::as_str)
+            .is_some_and(|expression| expression.contains("steps.")
+                && expression.contains(".outputs.matrix")),
+        "the matrix output must come from the actual planning step"
+    );
+    let runner = mutants
+        .as_mapping_get("runs-on")
+        .and_then(YamlOwned::as_str)
+        .expect("a planned native runner");
+    assert_eq!(compact(runner), "${{matrix.runner}}");
+    assert_eq!(
+        mutants
+            .as_mapping_get("strategy")
+            .and_then(|strategy| strategy.as_mapping_get("fail-fast"))
+            .and_then(YamlOwned::as_bool),
+        Some(false),
+        "one failure must not cancel the evidence from other assigned shards"
+    );
+    let execution = workflow_steps(crate::common::nightly::NIGHTLY)
+        .into_iter()
+        .find(|step| step.job == "mutants" && step.run.contains("scripts/ci/mutation.py run"))
+        .expect("native execution passes through inventory and prerequisite checks");
+    assert_eq!(
+        compact(&execution.env["GINARY_REQUIRE_TOOLCHAIN"]),
+        "${{matrix.platform=='linux'&&'1'||'0'}}",
+        "native macOS/Windows must report unavailable optional tools as explicit skips"
+    );
+    assert!(
+        workflow_steps(crate::common::nightly::NIGHTLY)
+            .iter()
+            .any(|step| {
+                step.job == "mutants"
+                    && step.uses.starts_with("erlef/setup-beam@")
+                    && step.with.contains_key("otp-version")
+                    && step.with.contains_key("gleam-version")
+            }),
+        "every native runner must install the real application build and runtime prerequisites"
+    );
+}
+
+#[test]
 fn the_testing_document_says_what_the_nightly_mutation_pass_does_not_cover() {
     let testing = read("docs/dev/testing.md");
     let record = crate::common::nightly::MEASURED_MUTANTS;
@@ -2217,11 +2409,9 @@ fn every_step_that_fetches_an_otp_asset_is_handed_a_github_token() {
             continue;
         }
         for step in workflow_steps(&path) {
-            if !step
-                .commands()
-                .iter()
-                .any(|command| command.contains("otp repack"))
-            {
+            if !step.commands().iter().any(|command| {
+                command.contains("otp repack") && option_value(command, "--root").is_none()
+            }) {
                 continue;
             }
             // The step's own `env:` overlaid on its job's, which is what the

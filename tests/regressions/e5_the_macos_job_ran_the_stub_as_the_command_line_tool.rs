@@ -138,7 +138,17 @@ fn assigns_target_dir_for_one_command(command: &str) -> bool {
 
 /// Whether a step invokes `target/release/ginary` as the command line tool.
 fn runs_the_command_line_tool(step: &WorkflowStep) -> bool {
-    step.commands().iter().any(|line| {
+    let mut commands = step.commands();
+    // The native body moved out of YAML to avoid actionlint's Windows pipe
+    // deadlock. Keep its CLI consumption tied to this exact workflow step.
+    if commands
+        .iter()
+        .any(|line| line == "bash scripts/ci/macos-smoke.sh")
+    {
+        commands
+            .extend(plain_step(&crate::common::repo::read("scripts/ci/macos-smoke.sh")).commands());
+    }
+    commands.iter().any(|line| {
         let Some((before, after)) = line.split_once("target/release/ginary") else {
             return false;
         };

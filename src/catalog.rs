@@ -43,6 +43,11 @@ use crate::elf::{ElfError, ElfInfo};
 use crate::process::{shell_quote, shell_quote_path};
 use crate::target::{Libc, Linkage, Target};
 
+mod distribution;
+pub use distribution::{
+    DistributionAsset, DistributionReport, assemble_distribution, merge_catalogs, repack_from_root,
+};
+
 /// The only catalogue schema this ginary reads.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -2789,10 +2794,16 @@ fn write_catalog(path: &Path, catalog: &Catalog) -> Result<(), RepackError> {
             message: error.to_string(),
         })?;
     }
-    std::fs::write(path, text).map_err(|error| RepackError::Io {
+    let io = |error: std::io::Error| RepackError::Io {
         path: path.to_path_buf(),
         message: error.to_string(),
-    })
+    };
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+    std::io::Write::write_all(&mut temporary, text.as_bytes()).map_err(io)?;
+    temporary.as_file().sync_all().map_err(io)?;
+    temporary.persist(path).map_err(|error| io(error.error))?;
+    Ok(())
 }
 
 /// The linkage a variant name implies, checked against the emulator later.

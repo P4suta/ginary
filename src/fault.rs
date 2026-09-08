@@ -23,9 +23,12 @@
 //! | `before-lock` | `on` | the cache entry is removed between the preflight and the shared lock, which is what a prune that won the race leaves behind |
 //! | `launcher` | `panic` | the launcher panics, so the panic hook `main` installs is the thing under test |
 //! | `pack` | `fail` | `bundle::build` stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact |
+//! | `output-write` | `fail` / `fail-document` | stop after writing part of a temporary file; `fail-document` reaches a manifest after artifact publication |
+//! | `output-persist` | `fail` / `fail-document` | stop before replacing the destination; `fail-document` affects only atomic document writers |
+//! | `artifact-sign` | `fail` / `corrupt` | interrupt macOS signing after a partial temporary write, or alter a finished signature before verification |
 //!
-//! `pack` is the one point on the *build* side rather than the launcher's, and
-//! it is here for the same reason as the others: "a build that fails
+//! The publication points are on the *build* side and use the same rule:
+//! "a build that fails
 //! half-way cleans up after itself" cannot be reached by handing the builder a
 //! different project, because every input that would fail a build fails it
 //! before anything has been written.
@@ -94,13 +97,16 @@ pub const PANIC_MESSAGE: &str = "GINARY_FAULT=launcher:panic";
 /// new [`point`] call site whose name is not here fails
 /// `every_call_site_is_a_listed_point`, and a point missing from either
 /// document fails `both_documents_list_every_point`.
-pub const FAULT_POINTS: [&str; 6] = [
+pub const FAULT_POINTS: [&str; 9] = [
     "after-extract",
     "rename",
     "unpack",
     "before-lock",
     "launcher",
     "pack",
+    "output-write",
+    "output-persist",
+    "artifact-sign",
 ];
 
 /// The actions a point may be armed with.
@@ -114,7 +120,15 @@ pub const FAULT_POINTS: [&str; 6] = [
     not(any(test, feature = "fault-injection")),
     expect(dead_code, reason = "only the fault-injection build reads the table")
 )]
-const ACTIONS: [&str; 6] = ["on", "pause", "eexist", "corrupt", "panic", "fail"];
+const ACTIONS: [&str; 7] = [
+    "on",
+    "pause",
+    "eexist",
+    "corrupt",
+    "panic",
+    "fail",
+    "fail-document",
+];
 
 /// The action armed for `name`, reading [`VAR`] once per process.
 #[cfg(feature = "fault-injection")]

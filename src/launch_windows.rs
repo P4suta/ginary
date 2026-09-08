@@ -3,10 +3,8 @@
 //! and wait for it.
 //!
 //! Windows has no `execve`, so the launcher cannot hand its process over to
-//! `erl.exe` the way [`crate::launch`]'s `exec` hands it to `erlexec` — a
-//! function that is `#[cfg(unix)]`, and therefore not a link this module can
-//! carry when the documentation is built for the platform the module is about.
-//! It stays resident instead, which changes three things and nothing else:
+//! `erl.exe` the way Unix `crate::launch::exec` hands it to `erlexec`. It stays
+//! resident instead, which changes three things and nothing else:
 //!
 //! - the shared lock on the cache entry is held by *this* process for the
 //!   child's lifetime, rather than being inherited across an exec;
@@ -43,6 +41,11 @@
 //! right there is, and it lives here rather than in `cache.rs` so that the
 //! exception stays one surface. See
 //! `tests/regressions/e12_the_sweep_asked_proc_whether_a_process_was_alive.rs`.
+//!
+//! F1 adds `win32::rename_noreplace` for assembly's final publication. Windows
+//! `std::fs::rename` can replace an existing empty directory; `MoveFileExW`
+//! with zero flags refuses it. This build-side operation returns an I/O error
+//! on failure and stays inside the same reviewed unsafe boundary.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -181,7 +184,7 @@ const fn bool_str(value: bool) -> &'static str {
 /// Every one of them is a `kernel32` entry point with no safe wrapper
 /// anywhere, which is why this module — and only this module — carries
 /// `#[allow(unsafe_code)]`. Each function is total: a failure is `false` or
-/// [`None`] and never a panic, because this is the launcher path.
+/// [`None`] on the launcher path, or an I/O error for exclusive publication.
 ///
 /// Three of them are the resident launcher's own, argued in
 /// `docs/adr/0015-windows-launcher-stays-resident.md`:
@@ -197,6 +200,8 @@ pub(crate) mod win32 {
     use std::os::windows::io::AsRawHandle as _;
 
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, TRUE};
+    #[cfg(feature = "cli")]
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -204,6 +209,54 @@ pub(crate) mod win32 {
         SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    /// Atomically renames a completed staging tree without replacing any
+    /// existing destination. Both names remain on one volume: copying and
+    /// delayed reboot operations are not enabled.
+    #[cfg(feature = "cli")]
+    pub(crate) fn rename_noreplace(
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::path::{Component, Prefix};
+        let wide_path = |path: &std::path::Path| -> std::io::Result<Vec<u16>> {
+            if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a rename path contains NUL",
+                ));
+            }
+            let absolute = std::path::absolute(path)?;
+            let units: Vec<_> = absolute.as_os_str().encode_wide().collect();
+            // Prefix code units without passing through lossy Unicode text.
+            // This preserves Windows filenames containing unpaired surrogates
+            // and permits long paths independently of machine policy.
+            let mut wide: Vec<_> = match absolute.components().next() {
+                Some(Component::Prefix(prefix)) => match prefix.kind() {
+                    Prefix::Disk(_) => r"\\?\".encode_utf16().chain(units).collect(),
+                    Prefix::UNC(_, _) => r"\\?\UNC\"
+                        .encode_utf16()
+                        .chain(units.into_iter().skip(2))
+                        .collect(),
+                    _ => units,
+                },
+                _ => units,
+            };
+            wide.push(0);
+            Ok(wide)
+        };
+        let from = wide_path(from)?;
+        let to = wide_path(to)?;
+        // SAFETY: both owned vectors remain alive during the call, contain no
+        // interior NUL and end in one NUL. Zero flags request only a rename;
+        // in particular MOVEFILE_REPLACE_EXISTING is never passed.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
 
     /// Whether a process with this id exists.
     ///

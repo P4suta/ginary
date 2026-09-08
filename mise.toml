@@ -46,7 +46,7 @@ description = "Run the whole suite: unit, integration and documentation tests"
 # never reads `GINARY_FAULT`; three of the launcher's guarantees — the sweep of
 # a killed extraction, the lost rename race, a payload that changes under the
 # reader — are about timing and cannot be reached any other way.
-run = "cargo test --features fault-injection"
+run = "cargo test --features fault-injection --no-fail-fast"
 
 [tasks."test:fast"]
 description = "Run only the tests that need no external toolchain"
@@ -57,7 +57,7 @@ description = "Run only the tests that need no external toolchain"
 # `doctor`, which probes whatever is on `PATH`, bounded by
 # `doctor::PROBE_TIMEOUT`; see `docs/dev/testing.md`. The remaining targets are
 # outside this task because each holds a handful of `require_tools`-gated tests.
-run = "cargo test --features fault-injection --lib --bins --test smoke_cli --test regressions"
+run = "cargo test --no-fail-fast --features fault-injection --lib --bins --test smoke_cli --test regressions"
 
 [tasks."test:stub"]
 description = "Run the suite as the launcher-only stub build compiles it"
@@ -72,7 +72,7 @@ description = "Run the suite as the launcher-only stub build compiles it"
 # No `--features fault-injection`: the fault points are a launcher feature and
 # compile in either flavor, and `test` already runs them. This task exists to
 # prove the stub build works, not to run the timing tests twice.
-run = "cargo test --no-default-features"
+run = "cargo test --no-default-features --no-fail-fast"
 
 [tasks."test:nextest"]
 description = "Run the suite under nextest (no doc tests: nextest does not run them)"
@@ -86,8 +86,8 @@ run = "cargo deny check"
 description = "Coverage: an lcov report plus a summary, gated at 90% lines"
 # The second invocation re-renders the profile data the first collected, so the
 # suite runs once. Branch coverage needs a nightly `-Z coverage-options=branch`
-# build; until this crate is measured that way the 80% branch floor in
-# `docs/dev/testing.md` is documented but not enforced here.
+# build; CI runs that separately and enforces the 80% branch floor. This task
+# remains the stable, local line-coverage measurement.
 run = [
   "cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info",
   "cargo llvm-cov report --summary-only --fail-under-lines 90",
@@ -104,10 +104,14 @@ run = "cargo mutants"
 description = "Build every cargo-fuzz target (nightly toolchain)"
 # `fuzz/` is a workspace of its own, so the root gates stay on stable and only
 # this task and `fuzz` need a nightly toolchain. See `docs/dev/testing.md`.
-run = "cargo +nightly fuzz build"
+run = """
+set -e
+cargo +nightly metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+cargo +nightly fuzz build
+"""
 
 [tasks.fuzz]
-description = "Run each fuzz target for 30 seconds (nightly toolchain)"
+description = "Run each fuzz target for 600 seconds (nightly toolchain)"
 # Sequential rather than parallel: four libFuzzer processes at four gigabytes
 # each is not a thing to start by accident, and a crash is easier to attribute
 # when one target is running on its own.
@@ -119,11 +123,12 @@ description = "Run each fuzz target for 30 seconds (nightly toolchain)"
 # targets measure the first `if` and nothing else.
 run = """
 set -e
+cargo +nightly metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
 for target in trailer_parse appfile_terms beam_chunks payload_read_manifest; do
   echo "fuzz: $target"
   mkdir -p fuzz/corpus/"$target"
   cargo +nightly fuzz run "$target" fuzz/corpus/"$target" fuzz/seeds/"$target" \
-    -- -max_total_time=30 -rss_limit_mb=4096
+    -- -max_total_time=600 -rss_limit_mb=4096
 done
 """
 

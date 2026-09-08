@@ -11,11 +11,12 @@ nothing today.
 |---|---|---|
 | `GINARY_CACHE_DIR` | implemented | Overrides the cache root outright, and is used verbatim — relative paths included. The escape hatch for a read-only or `noexec` home directory. `ginary cache dir` prints what it resolves to and why. |
 | `GINARY_DEBUG=1` | implemented | Human-readable progress on stderr, prefixed `ginary[debug]: `, one line per phase with its facts and its elapsed time: `start`, `read_manifest`, `cache_sweep`, `cache_tmp`, `extract`, `chmod`, `sync`, `rename` or `cache_hit`, `preflight_retry`, `exec`. |
-| `GINARY_TRACE=<file>` | implemented | JSON Lines, one object per phase, appended to the file: `{"t_us":..,"phase":..,"kv":{..}[,"elapsed_us":..]}`. The whole `LaunchPlan` is recorded immediately before `execve`, so the launch that failed can be reproduced from the trace. A file that cannot be opened costs one warning and the run carries on. |
+| `GINARY_TRACE=<file>` | implemented | Appends schema-2 JSON Lines with `run_id`, `sequence`, `event`, `t_us`, `phase`, `kv`, optional `operation_id` and optional `elapsed_us`. Default capture redacts arguments, environment values, crash slogans, credentials and URL query/fragment values. A nonempty destination must begin with a complete ginary trace record (at most 1 MiB); unrelated existing files are preserved. Open/write failures update `Diag::health()` and produce a warning while the application continues. |
+| `GINARY_TRACE_SENSITIVE=1` | implemented | Explicitly retains arguments, environment values and other sensitive diagnostic values for local reproduction. Applies to trace and debug sinks. Review the resulting files before sharing them; `ginary diagnose` produces a summary without copying those values. |
 | `GINARY_SUPERVISE=1` | implemented | Spawns the runtime and waits instead of calling `execve`, which is the code path Windows will use anyway. The exit code is mirrored; a child killed by a signal exits `128 + signo`. Records the exit status, the signal and the elapsed time, and if an `erl_crash.dump` appeared during the run, prints its `Slogan` line. |
 | `GINARY_CMD=<command>` | implemented | Artifact-side maintenance, kept out of `argv` so the packaged application still owns its own flags, and one of five values. `directory` prints the cache entry the artifact would use and creates nothing; `extract-only` extracts and prints the entry without launching; `inspect` prints the manifest, the payload geometry and the digest as one JSON object; `selftest` extracts, preflights and starts the runtime with `-eval erlang:halt(0)` and no `-extra`, printing `extract:`, `preflight:` and `run:` with `PASS` or `FAIL` and exiting 0 or 1; `uninstall` removes every cache entry of this application that nobody holds, prints what it removed and what it kept and why, and exits 0 even when it kept something. Any other value is a usage error and exits 2. |
 | `GINARY_ERL_FLAGS` | implemented | Extra emulator flags for one run, split on ASCII whitespace and placed after the manifest's own flags and before `-eval`. |
-| `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `before-lock` (the cache entry is removed between the preflight and the shared lock, which is what a prune that won the race leaves behind), `launcher:panic` (panic on the launcher path, so the panic hook has something to catch), `pack:fail` (the *builder* stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact). |
+| `GINARY_FAULT=<point>[:<action>]` | implemented (test builds) | Fault injection, compiled in only under `cfg(feature = "fault-injection")` and therefore absent from release builds, which never read the variable at all. Points: `after-extract:pause` (sleep with the temporary tree on disk), `rename:eexist` (extract, then lose the rename race), `unpack:corrupt` (the payload changes under the reader), `before-lock` (remove the entry between preflight and locking), `launcher:panic` (panic on the launcher path), `pack:fail` (stop between the stub and payload), `output-write:fail` (stop after a partial temporary artifact/document write), `output-persist:fail` (stop immediately before replacing the final name), `artifact-sign:fail` (interrupt the macOS signing path after a partial temporary write), `artifact-sign:corrupt` (alter a finished signature before verification). The output points also accept `fail-document` to let artifact publication finish before failing its manifest or SBOM. |
 | `GINARY_PRUNE_DAYS=<n>` | implemented | How many days an unused cache entry of the running application may live before the next launch prunes it. Defaults to 14; `0` turns pruning off for that run. A value that is not a count of days falls back to the default rather than failing a launch: a misspelt housekeeping preference must not stop an application from starting. |
 | `GINARY_OFFLINE=1` | implemented | Forbids every fetch. `download::Net` refuses before a socket is opened and the error names the URL and the file it was for, so a build that would have gone to the network says what it wanted rather than reaching for it. There is no `--offline` flag: `download::Net` takes the switch as a parameter and every call site passes `false`, so the variable is the only way on. The parameter is one-way by construction — a build asked to stay offline is not put back on the network by an environment — and a flag that fed it would inherit that.  |
 | `GINARY_GITHUB_BASE_URL=<base>` | implemented | Replaces `https://api.github.com` as the base of every GitHub API read, as a prefix, so one value redirects the whole host at a mirror or at a test server. |
@@ -63,9 +64,9 @@ Two symptoms and what they mean:
 - **A cache entry never goes away, however old.** Something holds its lock. Find it with
   `fuser "$entry/.lock"` or `lsof "$entry/.lock"` — a runtime that is still running, or a
   descriptor a supervisor inherited and never closed. `ginary cache prune --all` will not remove
-  it either: `--all` is "whatever its age", not "whatever is using it". `ginary cache clean` is
-  the blunt instrument that ignores the lock, and running it under a live application is the
-  thing the lock exists to prevent.
+  it either: `--all` ignores age but honors the lock. `ginary cache clean` and
+  `GINARY_CMD=uninstall` honor the same lock and preserve live extraction residue. Their
+  reports explain each retained path rather than forcing a running entry away.
 - **A cache entry disappeared under a running application.** The lock could not be taken and the
   launch went ahead anyway, which is deliberate — a lock that cannot be taken is a pruning risk
   and not a reason to refuse to start. `GINARY_TRACE` records it as a `lock` phase with the
@@ -82,21 +83,31 @@ Two symptoms and what they mean:
 
 A prune that runs writes a `prune` phase to the trace: `removed` and `kept` count the two
 columns, and `removed_paths` and `kept_paths` name them, as JSON arrays of strings — a `kept`
-entry carries its reason (`locked`, `fresh` or `unremovable`) in the same string. An entry that
+entry carries its reason (`locked`, `fresh`, `unowned` or `unremovable`) in the same string. An entry that
 vanished has to be explainable from a trace, and a count explains nothing. Nothing a prune does
 reaches standard error: pruning is housekeeping, and housekeeping does not decide whether an
 application starts.
 
 `GINARY_CMD=uninstall` removes only what the cache wrote — `<key>` entries and the
-`.<key>.tmp-<pid>`, `.<key>.corrupt-<pid>` and `.<key>.trash-<pid>` residue beside them. Anything
+`.<key>.tmp-<pid>-<id>` (and legacy PID-only temporary names), `.<key>.corrupt-<pid>` and
+`.<key>.trash-<pid>` residue beside them. The temporary id has twelve random alphanumeric
+characters, so simultaneous calls in one process own separate trees. Anything
 else in the application directory is left where it is, `erl_crash.dump` included, which is why
 that directory survives an uninstall when a dump is in it.
 
+Complete entries must have a supported, valid `ginary.json` identifying the containing
+application. A hexadecimal directory name or a file called `ginary.json` alone does not prove
+ownership. Invalid or mismatched markers remain `unowned`. Temporary, corrupt and trash trees
+belonging to live processes remain `active`; cleanup never treats a completed temporary
+manifest as permission to delete an extraction that is still running. A dead temporary tree
+may precede writing its manifest. These ownership checks apply to pruning as well as cleaning.
+
 ### On Windows: where the cache is, and what holds it
 
-Neither of the two mechanisms above exists on Windows, so both are replaced. Nothing here has
-run on a Windows machine yet — see the [Windows](../../README.md#windows) section of the README
-for what that leaves untested — but this is what the code does, and it is where to look first.
+Windows uses different cache roots and locking mechanisms. The portable F1 fixtures exercise
+native Windows launch, selftest locking, concurrent maintenance and fault recovery; Unix
+`flock` inheritance remains a separate Unix test. See [F1-cache.md](log/F1-cache.md) for the
+local evidence and the [Windows](../../README.md#windows) section for supported distributions.
 
 **The cache root** is resolved by the same precedence with two different variables in the
 middle:
@@ -154,9 +165,11 @@ error name a path *to a person* rather than open one, so what `ginary cache prun
 `ginary cache clean` and `GINARY_CMD=uninstall` print is the spelling their caller asked about,
 not the one the walk used.
 
-The limit that remains is `erl.exe`'s. An entry past `MAX_PATH` extracts, is found, is locked
-and passes preflight, and then the runtime will not start out of it, because what the runtime
-was handed is the ordinary spelling. Nothing here can fix that from ginary's side.
+Real OTP startup from a cache entry beyond `MAX_PATH` is not yet qualified. The extraction,
+cache lookup, lock and preflight use verbatim paths, while the runtime receives ordinary path
+arguments. Synthetic long-path tests exercise ginary's operations; they do not establish which
+OTP versions can start from that directory. If a real launch fails only under a deep cache root,
+try a shorter `GINARY_CACHE_DIR` and retain the trace and runtime version.
 
 **The lock** is not an `flock` — Windows has none. `<entry>\.lock` is opened with a *share mode*
 instead, and the two locks become two share modes:
@@ -226,8 +239,10 @@ shipment: /home/user/src/my_gleam_app/build/erlang-shipment (412 seconds old)
 Three of those lines are the ones a failing machine is diagnosed from.
 
 - **`cache writable` and `cache executable`** are a real probe, not a permission check: `doctor`
-  creates a file in the resolved cache directory, chmods it 0755 and tries to spawn it, then
-  removes it. `access(2)` reports the mode bits and says nothing about the mount, and a cache on
+  exclusively creates a randomized file in the resolved cache directory, chmods it 0755 on
+  Unix and tries to spawn it, then removes its owned file. Preexisting files and links are
+  preserved. Cleanup refusal retains the probe path and error in `cache detail`; the capability
+  answer remains visible. `access(2)` reports the mode bits and says nothing about the mount, and a cache on
   a `noexec` filesystem is the failure users actually hit — it is exit code 125 at run time. A
   failure prints what the operating system said, verbatim, and the `GINARY_CACHE_DIR` hint.
 - **`crypto needs`** is the portability floor of every artifact built on this machine. An OTP
@@ -243,8 +258,12 @@ Three of those lines are the ones a failing machine is diagnosed from.
 `ginary doctor --json` prints the same information as an object with `format_version`,
 `host_target`, `rustc_required`, `cache_dir`, `cache_dir_source`, `cache_dir_error`,
 `cache_probe`, `otp` (with its `crypto`), `project` and a `tools` array of
-`{name, found, version, path}`. Each tool probe is killed after ten seconds, so a hung `docker`
-cannot hang `doctor`; the tool is then reported as found with no version.
+`{name, found, version, path}`. The version-2 report also supplies `tool_probes` with classified
+outcomes, bounded output and remedies, plus `findings` for incomplete checks. Each tool probe
+has a ten-second execution budget, followed by bounded child cleanup and pipe collection.
+Timeout and incomplete capture are distinct from an unrecognized version response.
+The cache executable probe has the same execution budget. A failed temporary-file cleanup
+also produces the `cache_probe_cleanup_failed` finding when the executable itself ran.
 
 `doctor` never fails. A missing tool is information, not an error, and the exit status stays 0.
 
@@ -371,21 +390,22 @@ next to either flag.
 
 ## Reproducing a launch by hand
 
-`GINARY_TRACE` exists so that a bug report carries the launch that failed rather than a
-description of it. The last `exec` record holds the program, the whole argument vector and the
-environment difference, each as a JSON array encoded in a string:
+For local reproduction, explicitly enable sensitive capture. The `exec` record then holds
+the program, argument vector and environment difference, with arrays encoded in strings.
+Select the last `exec` fact rather than the last line: lifecycle events can follow it.
 
 ```console
-$ GINARY_TRACE=/tmp/t.jsonl ./my_gleam_app --name world
-$ tail -1 /tmp/t.jsonl | jq -r '.kv.argv | fromjson | @sh'
+$ GINARY_TRACE_SENSITIVE=1 GINARY_TRACE=/tmp/t.jsonl ./my_gleam_app --name world
+$ jq -s -r 'map(select(.phase == "exec" and .kv.argv)) | last | .kv.argv | fromjson | @sh' /tmp/t.jsonl
 '-boot' '/home/u/.cache/ginary/my_gleam_app/8f2a.../bin/no_dot_erlang' '-noshell' '+B' \
 '-start_epmd' 'false' '-pa' '.../lib/my_gleam_app/ebin' '-eval' "'my_gleam_app@@main':run(...)" \
 '-extra' '--name' 'world'
-$ tail -1 /tmp/t.jsonl | jq -r '.kv.program, (.kv.env_set|fromjson[]), (.kv.env_remove|fromjson[])'
+$ jq -s -r 'map(select(.phase == "exec" and .kv.argv)) | last | .kv.program, (.kv.env_set|fromjson[]), (.kv.env_remove|fromjson[])' /tmp/t.jsonl
 ```
 
-Those three pieces are a runnable `env -i` command, and nothing is elided: every `-pa` is in the
-record, which is what makes the reproduction complete rather than indicative.
+Every `-pa` is recorded. The environment fields are a difference against the caller's inherited
+environment; they are not a full environment snapshot, so blindly replaying them with `env -i`
+can change behavior. Keep any environment prerequisites needed by the application locally.
 
 The three questions that come before it have their own commands, and none of them needs the
 application to start:
@@ -413,6 +433,72 @@ To keep the intermediate tree instead:
 ```console
 $ ginary stage --out /tmp/stage ...
 ```
+
+## Collecting a local diagnostic report
+
+```console
+$ ginary diagnose ./my_gleam_app --trace /tmp/t.jsonl --crashdump /tmp/erl_crash.dump --out ./diagnosis
+diagnostics: ./diagnosis/report.json
+summary: ./diagnosis/summary.txt
+```
+
+The artifact and both evidence flags are optional; `--out` is required and must name a new
+directory under an existing parent. The command probes known local tools and cache readiness,
+verifies a supplied artifact, and summarizes the supplied trace and crash dump. It does not
+run or extract the supplied artifact, fetch dependencies, or upload the report.
+
+`report.json` and `summary.txt` omit raw command arguments, environment values, evidence paths,
+trace values and crash-dump terms. They retain tool outcomes and remedies, artifact integrity
+counts, trace failures and run fingerprints, and process/heap counts. Retain the originals
+locally for detailed investigation. `diagnose::summarize` offers the same evidence collection
+without environment probes or cache writes for library callers.
+
+Artifact summaries include `checks.integrity` and `checks.contents`. An unperformed or
+incomplete contents scan has null file, object and issue counts; an integrity check that
+could not complete has `payload_ok: null`. Neither case is reported as zero findings.
+
+Collection reads at most 8 MiB of trace data, 64 KiB per trace line, 1024 distinct trace runs,
+and a 16 MiB crash-dump prefix. Exceeding a bound, encountering malformed or unsupported trace
+lines, or reading a truncated dump sets the affected summary to incomplete. A failed evidence
+source is reported alongside the sources that could still be read. `complete` describes
+evidence collection, not application health: a completely collected report can describe a
+failed artifact or runtime.
+
+## JSON and library migration reference
+
+Read the version field before interpreting a report. CLI JSON uses `format_version`; trace
+events use `schema_version`. Existing version-1 report structs remain available where the
+detailed API is additive.
+
+| interface | current version | migration |
+|---|---|---|
+| `build --report json` | 2 | `status` states success or failure, including preflight errors before a target begins. `targets` contains completed target results. Partial failure additionally names `failed_target`, `unattempted`, retained `staging`, `warnings`, `error`, and `causes`. `sboms` lists every target/path pair; `sbom_errors` names sidecar failures. The optional legacy `sbom` field names the first successful document; consume `sboms` for multiple targets. |
+| `cache clean --json` | 2 | `removed` names individual reclaimed entries and `bytes` counts only reclaimed bytes. `kept` contains `{path, reason}` rows, including `locked`, `active`, `unowned`, and `unremovable`. The old `cache::clean` and `CleanReport` shape remain; use `clean_detailed` for retention reasons. Removal obeys the safer ownership and locking rules in both APIs. |
+| `doctor --json` | 2 | The established environment fields remain, with `tool_probes` and `findings`. `doctor::Report::gather()` retains version 1; `doctor::DetailedReport::gather()` produces version 2 and is what the command uses. |
+| `verify --json` | 2 | Adds `checks.integrity` and `checks.contents` outcomes (`passed`, `failed`, `not_run`, `incomplete`) and `DuplicateIndex`, `DestinationConflict`, and `FormatMismatch` findings. Destination comparisons follow the artifact target, including Windows aliases and reserved names. Read failures also produce JSON with `error` and `causes`, omitting unknown findings rather than claiming an empty list. `verify::verify_detailed` exposes stage outcomes; `verify` and `VerifyReport` remain available. |
+| `GINARY_TRACE` | 2 | Records add run identity, per-run sequence, event type and optional operation identity. A legacy record without `schema_version` is treated as version 1 by `diagnose`; new readers should tolerate additive fields. Default redaction replaces sensitive fields with `[redacted]`. |
+| `diagnose` | 1 | Versioned local collection with environment readiness, optional evidence summaries, collection completeness and actionable findings. Raw evidence stays in its original files. |
+
+Doctor tool outcomes distinguish `available`, `missing`, `spawn_failed`, `timed_out`,
+`nonzero_exit`, `invalid_output`, `incomplete_output`, and `wait_failed`. A probe contains its
+exit code, elapsed time, reason and remedy, bounded stdout/stderr, omission counts, output
+completeness, and child-cleanup evidence. It only accepts a version from successful, complete
+UTF-8 output. The retained output may help local debugging and should be reviewed before
+sharing a full doctor JSON report; the diagnostic collection keeps only sanitized readiness.
+
+Explicit trace operations emit `start` and then `end`, `failure`, or `interrupted`, paired by
+`run_id` and `operation_id`. Ordinary facts have `event: fact`; legacy phase guards may emit
+an `end` without an operation ID or a preceding start. Order records by `sequence` within one
+run, and use `t_us` only within that run. Concurrent file writers lock each complete record;
+write failures remain best effort and are available through `Diag::health()`. A Unix launcher
+records a `handoff` fact before `execve`, since successful replacement cannot emit a final
+launcher event. Windows and supervised runs can report their returned outcomes.
+
+`process::run_command` retains bounded output even when spawning, waiting or timeout handling
+fails. `CapturedOutput::is_complete()` must be true before treating the output as a full parse
+input. `ProcessReport::cleanup` records whether termination was requested, whether the direct
+child was reaped and whether a background reaper remains. Legacy subprocess wrappers retain
+their signatures and include bounded failure evidence in their errors.
 
 ## Reading a crash dump
 
@@ -481,17 +567,19 @@ It streams the payload a second time and, per file:
   staged mode the row records, `0755` when it has the user execute bit and `0644` otherwise,
   which is the relation `docs/format.md` fixes and not plain equality. A file the index does not
   name is `IndexOrphan`, and an index row naming nothing is `IndexMissing`;
-- reads it into memory only when its first bytes are the ELF magic, and only up to 100 MB, and
-  then asks `src/elf.rs` what it is: a machine that is not the one the manifest targets is
-  `MachineMismatch`, and a `DT_NEEDED` outside the allowlist in `src/verify.rs` is
+- reads it into memory only when its first bytes identify ELF, PE or Mach-O, and only up to
+  100 MB, then checks its native headers: a machine that is not the one the manifest targets is
+  `MachineMismatch`, an object format for a different operating system is `FormatMismatch`,
+  and a `DT_NEEDED` outside the allowlist in `src/verify.rs` is
   `UnexpectedNeeded` — a library the artifact expects a stranger's machine to already have. A
-  file that begins with the magic and does not parse as an ELF is `UnreadableObject`, because a
+  file that begins with native magic and does not parse is `UnreadableObject`, because a
   file that looks like native code and is not readable as native code is the reader's decision
   and not the verifier's.
 
 It also checks *where each entry lands* and what it *is*, which are the two rules
 `payload::unpack` applies and a report has to apply too. An entry whose name is absolute, holds
-`..`, or normalises to nothing is `UnsafePath` — `payload::destined_path` is the shared rule —
+`..`, or normalises to nothing is `UnsafePath` — `payload::destined_path_for` is the shared
+target-aware rule —
 and it is raised before the index is consulted, so an escaping entry counts towards neither
 `files_checked` nor `IndexOrphan`. The kind check is by position rather than by name:
 `ginary.json` and `ginary.index.json` are entries 0 and 1; an entry after them landing on either
@@ -501,6 +589,17 @@ directory is `UnsupportedEntry`, naming what it is instead. A directory entry is
 passed over: `docs/format.md` permits one and `ginary.index.json` lists files only, so there is
 nothing to check it against.
 
+Target names retain their own separator rules on every verification host. A backslash or a
+colon is an ordinary character in a Linux/macOS filename; Windows target names fold case and
+reject device names and unsupported Win32 spellings. Verification can inspect a valid foreign
+target without extracting it. If extraction is explicitly requested on a foreign host,
+`payload::unpack` also requires the host to represent every component without changing its
+meaning. It refuses a Unix backslash filename on Windows, Windows backslash separators on
+Unix, and distinct Unix names or parent directories that would merge through Windows case
+folding. The index is checked before its files are written, and a failed extraction never
+publishes the cache completion marker. The older `payload::destined_path` API retains native
+host component semantics for callers already using it.
+
 Nothing is extracted and nothing is run, so `verify` is safe to point at an artifact somebody
 else built. It exits 0 when there is nothing to say and 1 with the table above otherwise;
 `--json` carries the whole report, including the object table.
@@ -508,6 +607,12 @@ else built. It exits 0 when there is nothing to say and 1 with the table above o
 When the payload digest itself does not match, `verify` stops there and says so: every entry
 past the damage is bytes nobody wrote, and a table of findings about them would describe the
 damage rather than the artifact.
+
+The report explicitly marks content checks as `not_run` after a digest mismatch. If the
+digest passes but an archive cannot be fully read, its contents outcome is `incomplete`.
+Unreadable front matter leaves integrity `incomplete` and contents `not_run`. These errors
+still produce `--json` output and a nonzero exit code. Library callers can use
+`verify::verify_detailed`, or `VerifyError::checks()` on an unsuccessful read.
 
 ## Exit codes
 
@@ -524,7 +629,8 @@ line beginning `hint: `.
 | 125 | the runtime would not start | `execve` failed. `ENOENT` on a program that is on disk means its `ld-linux` or one of its libraries is missing; `EACCES` on a program that is executable means the cache is on a `noexec` mount — set `GINARY_CACHE_DIR` |
 
 A packaged application's *own* exit code passes through untouched, including 0 and including
-any of 121 to 125 it chooses to leave: the launcher is gone by then, replaced by the runtime.
+any of 121 to 125 it chooses to leave. Unix normally replaces the launcher with the runtime;
+Windows and supervised runs relay the child's result.
 
 The CLI half prints `error: ...` followed by one `  caused by: ...` line per cause and exits 1.
 A clap usage error, and an unrecognised `GINARY_CMD`, exit 2.

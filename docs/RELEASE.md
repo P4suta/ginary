@@ -3,7 +3,7 @@
 
 This document is what a maintainer runs to cut a ginary release. It is written for `v0.1.0`, the
 first one, but every later release is the same three moves: let release-please prepare the
-version, publish the draft, let distribute verify and flip it.
+version, rehearse distribution against its tag, then explicitly authorize verified publication.
 
 Whether anything has been released is not written down here. It is recorded in
 `.release-please-manifest.json`, whose `0.0.0` is release-please's own spelling of "this package
@@ -126,10 +126,11 @@ workflow does not carry one, and `tests/release_workflow.rs` holds it to that.
 
 ## The version is one number, everywhere
 
-ginary is **version-locked** to its stubs. Every artifact of one release — the command line
-tool, the seven stubs, and the OTP catalog tarballs — shares a single version, because a
-launcher only reads the payload format its own build writes. A stub from `0.1.0` and a payload
-from `0.2.0` is exactly the mismatch the version lock exists to prevent.
+ginary is **version-locked** to its stubs. The command line tool and seven stubs share the
+ginary version, because a launcher only reads the payload format its own build writes. A stub
+from `0.1.0` and a payload from `0.2.0` is exactly the mismatch the version lock exists to
+prevent. OTP archives retain their independent OTP version, recorded in the merged catalog;
+the distribution inventory records the ginary version and every archive's exact bytes.
 
 That single number lives in `Cargo.toml`, and a release tag has to equal it.
 
@@ -142,8 +143,8 @@ repository with no tag is what made release-please propose `0.2.0` for a project
 nothing (`docs/dev/log/E20.md`). From the first release onward release-please writes `Cargo.toml`
 and the manifest in one commit, and the two hold one version between them.
 
-`scripts/ci/version-consistency.sh` is the check that proves all three agree, and `distribute.yml`
-runs it before it builds or uploads anything: a tag of `v0.1.0` against a `Cargo.toml` of `0.1.0`
+`scripts/ci/version-consistency.sh` checks the tag, `Cargo.toml` and `.release-please-manifest.json`.
+`distribute.yml` runs it before it builds or uploads anything: a tag of `v0.1.0` against a `Cargo.toml` of `0.1.0`
 and a manifest recording `0.1.0` passes. A tag cut while the manifest still records `0.0.0` fails —
 that is a hand-cut tag, because release-please writes the version into the manifest before it
 creates the tag — and so does any other drift, naming both sides.
@@ -200,44 +201,55 @@ When the release pull request merges, release-please creates the tag `v0.1.0` an
 GitHub release (`draft: true` in `release-please-config.json`). Nothing is public yet: a draft
 release is visible only to maintainers, and its assets do not exist until distribute builds them.
 
-### 3. distribute verifies, then publishes
+### 3. Rehearse distribution before authorizing publication
 
-Publishing the draft release triggers `distribute.yml`, which mirrors a strict
-verify-then-publish discipline:
+`distribute.yml` has `workflow_dispatch` and `workflow_call` inputs: a required existing `tag`
+and `publish`, which defaults to `false`. A published-release event never starts distribution.
+The tag is resolved once, and every builder checks out that same commit with its commit time as
+`SOURCE_DATE_EPOCH`.
 
-1. `version-consistency.sh` proves the tag, `Cargo.toml` and `.release-please-manifest.json` name
-   one release.
-2. The build matrix produces, for all seven targets, the full `ginary` binary and the
-   launcher-only `ginary-stub`: the four Linux targets via `cross`, the two macOS targets built
-   natively on `macos-15-intel` and `macos-14`, and `windows-x86_64` on `windows-2022`. `ginary otp
-   repack` produces the OTP catalog tarballs on the appropriate runners.
-3. `actions/attest-build-provenance` signs a provenance attestation for every asset, and a
-   `SHA256SUMS` manifest is computed.
-4. The release is created as a **draft** and the assets are uploaded to it.
-5. The assets are **re-downloaded** and checked: `sha256sum --check SHA256SUMS`, and
-   `gh attestation verify` against each one. A corrupt upload or a bad attestation fails here,
-   while the release is still a draft and nothing is public.
-6. Only when every check has passed does distribute flip the release out of draft
-   (`gh release edit --draft=false`). An asset that failed its checks never becomes part of a
-   published release.
+The seven native/cross builders produce a full binary, a stub and an OTP runtime for each target.
+Linux repacks the verified upstream archive; Windows and macOS copy and validate the OTP root
+installed by the pinned setup action. Root provenance explicitly identifies a local tree and
+its digest; it does not claim verification of an upstream archive that was never inspected.
 
-## What a maintainer actually types
+Each target uploads a separate fragment directory. `ginary otp merge --inputs DIR --out DIR
+--version VERSION` checks all seven binary identities, object architectures and flavors, the
+runtime digests and lengths, and agreement on the OTP version. It refuses missing/extra assets,
+conflicting catalog entries and an existing output. The merged catalog, inventory and
+`SHA256SUMS` are written as one completed output directory. The default workflow preserves this
+result for review and performs no hosted release operation.
 
-For `v0.1.0`, once the repository is published and CI is green:
+Local assembly can be rehearsed without GitHub:
+
+The output directory must be new. Assembly verifies the copied binaries, stubs and runtimes,
+reserves the directory exclusively, then publishes files without replacing existing paths.
+`SHA256SUMS` is written last and marks a complete distribution. If publication fails, the error
+names the retained staging directory; the partial output can be inspected, and a retry should
+use a new output path. An existing directory is never removed or reused automatically.
 
 ```console
-# 1. Merge the release-please pull request titled "chore(main): release 0.1.0".
-#    The tag v0.1.0 and the draft release appear when it merges.
-
-# 2. Publish the draft release from the GitHub UI (or with gh):
-$ gh release edit v0.1.0 --draft=false   # only to trigger distribute; distribute re-drafts
+$ ginary otp repack --upstream-tag OTP-29.0.5 --targets windows-x86_64 --root PATH --out dist/dist-windows-x86_64
+$ ginary otp merge --inputs dist/fragments --out dist/verified --version 0.1.0
+$ cargo test --test distribution
 ```
 
-In practice the maintainer publishes the release-please draft, distribute builds and re-verifies
-the assets, and the final flip out of draft is distribute's own last step. The maintainer's job
-is to review the release pull request and to publish the draft; the workflows do the rest, and
-refuse to publish anything that does not check out.
+The merge input contains `dist-<target>` directories from all seven builders, each containing its
+versioned full binary, versioned stub, runtime tarball and `catalog.json`. The local transaction
+test uses a readonly mock `gh` shell function and cannot create, upload or publish anything.
 
+### 4. Optional publication requires separate authorization
+
+Only an explicitly authorized `publish=true` run uses the hosted path. It requires the release
+for the tag to already exist as a draft; it never creates a release and refuses an already-public
+one. It attests the complete inventory, uploads to the existing draft, downloads every asset,
+checks the exact asset set and checksums, verifies every attestation, rechecks draft state, and
+only then changes `draft=false`. Failures leave the draft unpublished. Same-tag workflow runs are
+serialized; reruns may replace the same draft assets but cannot modify an existing public release.
+
+No actual release operation is authorized by the development work recorded in F1. No tag,
+draft, release, hosted release asset, or publication was created by that work. Publishing remains
+a separate maintainer action after the relevant native CI and local rehearsal evidence is read.
 ## Nothing is tagged or published outside this flow
 
 Do not `git tag`, `cargo publish`, or create a release by hand. The version lock, the checksums
