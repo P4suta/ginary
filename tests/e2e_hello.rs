@@ -14,8 +14,9 @@
 //! worked because the developer had Erlang installed fails here, which is the
 //! whole point.
 //!
-//! Gated on `gleam`, `erl` and `strip`: a machine without them reports a skip,
-//! and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure.
+//! Gated on `gleam` and `erl`, plus `strip` for a Linux ELF runtime. A machine
+//! without a required tool reports a skip, and `GINARY_REQUIRE_TOOLCHAIN=1`
+//! turns the skip into a failure. Windows PE builds require no ELF stripper.
 // The command line half of the suite: every claim in this file is about a
 // module the `cli` feature carries, so a `--no-default-features` build has
 // nothing here to run. See `docs/dev/log/C2.md`.
@@ -34,7 +35,7 @@ use crate::common::tools::require_tools;
 const APP: &str = "hello_ffi";
 
 /// The programs a build of the fixture needs.
-const TOOLS: [&str; 3] = ["gleam", "erl", "strip"];
+const TOOLS: &[&str] = crate::common::built::HOST_BUILD_TOOLS;
 
 /// Builds the fixture, failing loudly with whatever the command wrote.
 ///
@@ -57,7 +58,7 @@ fn build_fixture() -> BuiltProject {
 
 #[test]
 fn ginary_build_writes_one_executable_at_the_default_output_path() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -92,7 +93,7 @@ fn ginary_build_writes_one_executable_at_the_default_output_path() {
 
 #[test]
 fn the_built_artifact_runs_the_application_with_no_erlang_on_the_machine() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -132,7 +133,7 @@ fn the_built_artifact_runs_the_application_with_no_erlang_on_the_machine() {
 
 #[test]
 fn the_built_artifact_propagates_a_zero_exit_code() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -144,7 +145,7 @@ fn the_built_artifact_propagates_a_zero_exit_code() {
 
 #[test]
 fn the_built_artifact_reports_a_crash_as_exit_one_and_leaves_the_cwd_clean() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -172,7 +173,7 @@ fn the_built_artifact_reports_a_crash_as_exit_one_and_leaves_the_cwd_clean() {
 
 #[test]
 fn the_json_report_describes_the_file_that_is_actually_on_disk() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -190,9 +191,13 @@ fn the_json_report_describes_the_file_that_is_actually_on_disk() {
         report
             .get("format_version")
             .and_then(serde_json::Value::as_u64),
-        Some(1),
+        Some(2),
         "the schema names its own version: {report}"
     );
+    assert_eq!(report["status"], "success");
+    assert_eq!(report["targets"].as_array().expect("target rows").len(), 1);
+    assert_eq!(report["sboms"], serde_json::json!([]));
+    assert_eq!(report["sbom_errors"], serde_json::json!([]));
     assert!(
         report.get("sbom").is_none(),
         "a build that was not asked for a bill of materials names none: {report}"
@@ -224,9 +229,18 @@ fn the_json_report_describes_the_file_that_is_actually_on_disk() {
         "the report's total has to be the artifact's size"
     );
     assert_eq!(
-        number("total_len"),
-        number("stub_len") + number("payload_len") + ginary::trailer::TRAILER_LEN,
-        "stub + payload + trailer is the whole file and nothing else"
+        number("stub_len"),
+        std::fs::metadata(crate::common::built::ginary_bin())
+            .expect("the input stub")
+            .len(),
+        "the report records the actual input stub's size"
+    );
+    let inspected =
+        ginary::inspect::open(&project.artifact()).expect("read the completed artifact");
+    assert_eq!(
+        number("payload_len"),
+        inspected.payload_len,
+        "the completed container exposes the reported payload, including on macOS where signing changes the outer layout"
     );
     assert_eq!(
         report
@@ -244,7 +258,7 @@ fn the_json_report_describes_the_file_that_is_actually_on_disk() {
 
 #[test]
 fn explain_prints_both_accounts_before_the_line_that_names_the_artifact() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -277,7 +291,7 @@ fn explain_prints_both_accounts_before_the_line_that_names_the_artifact() {
 
 #[test]
 fn verbose_writes_the_phases_to_stderr_without_taking_the_trace_file_away() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -315,7 +329,7 @@ fn verbose_writes_the_phases_to_stderr_without_taking_the_trace_file_away() {
 
 #[test]
 fn the_second_run_of_one_artifact_hits_the_cache_it_wrote() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -352,7 +366,7 @@ fn the_second_run_of_one_artifact_hits_the_cache_it_wrote() {
 
 #[test]
 fn two_builds_of_one_project_with_a_pinned_clock_are_byte_identical() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -388,7 +402,7 @@ fn two_builds_of_one_project_with_a_pinned_clock_are_byte_identical() {
 
 #[test]
 fn inspect_names_the_application_the_build_packaged_and_verifies_it() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -426,7 +440,7 @@ fn inspect_names_the_application_the_build_packaged_and_verifies_it() {
 
 #[test]
 fn a_flipped_payload_byte_fails_verify_and_still_prints_the_manifest() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -464,7 +478,7 @@ fn a_flipped_payload_byte_fails_verify_and_still_prints_the_manifest() {
 
 #[test]
 fn ginary_cmd_extract_only_prints_the_cache_path_of_the_built_artifact() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -490,7 +504,7 @@ fn ginary_cmd_extract_only_prints_the_cache_path_of_the_built_artifact() {
 
 #[test]
 fn a_packaged_application_hands_the_word_build_to_the_application() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -517,7 +531,7 @@ fn a_packaged_application_hands_the_word_build_to_the_application() {
 
 #[test]
 fn keep_staging_leaves_the_work_directory_and_prints_where_it_is() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -537,19 +551,26 @@ fn keep_staging_leaves_the_work_directory_and_prints_where_it_is() {
         "--keep-staging keeps exactly the one work directory this build made: {kept:?}"
     );
     assert!(
-        kept[0].join("root/bin/no_dot_erlang.boot").is_file(),
+        kept[0]
+            .join(ginary::target::Target::host().name())
+            .join("root/bin/no_dot_erlang.boot")
+            .is_file(),
         "what is kept has to be the staging root, not an empty directory: {}",
         kept[0].display()
     );
+    let printed = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("staging: "))
+        .unwrap_or_else(|| panic!("the build did not name its retained staging: {stdout}"));
     assert!(
-        stdout.contains(&kept[0].display().to_string()),
+        names_the_same_directory(printed, &kept[0]),
         "a directory that is kept and not named is a directory nobody finds:\n{stdout}"
     );
 }
 
 #[test]
 fn a_successful_build_removes_its_work_directory() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -564,7 +585,7 @@ fn a_successful_build_removes_its_work_directory() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_build_that_fails_while_packing_removes_its_work_directory_too() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -641,12 +662,17 @@ fn build_runtime_variant() -> BuiltProject {
 
 #[test]
 fn the_runtime_settings_reach_the_exec_argv_and_the_application_still_runs() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_runtime_variant();
 
-    let run = project.run("runtime").traced().args(["0", "x"]).output();
+    let run = project
+        .run("runtime")
+        .traced()
+        .env("GINARY_TRACE_SENSITIVE", "1")
+        .args(["0", "x"])
+        .output();
 
     assert_eq!(
         run.code(),
@@ -665,28 +691,39 @@ fn the_runtime_settings_reach_the_exec_argv_and_the_application_still_runs() {
         .lines()
         .rfind(|line| line.contains("\"phase\":\"exec\""))
         .unwrap_or_else(|| panic!("no exec record in the trace:\n{trace}"));
-    for needle in [
-        "-args_file",
-        "releases/vm.args",
-        "-config",
-        "releases/sys",
-        "+fnu",
+    let record: Value = serde_json::from_str(exec).expect("exec JSON record");
+    let argv: Vec<String> = serde_json::from_str(
+        record["kv"]["argv"]
+            .as_str()
+            .expect("explicitly enabled argv trace"),
+    )
+    .expect("argument array");
+    for (flag, suffix) in [
+        ("-args_file", "releases/vm.args"),
+        ("-config", "releases/sys"),
     ] {
         assert!(
-            exec.contains(needle),
-            "the exec record must carry `{needle}`, and it is:\n{exec}"
+            argv.windows(2)
+                .any(|pair| pair[0] == flag && std::path::Path::new(&pair[1]).ends_with(suffix)),
+            "the exec record must carry `{flag}` followed by `{suffix}`: {argv:?}"
         );
     }
+    assert!(argv.iter().any(|argument| argument == "+fnu"), "{argv:?}");
 }
 
 #[test]
 fn the_env_default_reaches_the_application_and_a_caller_still_wins() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_runtime_variant();
 
-    let plain = project.run("env-default").traced().args(["0"]).output();
+    let plain = project
+        .run("env-default")
+        .traced()
+        .env("GINARY_TRACE_SENSITIVE", "1")
+        .args(["0"])
+        .output();
     assert_eq!(plain.code(), 0, "--- stderr ---\n{}", plain.stderr());
     assert!(
         plain
@@ -699,6 +736,7 @@ fn the_env_default_reaches_the_application_and_a_caller_still_wins() {
     let overridden = project
         .run("env-caller")
         .traced()
+        .env("GINARY_TRACE_SENSITIVE", "1")
         .env("GINARY_E2E", "set-by-the-caller")
         .args(["0"])
         .output();
@@ -719,7 +757,7 @@ fn the_env_default_reaches_the_application_and_a_caller_still_wins() {
 
 #[test]
 fn an_args_file_that_names_a_flag_the_launcher_owns_fails_the_build() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -746,7 +784,7 @@ fn an_args_file_that_names_a_flag_the_launcher_owns_fails_the_build() {
 
 #[test]
 fn a_sys_config_that_does_not_parse_fails_the_build_with_a_position() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);
@@ -801,7 +839,7 @@ fn suffixed_artifact(project: &BuiltProject) -> std::path::PathBuf {
 
 #[test]
 fn an_explicit_host_target_writes_a_suffixed_artifact_that_runs() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let host = Target::host().name();
@@ -834,7 +872,7 @@ fn an_explicit_host_target_writes_a_suffixed_artifact_that_runs() {
 
 #[test]
 fn a_suffixed_build_writes_the_manifest_beside_the_artifact() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let host = Target::host().name();
@@ -858,7 +896,7 @@ fn a_suffixed_build_writes_the_manifest_beside_the_artifact() {
 
 #[test]
 fn the_manifest_records_what_the_bundled_runtime_is_and_where_it_came_from() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = build_fixture();
@@ -916,7 +954,7 @@ fn the_manifest_records_what_the_bundled_runtime_is_and_where_it_came_from() {
 
 #[test]
 fn the_same_target_named_twice_produces_one_artifact() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let host = Target::host().name();
@@ -927,16 +965,17 @@ fn the_same_target_named_twice_produces_one_artifact() {
     assert_eq!(
         written,
         vec![
+            ".build-lock".to_owned(),
             format!("{APP}-{host}{}", Target::host().exe_suffix()),
             format!("{APP}-{host}.json")
         ],
-        "`host` and the host's own name are one target, so one artifact and one manifest"
+        "`host` and the host's own name produce one artifact and one manifest beside the project lock"
     );
 }
 
 #[test]
 fn a_build_for_another_target_says_which_stub_it_could_not_find() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(APP);

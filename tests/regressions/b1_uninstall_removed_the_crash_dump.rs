@@ -17,7 +17,7 @@
 //!
 //! **The correct behaviour.** Uninstall removes what the cache owns — entries
 //! and the temporary, corrupt and trashed trees beside them — and leaves
-//! everything else alone. The dump survives, is in neither column, and the
+//! everything else alone. The dump survives, is reported as unowned, and the
 //! application directory stays because it is not empty.
 
 use std::path::Path;
@@ -57,8 +57,11 @@ fn an_uninstall_removes_what_the_cache_owns_and_leaves_the_crash_dump() {
         report.removed
     );
     assert!(
-        !report.kept.iter().any(|(path, _)| path == &dump),
-        "nor as one that was kept: {:?}",
+        report
+            .kept
+            .iter()
+            .any(|(path, reason)| path == &dump && *reason == cache::KeptReason::Unowned),
+        "the preservation decision is explicit: {:?}",
         report.kept
     );
 

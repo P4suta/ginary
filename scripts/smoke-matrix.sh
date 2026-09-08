@@ -24,10 +24,12 @@
 #   GINARY_STUB_DIR           where the cross-built stubs are (default target/stubs)
 #   GINARY_REQUIRE_TOOLCHAIN  1 turns every reported skip into a failure, the
 #                             same rule `tests/common/tools.rs` follows
+#   GINARY_SMOKE_EVIDENCE_DIR keep work, logs and artifacts below this directory;
+#                             unset retains the ordinary local cleanup behavior
 
 set -uo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 catalog=${GINARY_CATALOG:-$root/dist/otp/catalog.json}
 stub_dir=${GINARY_STUB_DIR:-$root/target/stubs}
 app=hello_ffi
@@ -81,8 +83,13 @@ if ! docker run --rm --platform linux/arm64 alpine:3.20 true >/dev/null 2>&1; th
   fi
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+if [ -n "${GINARY_SMOKE_EVIDENCE_DIR:-}" ]; then
+  mkdir -p "$GINARY_SMOKE_EVIDENCE_DIR" || exit 1
+  work=$(mktemp -d "$GINARY_SMOKE_EVIDENCE_DIR/work.XXXXXX") || exit 1
+else
+  work=$(mktemp -d) || exit 1
+  trap 'rm -rf "$work"' EXIT
+fi
 cp -R "$root/tests/fixtures/$app" "$work/$app"
 rm -rf "$work/$app/build"
 
@@ -112,8 +119,7 @@ matrix=(
 )
 
 for row in "${matrix[@]}"; do
-  set -- $row
-  target=$1; image=$2; platform=$3
+  read -r target image platform <<< "$row"
 
   if [ "$platform" = "linux/arm64" ] && [ "$arm64" = "no" ]; then
     fail "$target: linux/arm64 is not registered with binfmt"
@@ -156,6 +162,11 @@ for row in "${matrix[@]}"; do
   output=$(docker run --rm --network none --platform "$platform" \
     -v "$artifact:/app:ro" "$image" /app 3 a b 2>&1)
   status=$?
+  if ! printf '%s\n' "$output" > "$work/$target.run.log" \
+    || ! printf '{"exit_code":%s}\n' "$status" > "$work/$target.run.json"; then
+    fail "$target: could not retain runtime evidence in $work"
+    continue
+  fi
   size=$(wc -c <"$artifact" | tr -d ' ')
   case $output in
     *"args=3 a b"*)

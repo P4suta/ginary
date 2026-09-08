@@ -22,13 +22,19 @@ use std::collections::BTreeMap;
 use saphyr::YamlOwned;
 
 use crate::common::mise;
-use crate::common::repo::{WorkflowStep, option_value, read, shell_code, workflow_steps, yaml};
+use crate::common::repo::{WorkflowStep, read, shell_code, workflow_steps, yaml};
 
 /// The workflow both plans are read out of.
 pub const NIGHTLY: &str = ".github/workflows/nightly.yml";
 
 /// The measured record a mutation budget is argued from.
 pub const MEASURED_MUTANTS: &str = "tests/fixtures/nightly/mutants-measured.json";
+
+/// Current integrated source counts, kept separate from historical timing data.
+pub const CURRENT_MUTANT_COUNTS: &str = "tests/fixtures/nightly/mutants-F1-integration-counts.json";
+
+/// The canonical module divisions and per-shard execution caps.
+pub const MUTATION_DIVISIONS: &str = "scripts/ci/mutation-divisions.json";
 
 /// What a fuzz target's name is replaced by, so the workflow's
 /// `${{ matrix.target }}` and the task's `"$target"` reduce to one shape.
@@ -258,7 +264,7 @@ fn loop_values(commands: &[String], name: &str) -> Vec<String> {
 
 // ------------------------------------------------------------ the mutants --
 
-/// One row of the mutation matrix, and the `cargo mutants` it runs.
+/// One canonical mutation shard before the planner assigns native runners.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutantsShard {
     /// The matrix row, `key=value` pairs joined by a space, for a message.
@@ -283,18 +289,72 @@ pub struct MutantsShard {
 pub struct MutantsPlan {
     /// The job's `timeout-minutes`: the budget one shard has.
     pub timeout_minutes: u64,
-    /// One entry per matrix row, in matrix order.
+    /// One entry per canonical shard, before native-runner assignment.
     pub shards: Vec<MutantsShard>,
 }
 
-/// The mutation pass as `.github/workflows/nightly.yml` configures it.
+/// The canonical workload and process limits consumed by the actual planner.
+#[derive(Debug)]
+pub struct MutationBudget {
+    /// Every module and the number of complete divisions assigned to it.
+    pub modules: BTreeMap<String, u64>,
+    /// Actual enumeration must refuse a larger shard before execution.
+    pub max_mutants_per_shard: u64,
+    /// The maximum build time of one mutant.
+    pub build_timeout_seconds: u64,
+    /// The maximum test time of one mutant.
+    pub test_timeout_seconds: u64,
+}
+
+/// Reads the same budget ledger that the workflow's planner consumes.
 ///
 /// # Panics
 ///
-/// If the workflow declares no `mutants` job, if the job declares no
-/// `timeout-minutes`, or if the matrix mixes product keys with `include:`
-/// rows — which GitHub reads as *extending* a combination rather than adding
-/// one, and this reader deliberately does not model.
+/// If the ledger is absent, malformed, has an unknown schema or contains a
+/// missing or zero limit. A failed read must not become an empty passing plan.
+pub fn mutation_budget() -> MutationBudget {
+    let parsed: serde_json::Value = serde_json::from_str(&read(MUTATION_DIVISIONS))
+        .unwrap_or_else(|error| panic!("{MUTATION_DIVISIONS} is not JSON: {error}"));
+    assert_eq!(
+        parsed
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "{MUTATION_DIVISIONS} must use the supported schema"
+    );
+    let positive = |value: &serde_json::Value, field: &str| {
+        value
+            .as_u64()
+            .filter(|number| *number > 0)
+            .unwrap_or_else(|| {
+                panic!("{MUTATION_DIVISIONS}'s `{field}` must be a positive integer")
+            })
+    };
+    let modules: BTreeMap<String, u64> = parsed["modules"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{MUTATION_DIVISIONS} has no modules object"))
+        .iter()
+        .map(|(module, divisions)| (module.clone(), positive(divisions, module)))
+        .collect();
+    assert!(!modules.is_empty(), "{MUTATION_DIVISIONS} has no work");
+    MutationBudget {
+        modules,
+        max_mutants_per_shard: positive(&parsed["max_mutants_per_shard"], "max_mutants_per_shard"),
+        build_timeout_seconds: positive(&parsed["build_timeout_seconds"], "build_timeout_seconds"),
+        test_timeout_seconds: positive(&parsed["test_timeout_seconds"], "test_timeout_seconds"),
+    }
+}
+
+/// The canonical mutation pass, with the real workflow's wall-clock budget.
+///
+/// Native-runner assignment may split a canonical shard by platform. The
+/// historical budget regressions still reason about the complete canonical
+/// divisions, so they read the ledger rather than treating a dynamic matrix
+/// expression as an empty plan or counting a routed shard more than once.
+///
+/// # Panics
+///
+/// If the job has no timeout or the canonical ledger cannot be read.
 pub fn mutants_plan() -> MutantsPlan {
     let job = "mutants";
     let timeout_minutes = job_field(job, "timeout-minutes")
@@ -304,24 +364,19 @@ pub fn mutants_plan() -> MutantsPlan {
             panic!("{NIGHTLY}'s `{job}` job declares no `timeout-minutes`, so it has no budget")
         });
 
-    let commands: Vec<String> = workflow_steps(NIGHTLY)
+    let budget = mutation_budget();
+    let shards = budget
+        .modules
         .iter()
-        .filter(|step| step.job == job)
-        .flat_map(WorkflowStep::commands)
-        .filter(|command| command.starts_with("cargo mutants"))
-        .collect();
-
-    let shards = matrix_rows(job)
-        .into_iter()
-        .flat_map(|row| {
-            let rendered = row
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            commands
-                .iter()
-                .map(|command| shard_of(&rendered, &substitute(command, &row)))
+        .flat_map(|(module, &divisions)| {
+            (0..divisions)
+                .map(|index| MutantsShard {
+                    row: format!("module={module} shard={index}/{divisions}"),
+                    module: module.clone(),
+                    index,
+                    shards: divisions,
+                    timeout: Some(budget.test_timeout_seconds.to_string()),
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -329,31 +384,6 @@ pub fn mutants_plan() -> MutantsPlan {
     MutantsPlan {
         timeout_minutes,
         shards,
-    }
-}
-
-/// One `cargo mutants` command, read.
-fn shard_of(row: &str, command: &str) -> MutantsShard {
-    let module = option_value(command, "--file")
-        .map(|value| {
-            value
-                .trim_start_matches("src/")
-                .trim_end_matches(".rs")
-                .to_owned()
-        })
-        .unwrap_or_default();
-    let (index, shards) = option_value(command, "--shard")
-        .and_then(|value| {
-            let (index, shards) = value.split_once('/')?;
-            Some((index.parse().ok()?, shards.parse().ok()?))
-        })
-        .unwrap_or((0, 1));
-    MutantsShard {
-        row: row.to_owned(),
-        module,
-        index,
-        shards,
-        timeout: option_value(command, "--timeout"),
     }
 }
 
@@ -446,102 +476,4 @@ fn matrix_values(job: &str, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Every combination one job's matrix expands to, in matrix order.
-///
-/// The two shapes GitHub gives a matrix with no exclusions: the cartesian
-/// product of its list-valued keys, and a list of `include:` rows. A matrix
-/// that has both is refused rather than guessed at — GitHub reads an
-/// `include:` row against an existing combination as an *extension* of it, and
-/// a reader that appended it as a row of its own would report a pass that does
-/// not exist.
-///
-/// # Panics
-///
-/// If the matrix mixes the two shapes.
-fn matrix_rows(job: &str) -> Vec<BTreeMap<String, String>> {
-    let Some(strategy) = job_field(job, "strategy") else {
-        return vec![BTreeMap::new()];
-    };
-    let Some(matrix) = strategy
-        .as_mapping_get("matrix")
-        .and_then(YamlOwned::as_mapping)
-    else {
-        return vec![BTreeMap::new()];
-    };
-
-    let mut product: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
-    let mut keys = 0usize;
-    let mut include: Vec<BTreeMap<String, String>> = Vec::new();
-    for (key, value) in matrix {
-        let Some(key) = key.as_str() else {
-            continue;
-        };
-        if key == "include" {
-            for row in value.as_vec().map(Vec::as_slice).unwrap_or_default() {
-                include.push(mapping_of(row));
-            }
-            continue;
-        }
-        let Some(values) = value.as_vec() else {
-            continue;
-        };
-        keys += 1;
-        product = product
-            .into_iter()
-            .flat_map(|row| {
-                values.iter().filter_map(move |value| {
-                    let value = value.as_str()?;
-                    let mut row = row.clone();
-                    row.insert(key.to_owned(), value.to_owned());
-                    Some(row)
-                })
-            })
-            .collect();
-    }
-
-    assert!(
-        keys == 0 || include.is_empty(),
-        "{NIGHTLY}'s `{job}` matrix mixes product keys with `include:` rows. GitHub reads an \
-         `include:` row that matches an existing combination as an extension of it, and this \
-         reader does not model that: write the matrix as one shape or the other"
-    );
-    if keys == 0 {
-        return include;
-    }
-    product
-}
-
-/// One YAML mapping as string pairs.
-fn mapping_of(node: &YamlOwned) -> BTreeMap<String, String> {
-    node.as_mapping()
-        .map(|mapping| {
-            mapping
-                .iter()
-                .filter_map(|(key, value)| {
-                    let key = key.as_str()?.to_owned();
-                    let value = value
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| value.as_integer().map(|number| number.to_string()))?;
-                    Some((key, value))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// `command` with every `${{ matrix.<key> }}` of `row` substituted.
-fn substitute(command: &str, row: &BTreeMap<String, String>) -> String {
-    let mut out = command.to_owned();
-    for (key, value) in row {
-        for spelling in [
-            format!("${{{{ matrix.{key} }}}}"),
-            format!("${{{{matrix.{key}}}}}"),
-        ] {
-            out = out.replace(&spelling, value);
-        }
-    }
-    out
 }

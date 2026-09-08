@@ -283,14 +283,13 @@ fn fill_exact_at<R: ReadAt + ?Sized>(
     Ok(())
 }
 
-/// Fills `buffer` from `offset`, without moving the file's own cursor.
+/// Fills `buffer` using explicit offsets instead of the file's current cursor.
 ///
-/// `pread(2)`, which is what the launcher needs here: `main` reads the trailer
-/// out of the running executable and then hands the same open file to the
-/// payload reader, so a read that moved the cursor would be a read the next
-/// stage has to undo. `pub(crate)` rather than private: [`crate::payload::locate`]
-/// reuses it for the same reason, to read a Mach-O section's inner trailer
-/// without disturbing the file's own cursor.
+/// Unix `pread(2)` leaves the cursor unchanged. Windows `seek_read` uses the
+/// requested offset atomically but updates the shared cursor, so concurrent
+/// readers must also use explicit offsets rather than ordinary seek/read.
+/// `pub(crate)` rather than private: [`crate::payload::locate`] and cache
+/// extraction reuse the same offset-based read contract.
 ///
 /// A read that answers zero bytes before the buffer is full has hit the end of
 /// the file, and 64 bytes that are not there are not a trailer.

@@ -371,7 +371,13 @@ fn a_project_whose_manifest_is_unreadable_is_a_failure() {
 fn sbom_writes_the_document_beside_the_artifact_and_says_where() {
     let dir = tempdir();
     let artifact = SyntheticArtifact::build(dir.path());
-    let expected: PathBuf = dir.path().join(format!("{APP}.spdx.json"));
+    // The native Windows fixture needs an executable suffix. The SBOM name
+    // retains that suffix instead of deriving its name only from the app name.
+    let expected: PathBuf = dir.path().join(if cfg!(windows) {
+        format!("{APP}.exe.spdx.json")
+    } else {
+        format!("{APP}.spdx.json")
+    });
 
     let assert = ginary().arg("sbom").arg(artifact.path()).assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
@@ -416,7 +422,7 @@ fn sbom_refuses_a_file_that_is_not_a_packaged_application() {
 // ------------------------------------------------------ a real build --
 
 /// The programs a build of the fixture needs.
-const TOOLS: [&str; 3] = ["gleam", "erl", "strip"];
+const TOOLS: &[&str] = crate::common::built::HOST_BUILD_TOOLS;
 
 /// The fixture these two tests build.
 const FIXTURE: &str = "hello_ffi";
@@ -426,7 +432,7 @@ const FIXTURE_VERSION: &str = "0.1.0";
 
 #[test]
 fn build_sbom_writes_the_document_beside_the_artifact_and_names_it_last() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(FIXTURE);
@@ -446,7 +452,14 @@ fn build_sbom_writes_the_document_beside_the_artifact_and_names_it_last() {
     );
     assert_eq!(
         stdout.lines().last(),
-        Some(format!("sbom: {}", expected.display()).as_str()),
+        Some(
+            format!(
+                "sbom: {} ({})",
+                expected.display(),
+                ginary::target::Target::host()
+            )
+            .as_str()
+        ),
         "the path a caller reads is the last line of the report:\n{stdout}"
     );
     let value: Value = serde_json::from_str(
@@ -471,7 +484,7 @@ fn build_sbom_writes_the_document_beside_the_artifact_and_names_it_last() {
 
 #[test]
 fn build_sbom_out_puts_the_document_where_it_was_asked_to() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(FIXTURE);
@@ -493,14 +506,21 @@ fn build_sbom_out_puts_the_document_where_it_was_asked_to() {
     );
     assert_eq!(
         stdout.lines().last(),
-        Some(format!("sbom: {}", destination.display()).as_str()),
+        Some(
+            format!(
+                "sbom: {} ({})",
+                destination.display(),
+                ginary::target::Target::host()
+            )
+            .as_str()
+        ),
         "{stdout}"
     );
 }
 
 #[test]
 fn build_report_json_names_the_document_it_wrote() {
-    let Some(_tools) = require_tools(&TOOLS) else {
+    let Some(_tools) = require_tools(TOOLS) else {
         return;
     };
     let project = BuiltProject::copy(FIXTURE);

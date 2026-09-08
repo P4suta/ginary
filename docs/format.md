@@ -71,6 +71,14 @@ cover it, with an ad-hoc `CodeDirectory` over the whole file afterwards. No exis
 `sign_macos.rs` writes it, `macho.rs` and `payload::locate` read it back. See
 `docs/adr/0016-macho-section-payload-and-adhoc-signing.md` for the run that forced this.
 
+Before publishing the temporary artifact, the build independently checks its manifest and
+payload and calls `sign_macos::verify_ad_hoc`. That portable reader validates the command and
+segment bounds, the emitted CodeDirectory profile, every SHA-256 code-page slot, and the
+payload trailer and digest. A signature over inconsistent payload metadata is refused even
+when all its code-page hashes agree. Native macOS CI additionally runs strict `codesign`
+verification and launches the artifact; portable validation does not establish Gatekeeper
+acceptance or a signing identity.
+
 The signature has to be described by an `LC_CODE_SIGNATURE` load command, and there are two
 cases, because the platform linker ad-hoc signs every arm64 Mach-O it produces and does not
 always sign an x86_64 one:

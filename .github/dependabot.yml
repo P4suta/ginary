@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Three manifests, because this repository has three. The root `cargo` entry
+# Each independent Cargo workspace needs its own entry. The root `cargo` entry
 # reaches the crate's `Cargo.toml` and `Cargo.lock`; it does not reach
 # `fuzz/Cargo.toml`, which is a workspace of its own on purpose (see the note
-# in that file) and therefore needs an entry of its own; and `github-actions`
+# in that file), or the standalone `tools/mutation-plan` AST planner; `github-actions`
 # watches the pinned `uses:` SHAs in `.github/workflows/`.
 #
 # Everything is grouped, so one Monday is one pull request per ecosystem
@@ -39,6 +39,21 @@ updates:
     labels: ["type: dependencies", "area: rust"]
     groups:
       fuzz:
+        patterns: ["*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/tools/mutation-plan"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:45"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels: ["type: dependencies", "area: rust"]
+    groups:
+      mutation-plan:
         patterns: ["*"]
 
   - package-ecosystem: "github-actions"

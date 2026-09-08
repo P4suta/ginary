@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "modules": {
+    "appfile": 16,
+    "cache": 24,
+    "closure": 8,
+    "launch": 8,
+    "payload": 12,
+    "trailer": 3,
+    "verify": 10
+  },
+  "max_mutants_per_shard": 13,
+  "build_timeout_seconds": 120,
+  "test_timeout_seconds": 420
+}

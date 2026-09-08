@@ -341,7 +341,7 @@ fn native_code_is_strippable_here() -> bool {
 
 #[test]
 fn a_stripped_hello_ffi_fits_in_the_size_budget() {
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);
@@ -394,7 +394,7 @@ fn a_stripped_hello_ffi_fits_in_the_size_budget() {
 
 #[test]
 fn no_staged_module_holds_debug_information_after_stripping() {
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);
@@ -432,7 +432,7 @@ fn no_staged_module_holds_debug_information_after_stripping() {
 fn a_stripped_runtime_still_runs_the_application() {
     // The whole point. Every other assertion in this file is about bytes; this
     // one is about whether the thing still works after they were removed.
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);
@@ -460,7 +460,7 @@ fn a_stripped_runtime_still_runs_the_application() {
 
 #[test]
 fn stripping_a_real_tree_twice_changes_not_one_byte() {
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);
@@ -490,7 +490,7 @@ fn stripping_a_real_tree_twice_changes_not_one_byte() {
 
 #[test]
 fn the_needs_line_lists_the_libraries_the_runtime_loads() {
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);
@@ -541,7 +541,7 @@ fn the_needs_line_lists_the_libraries_the_runtime_loads() {
 
 #[test]
 fn the_report_accounts_for_every_byte_stripping_removed() {
-    let Some(tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let stripped = stage_and_strip(&tools);

@@ -16,6 +16,13 @@ cargo /fuzz
   labels: type: dependencies, area: rust
   groups: fuzz
 
+cargo /tools/mutation-plan
+  schedule: weekly monday Asia/Tokyo
+  cooldown-days: 7
+  open-pull-requests-limit: 5
+  labels: type: dependencies, area: rust
+  groups: mutation-plan
+
 github-actions /
   schedule: weekly monday Asia/Tokyo
   cooldown-days: 7

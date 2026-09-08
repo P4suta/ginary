@@ -19,8 +19,9 @@
 //! pipeline (write a `.tmp` and rename, or otherwise keep the read and the
 //! write off the same name).
 
+use crate::common::bounded::run_bounded;
 use crate::common::repo::{root, yaml_files_under};
-use crate::common::tools::require_actionlint;
+use crate::common::tools::{REQUIRE_ACTIONLINT_VAR, require_actionlint};
 use std::process::Command;
 
 /// The fewest workflows this repository has ever had, and the floor a scan
@@ -52,11 +53,13 @@ fn actionlint_accepts_every_workflow() {
     );
 
     for workflow in &workflows {
-        let output = Command::new(&actionlint)
-            .current_dir(root())
-            .arg(workflow)
-            .output()
-            .unwrap_or_else(|error| panic!("cannot run actionlint on {workflow}: {error}"));
+        let mut command = Command::new(&actionlint);
+        command.current_dir(root()).arg(workflow);
+        let output = run_bounded(
+            &mut command,
+            std::time::Duration::from_secs(60),
+            &format!("actionlint on {workflow}"),
+        );
         assert!(
             output.status.success(),
             "actionlint rejected {workflow} (exit {:?}); every workflow must be \
@@ -66,4 +69,46 @@ fn actionlint_accepts_every_workflow() {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+
+    // The macOS smoke block is a file because actionlint 1.7.12 writes all
+    // inline script bytes into a pipe before starting ShellCheck. A long
+    // block can fill that pipe on Windows. Lint the extracted script by path
+    // so moving it out of YAML cannot remove its shell checks.
+    let path_var = std::env::var_os("PATH");
+    let Some(shellcheck) = ginary::process::find_in_path("shellcheck", path_var.as_deref()) else {
+        let required = std::env::var_os(REQUIRE_ACTIONLINT_VAR).is_some_and(|value| value == "1");
+        assert!(
+            !required,
+            "shellcheck is required beside actionlint when {REQUIRE_ACTIONLINT_VAR}=1"
+        );
+        eprintln!(
+            "skipping: shellcheck not on PATH; extracted macOS workflow script was not linted"
+        );
+        return;
+    };
+    let scripts = [
+        "scripts/ci/macos-smoke.sh",
+        "scripts/ci/coverage.sh",
+        "scripts/ci/coverage-gate.sh",
+        "scripts/ci/fuzz-evidence.sh",
+        "scripts/ci/smoke-matrix-evidence.sh",
+        "scripts/smoke-matrix.sh",
+    ];
+    let mut command = Command::new(shellcheck);
+    command
+        .current_dir(root())
+        .args(["--norc", "--shell", "bash"])
+        .args(scripts);
+    let output = run_bounded(
+        &mut command,
+        std::time::Duration::from_secs(60),
+        "shellcheck on the extracted assurance scripts",
+    );
+    assert!(
+        output.status.success(),
+        "shellcheck rejected assurance scripts (exit {:?}):\n{}{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }

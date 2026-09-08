@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 name: Nightly
 
-# The heavy assurance passes, kept off the pull-request path so PR CI stays
-# fast. Mutation testing, the fuzz smoke and the full cross-Linux smoke matrix
-# run on a schedule and on demand.
+# Sustained exploration supplements the required pull-request checks.
+# Every pass retains its evidence and reports incomplete execution explicitly.
 on:
   schedule:
     # 03:17 UTC daily; an odd minute so it does not land on the hour with every
@@ -17,71 +16,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  mutants:
-    name: Mutation testing (${{ matrix.module }} ${{ matrix.shard }})
+  mutation-plan:
+    name: Assign every mutation to a native runner
     runs-on: ubuntu-24.04
-    # The budget, and it is argued rather than guessed. The measured record is
-    # tests/fixtures/nightly/mutants-measured.json — mutant counts per module
-    # and 210 seconds a mutant, read off run 33969332537, the first nightly in
-    # which every shard reached `ok Unmutated baseline`. 210 is that run's own
-    # per-mutant cost (about 39 s of build and 171 of test), not the 107 s
-    # average of the one small shard that finished; the record's README argues
-    # why the conservative figure is the one to size a budget from. The largest
-    # shard below holds 35 mutants, which that record prices at about 127
-    # minutes, and
-    # tests/regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs
-    # fails if any shard stops fitting.
-    #
-    # What that argument does not bound is the worst case. `--timeout 420`
-    # below caps one mutant, not the shard, so 35 mutants that all hang cost
-    # about four hours and would be cancelled again. The pass is bounded in
-    # expectation; docs/dev/testing.md says so beside the other things it does
-    # not cover.
-    #
-    # It used to be 90 against whole modules of up to 207 mutants — five to
-    # twelve hours of work. Six of the seven shards of run 33969332537 were
-    # cancelled at the cap or lost to a runner shutdown, and a cancelled job
-    # neither passes nor fails: the pass gated nothing at all.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Test and build the cfg parser with its own locked dependencies
+        run: |
+          cargo test --manifest-path tools/mutation-plan/Cargo.toml --locked --no-fail-fast
+          cargo build --manifest-path tools/mutation-plan/Cargo.toml --locked
+          python3 -m unittest discover -s scripts/ci -p 'mutation_test.py'
+      - name: Enumerate all canonical shards and assign applicable operating systems
+        id: plan
+        # cargo mutants lists cfg-inactive functions too. Retain its complete
+        # discovery before using the Rust AST to dispatch native execution.
+        run: >-
+          python3 scripts/ci/mutation.py plan
+          --planner tools/mutation-plan/target/debug/ginary-mutation-plan
+          --output target/mutation-plan
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: mutation-plan
+          path: target/mutation-plan
+          retention-days: 30
+          if-no-files-found: warn
+
+  mutants:
+    name: Mutation testing (${{ matrix.id }})
+    needs: mutation-plan
+    runs-on: ${{ matrix.runner }}
+    # tests/fixtures/nightly/mutants-measured.json is the historical timing
+    # record. scripts/ci/mutation-divisions.json holds every canonical shard:
+    # appfile, cache, closure, launch, payload, trailer, verify. Discovery
+    # rejects a shard over 13 candidates before dispatching any native subset.
+    # 13 * (120s build + 420s test), baseline and evidence fit in 150 minutes.
     timeout-minutes: 150
     permissions:
       contents: read
     env:
-      GINARY_REQUIRE_TOOLCHAIN: "1"
+      # Linux hosted runners provide Docker and the POSIX toolchain. Native
+      # macOS/Windows promise Gleam + OTP (startup checked by mutation.py);
+      # unavailable platform/cross tools remain explicit skips in test logs.
+      GINARY_REQUIRE_TOOLCHAIN: ${{ matrix.platform == 'linux' && '1' || '0' }}
+      GINARY_TEST_EVIDENCE_DIR: ${{ github.workspace }}/target/mutation-evidence/test-failures
+      MUTATION_JOB: ${{ matrix.id }}
     strategy:
       fail-fast: false
-      # Sharded over the highest-value modules so one slow shard does not hold
-      # the others, and a survivor is attributed to a module rather than a run.
-      # Every module is divided into as many shards as it needs to fit the
-      # budget above, and every shard of every division is run: a division that
-      # dropped a shard would be a module only partly mutated, which is the one
-      # way to make a budget fit that proves less rather than dividing more.
-      matrix:
-        include:
-          - { module: appfile, shard: "0/6" }
-          - { module: appfile, shard: "1/6" }
-          - { module: appfile, shard: "2/6" }
-          - { module: appfile, shard: "3/6" }
-          - { module: appfile, shard: "4/6" }
-          - { module: appfile, shard: "5/6" }
-          - { module: cache, shard: "0/6" }
-          - { module: cache, shard: "1/6" }
-          - { module: cache, shard: "2/6" }
-          - { module: cache, shard: "3/6" }
-          - { module: cache, shard: "4/6" }
-          - { module: cache, shard: "5/6" }
-          - { module: closure, shard: "0/3" }
-          - { module: closure, shard: "1/3" }
-          - { module: closure, shard: "2/3" }
-          - { module: launch, shard: "0/3" }
-          - { module: launch, shard: "1/3" }
-          - { module: launch, shard: "2/3" }
-          - { module: payload, shard: "0/3" }
-          - { module: payload, shard: "1/3" }
-          - { module: payload, shard: "2/3" }
-          - { module: trailer, shard: "0/1" }
-          - { module: verify, shard: "0/3" }
-          - { module: verify, shard: "1/3" }
-          - { module: verify, shard: "2/3" }
+      matrix: ${{ fromJSON(needs.mutation-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,21 +91,60 @@ jobs:
       - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cargo-mutants@27.1.0
-      # A missed or timed-out mutant fails the shard: the caught-percentage gate
-      # is "every mutant this module produces is caught".
-      #
-      # `--timeout` is what one mutant may spend in the suite. `cargo mutants`
-      # runs the tests once per mutant, and a mutant that removes a loop's exit
-      # condition does not end; with no cap the only thing that stops it is the
-      # job's own budget, so one hang costs the whole shard and reports nothing
-      # about the mutants it never reached. 420 seconds is about two and a half
-      # times the measured per-mutant test time.
-      - run: >-
-          cargo mutants
-          --file "src/${{ matrix.module }}.rs"
-          --shard "${{ matrix.shard }}"
-          --timeout 420
-          --features fault-injection
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mutation-plan
+          path: target/mutation-plan
+      - name: Verify the exact native selection and execute every assigned mutation
+        shell: bash
+        run: >-
+          python3 scripts/ci/mutation.py run
+          --bundle target/mutation-plan/plan.json
+          --job "$MUTATION_JOB"
+          --output target/mutation-evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: mutants-${{ matrix.id }}
+          path: target/mutation-evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+  mutation-gate:
+    name: Reconcile every planned mutation and native result
+    needs: [mutation-plan, mutants]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mutation-plan
+          path: target/mutation-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ always() }}
+        with:
+          pattern: mutants-*
+          path: target/mutation-results
+      - name: Fail on missing, interrupted, mismatched or surviving mutations
+        if: ${{ always() }}
+        run: >-
+          python3 scripts/ci/mutation.py finalize
+          --bundle target/mutation-plan/plan.json
+          --evidence target/mutation-results
+          --output target/mutation-summary.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: mutation-summary
+          path: target/mutation-summary.json
+          retention-days: 30
+          if-no-files-found: warn
 
   fuzz:
     name: Fuzz smoke (${{ matrix.target }})
@@ -118,6 +152,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -132,7 +167,7 @@ jobs:
       - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cargo-fuzz@0.13.2
-      # 30 seconds per target, seeded from the committed corpus; a crash is a
+      # 600 seconds per target, seeded from the committed and retained corpus; a crash is a
       # failed job with the reproducer in the log.
       #
       # --target is named rather than defaulted. cargo-fuzz with no --target
@@ -158,12 +193,80 @@ jobs:
       # tests/ci_matrix.rs now reduces both callers to one plan and compares
       # them; see tests/regressions/
       # e21_the_fuzz_smoke_never_created_the_corpus_it_passed.rs.
-      - run: |
+      - name: Restore the previous completed run's generated corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
           mkdir -p fuzz/corpus/"${{ matrix.target }}"
+          previous=$(gh run list --workflow nightly.yml --status completed --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$previous" ]; then
+            present=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$previous/artifacts" --jq ".artifacts[] | select(.name == \"fuzz-$FUZZ_TARGET\" and .expired == false) | .id")
+            if [ -n "$present" ]; then
+              gh run download "$previous" --name "fuzz-$FUZZ_TARGET" --dir fuzz/previous
+              if [ -d "fuzz/previous/corpus" ]; then
+                cp -a "fuzz/previous/corpus/." "fuzz/corpus/$FUZZ_TARGET/"
+              fi
+            else
+              echo "No retained corpus for $FUZZ_TARGET in run $previous; starting from committed seeds"
+            fi
+          else
+            echo "No completed nightly run; starting from committed seeds"
+          fi
+      - run: |
+          source scripts/ci/fuzz-evidence.sh
+          # cargo-fuzz does not forward --locked. Resolve first so a stale
+          # dedicated lockfile fails instead of silently selecting new inputs.
+          cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
           cargo fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" \
             fuzz/corpus/"${{ matrix.target }}" fuzz/seeds/"${{ matrix.target }}" \
-            -- -max_total_time=30 -rss_limit_mb=4096
+            -- -max_total_time=600 -rss_limit_mb=4096
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
 
+      - name: Stage a stable corpus evidence layout
+        if: ${{ always() }}
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p target/fuzz-evidence/corpus target/fuzz-evidence/crashes
+          if [ -d "fuzz/corpus/$FUZZ_TARGET" ]; then
+            cp -a "fuzz/corpus/$FUZZ_TARGET/." target/fuzz-evidence/corpus/
+          fi
+          if [ -d "fuzz/artifacts/$FUZZ_TARGET" ]; then
+            cp -a "fuzz/artifacts/$FUZZ_TARGET/." target/fuzz-evidence/crashes/
+          fi
+          if [ ! -f target/fuzz-evidence/run.json ]; then
+            printf '{"schema_version":1,"target":"%s","status":"not_run","complete":false}\n' "$FUZZ_TARGET" > target/fuzz-evidence/run.json
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: target/fuzz-evidence
+          retention-days: 30
+          if-no-files-found: warn
+  formal:
+    name: Cache protocol model checking
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci/formal.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: formal-evidence
+          path: |
+            target/assurance/formal
+            .cache/tla/states
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: warn
   smoke-matrix:
     name: Full cross-Linux smoke matrix
     runs-on: ubuntu-24.04
@@ -224,6 +327,20 @@ jobs:
           # all this needs; the token moves the read onto this repository's own
           # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
           GITHUB_TOKEN: ${{ github.token }}
-      - run: scripts/smoke-matrix.sh
+      - run: bash scripts/ci/smoke-matrix-evidence.sh
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+      - name: Record a matrix that never started
+        if: ${{ always() }}
+        run: |
+          mkdir -p target/assurance/smoke-matrix
+          if [ ! -f target/assurance/smoke-matrix/run.json ]; then
+            printf '{"schema_version":1,"status":"not_run","complete":false}\n' > target/assurance/smoke-matrix/run.json
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: nightly-smoke-matrix-evidence
+          path: target/assurance/smoke-matrix
+          retention-days: 30
+          if-no-files-found: warn

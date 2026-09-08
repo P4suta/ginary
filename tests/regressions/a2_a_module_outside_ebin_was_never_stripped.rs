@@ -26,16 +26,11 @@ use ginary::strip::{self, BeamOutcome, StripOptions};
 
 use crate::common::tools::require_tools;
 
-/// The unstripped module both copies are made from.
-fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/beam/gleam@list.beam")
-}
-
 /// Copies the fixture to `<root>/<relative>`.
-fn copy_to(root: &Path, relative: &str) -> PathBuf {
+fn copy_to(fixture: &Path, root: &Path, relative: &str) -> PathBuf {
     let path = root.join(relative);
     std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
-    std::fs::copy(fixture(), &path).expect("the fixture copies");
+    std::fs::copy(fixture, &path).expect("the fixture copies");
     path
 }
 
@@ -67,9 +62,10 @@ fn a_module_under_priv_is_stripped_like_one_under_ebin() {
     };
     let otp = ginary::otp::discover(None).expect("the host OTP installation");
     let dir = tempfile::tempdir().expect("a temporary directory");
+    let fixture = crate::common::erl::compile_strip_fixture(&otp, &dir.path().join("compiler"));
     let root = dir.path().join("out");
-    let in_ebin = copy_to(&root, "lib/notify/ebin/gleam@list.beam");
-    let in_priv = copy_to(&root, "lib/notify/priv/helper.beam");
+    let in_ebin = copy_to(&fixture, &root, "lib/notify/ebin/gleam@list.beam");
+    let in_priv = copy_to(&fixture, &root, "lib/notify/priv/helper.beam");
 
     let report = strip::strip(
         &root,

@@ -36,6 +36,19 @@ no Erlang installation. Five phases, A through E, built it:
 
 ### Added
 
+- Product-completeness improvements: preflight output identity checks, atomic artifact and
+  document publication, project build locks, isolated staging and detailed partial build results.
+  All build targets can emit SPDX SBOMs with names derived from their artifact filenames.
+- `ginary diagnose` collects local environment, artifact, trace and crash summaries without
+  executing the supplied artifact. Versioned diagnostics retain bounded subprocess output,
+  timeout and cleanup causes, and distinguish failed checks from checks that could not run.
+- Cache maintenance preserves active extraction, locked runtimes, crash evidence and files whose
+  ownership cannot be established. Verification checks target object formats and conflicting
+  extraction paths. Installed native OTP roots can be repacked and consumed through local catalogs.
+- Distribution rehearsals use explicit tag dispatch, deterministic catalog/asset reconciliation
+  and verification before optional publication. CI retains failed-run evidence for 30 days and
+  enforces coverage, formal checks and complete native-platform mutation accounting. See
+  `docs/dev/log/F1.md` for measured qualification and the remaining platform/execution limits.
 - `GINARY_GITHUB_TOKEN`, `GH_TOKEN` and `GITHUB_TOKEN`, tried in that order: the token
   `ginary otp repack` reads the GitHub release API with. It needs no scopes for a public
   repository. Without one the read is anonymous, and GitHub allows 60 an hour **per source

@@ -92,9 +92,9 @@ neither is worth refusing to run a packaged application over.
 three calls above — `SetConsoleCtrlHandler`, `CreateJobObjectW` with `SetInformationJobObject`,
 and `AssignProcessToJobObject` — are `kernel32` entry points with no safe wrapper in the
 standard library or anywhere else, and `forbid` cannot be lifted for a single module. So
-`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, seven
-`unsafe` blocks, each with a `SAFETY` note, every function total and every failure a `false` or
-a `None`. `deny` keeps every other file exactly as strict as `forbid` was, and the exception is
+`launch_windows::win32` carries the only `#[allow(unsafe_code)]` in the crate: one module, eight
+`unsafe` blocks, each with a `SAFETY` note. Launcher facilities return `false` or `None` on
+failure; exclusive publication returns an I/O error. `deny` keeps every other file exactly as strict as `forbid` was, and the exception is
 one reviewable surface rather than three scattered blocks. The alternative was to ship a Windows
 launcher that orphans its runtime when it is killed and dies under Ctrl-C, which is a worse
 answer than a bounded exception.
@@ -116,6 +116,16 @@ reach, not what the exception covers — the module is not exported and no new d
 `windows-sys` feature was added. The counts this decision states are held to the module by
 `tests/regressions/e12_three_statements_of_the_unsafe_exception_said_three_calls.rs`, because
 they had already drifted twice before anything noticed.
+
+**Amendment, F1: exclusive directory publication.** A native Windows regression found that
+`std::fs::rename` replaces an existing empty destination directory. Assembly must refuse a
+directory created by a competing invocation, so `win32::rename_noreplace` calls `MoveFileExW`
+with zero flags. The safe wrapper rejects embedded NULs, makes both paths absolute, preserves
+UTF-16 code units, and supplies the long-path prefix. It enables neither replacement nor
+cross-volume copy nor reboot scheduling. Both buffers remain owned and NUL-terminated for
+the call; an error is obtained immediately through `last_os_error`. This adds the
+`Win32_Storage_FileSystem` feature and one block inside the existing exception, with native
+tests for an existing empty destination, long Unicode paths and NUL refusal.
 
 ## Consequences
 
@@ -206,11 +216,12 @@ arguments, `3` for `halt(3)`, and `3` again on the warm cache. So the `otp_win64
 layout and **the end-to-end run of a real artifact** — the two things this paragraph recorded as
 still owing — are both discharged, on the runner it named.
 
-What is still owed is one mechanism, and only one: a console control **event**. `run` installs
-the handler on every launch, so `SetConsoleCtrlHandler` is called and its return is checked; no
-Ctrl-C has ever been delivered to a launcher that installed one. E23 declined to drive it rather
-than fake it, because `GenerateConsoleCtrlEvent` needs a second `#[allow(unsafe_code)]` and this
-repository requires an ADR of its own for that.
+A console control **event** is not yet qualified. `run` installs the handler on every launch,
+so `SetConsoleCtrlHandler` is called and its return is checked; no Ctrl-C has ever been delivered
+to a launcher that installed one. E23 declined to drive it rather than fake it, because
+`GenerateConsoleCtrlEvent` needs a second `#[allow(unsafe_code)]` and this repository requires
+an ADR of its own for that. Runtime behavior beyond `MAX_PATH` and a real `heart` restart also
+need separate native qualification; successful ordinary artifact launches do not prove them.
 
 `HEART_COMMAND` quoting is the one shared rule that is **not** shared. `heart` restarts the
 emulator with `CreateProcess` rather than through a shell, so the Windows `shell_word` follows
@@ -228,13 +239,15 @@ has been scrubbed. And the directory entry the rename creates is not flushed, be
 window comes back to an entry the completeness check rejects, which costs one repeated
 extraction rather than a broken artifact.
 
-A third is `MAX_PATH`, and it is the runtime's rather than the launcher's. Every path ginary
-itself opens is the `\\?\` form — the extraction, the cache-hit check, `<entry>\.lock`, the
+A third qualification boundary is `MAX_PATH`. Every path ginary itself opens is the `\\?\`
+form — the extraction, the cache-hit check, `<entry>\.lock`, the
 manifest and the preflight — and `launch::plan` puts the ordinary spelling back for `ROOTDIR`,
 `BINDIR` and the argument vector, because `erl.exe` takes those apart and reassembles them
-rather than merely opening them. An entry past `MAX_PATH` therefore extracts, is found and is
-locked, and the runtime will not start out of it. There is nothing on ginary's side left to
-fix; the remedy is `%GINARY_CACHE_DIR%`.
+rather than merely opening them. Extraction and locking beyond that boundary have synthetic
+tests; launching the real OTP runtime from such an entry is not yet measured. The ordinary
+path arguments leave a possible runtime limit, not a demonstrated failure for every supported
+OTP version. If launch fails only under a deep cache root, choose a shorter `GINARY_CACHE_DIR`
+and retain the trace and runtime version for diagnosis.
 
 Mode bits are a **no-op** throughout. `chmod_tree`, the unpacker's `set_mode` and assembly's own
 all do nothing on Windows, and `manifest::mode_of` records what the `tar` crate writes into the

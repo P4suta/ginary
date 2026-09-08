@@ -30,10 +30,23 @@ use ginary::target::Os;
 use crate::common::bounded::run_bounded;
 use crate::common::fixture::FixtureProject;
 
+/// Tools needed by the native `hello_ffi` build and staging fixtures.
+///
+/// BEAM stripping uses Erlang on every host. The native stripping phase only
+/// invokes `strip` for ELF files, so a Windows PE or macOS Mach-O runtime does
+/// not need that otherwise Unix-specific program. Tests that exercise ELF
+/// stripping directly keep their separate stripper requirement.
+pub const HOST_BUILD_TOOLS: &[&str] = if cfg!(target_os = "linux") {
+    &["gleam", "erl", "strip"]
+} else {
+    &["gleam", "erl"]
+};
+
 /// How long one `ginary build` gets.
 ///
 /// Wide: it runs `gleam export erlang-shipment`, stages a whole OTP
-/// installation, runs `strip` over it and packs the result at zstd 19.
+/// installation, strips its BEAM files (and ELF objects on Linux), and packs
+/// the result at zstd 19.
 pub const BUILD_BUDGET: Duration = Duration::from_secs(900);
 
 /// How long one run of a built artifact gets, cold cache included.
@@ -134,8 +147,8 @@ impl BuiltProject {
     /// Runs `ginary build` with extra arguments and extra variables.
     ///
     /// The environment is inherited rather than cleared: the build needs
-    /// `PATH` to find `gleam`, `erl` and `strip`, which is the whole point of
-    /// gating these tests on the toolchain.
+    /// `PATH` to find the programs in [`HOST_BUILD_TOOLS`], which is the whole
+    /// point of gating these tests on the toolchain.
     ///
     /// # Panics
     ///

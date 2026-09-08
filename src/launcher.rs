@@ -153,6 +153,7 @@ pub fn run(exe: File, exe_path: PathBuf, trailer: Trailer) -> ExitCode {
     let _ = crate::fault::point("launcher");
 
     let diag = Diag::from_env(&crate::diag::EnvSnapshot::from_env());
+    let operation = diag.operation("launcher");
     let env = Env::from_env();
     diag.kv(
         "start",
@@ -163,8 +164,12 @@ pub fn run(exe: File, exe_path: PathBuf, trailer: Trailer) -> ExitCode {
     );
 
     match dispatch(&exe, &exe_path, &trailer, &env, &diag) {
-        Ok(code) => code,
+        Ok(code) => {
+            operation.finish(code == ExitCode::SUCCESS, &[]);
+            code
+        }
         Err(error) => {
+            operation.finish(false, &[("exit_code", &error.exit_code().to_string())]);
             let _ = writeln!(std::io::stderr(), "{}", error.report());
             ExitCode::from(error.exit_code())
         }
@@ -246,6 +251,9 @@ fn start(
     diag: &Diag,
     lock: Option<crate::cache_lock::SharedLock>,
 ) -> Result<ExitCode, LauncherError> {
+    // execve replaces this process, so it cannot emit a completion event.
+    // This records the boundary; a return from exec is followed by failure.
+    diag.kv("handoff", &[("mode", "execve")]);
     let error = launch::exec(plan, diag);
     drop(lock);
     Err(error)
@@ -472,7 +480,18 @@ fn maintenance(
         }
         Cmd::SelfTest => {
             let dirs = cache::prepare_here(env, &mut std::io::stderr())?;
-            selftest(exe, exe_path, trailer, &manifest, &dirs, diag, &mut out)
+            selftest(
+                SelftestContext {
+                    exe,
+                    exe_path,
+                    trailer,
+                    manifest: &manifest,
+                    dirs: &dirs,
+                    env,
+                    diag,
+                },
+                &mut out,
+            )
         }
     };
     let _ = out.flush();
@@ -514,15 +533,16 @@ pub fn render_prune(report: &cache::PruneReport) -> String {
 ///
 /// The first failure ends the report: there is nothing to preflight in a tree
 /// that was never extracted, and nothing to run in one that failed preflight.
-fn selftest(
-    exe: &File,
-    exe_path: &Path,
-    trailer: &Trailer,
-    manifest: &Manifest,
-    dirs: &CacheDirs,
-    diag: &Diag,
-    out: &mut impl Write,
-) -> ExitCode {
+fn selftest(context: SelftestContext<'_>, out: &mut impl Write) -> ExitCode {
+    let SelftestContext {
+        exe,
+        exe_path,
+        trailer,
+        manifest,
+        dirs,
+        env,
+        diag,
+    } = context;
     let entry = match cache::ensure_extracted(exe, trailer, &manifest.app, dirs, diag) {
         Ok(entry) => {
             let _ = writeln!(out, "extract: PASS");
@@ -540,22 +560,26 @@ fn selftest(
     }
     let _ = writeln!(out, "preflight: PASS");
 
+    // The test uses the same cache claim as an ordinary launch, including the
+    // one repair if maintenance removed the entry on the way to its lock.
+    // Hold that claim until the bounded child has exited.
+    let (entry, lock) = match lock_entry(exe, trailer, manifest, dirs, entry, diag) {
+        Ok(locked) => locked,
+        Err(error) => {
+            let _ = writeln!(out, "run: FAIL: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let crash_dump_dir = dirs.app_dir(&manifest.app);
-    let plan = match launch::plan(
-        &entry,
-        manifest,
-        &[],
-        &Env::default(),
-        &crash_dump_dir,
-        exe_path,
-    ) {
+    let plan = match launch::plan(&entry, manifest, &[], env, &crash_dump_dir, exe_path) {
         Ok(plan) => launch::halt_plan(&plan),
         Err(error) => {
             let _ = writeln!(out, "run: FAIL: {error}");
             return ExitCode::FAILURE;
         }
     };
-    match launch::run_bounded(plan, diag, SELFTEST_BUDGET) {
+    let outcome = match launch::run_bounded(plan, diag, SELFTEST_BUDGET) {
         Ok(()) => {
             let _ = writeln!(out, "run: PASS");
             ExitCode::SUCCESS
@@ -564,7 +588,20 @@ fn selftest(
             let _ = writeln!(out, "run: FAIL: {issue}");
             ExitCode::FAILURE
         }
-    }
+    };
+    drop(lock);
+    outcome
+}
+
+/// The artifact and captured environment a selftest shares with normal launch.
+struct SelftestContext<'a> {
+    exe: &'a File,
+    exe_path: &'a Path,
+    trailer: &'a Trailer,
+    manifest: &'a Manifest,
+    dirs: &'a CacheDirs,
+    env: &'a Env,
+    diag: &'a Diag,
 }
 
 /// The object `GINARY_CMD=inspect` prints: the manifest and the geometry.

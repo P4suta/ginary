@@ -428,6 +428,49 @@ impl SyntheticArtifact {
         Self::build_with(dir, &ArtifactOptions::default())
     }
 
+    /// Builds an artifact whose runtime uses the host's executable fixture.
+    ///
+    /// Its behavior is supplied through the portable shim steps instead of
+    /// the default launch-contract fixture. Both forms run on Windows and
+    /// Unix, and the compiled shim's sidecar travels with the program.
+    ///
+    /// # Panics
+    ///
+    /// If the fixture program or the artifact cannot be written.
+    pub fn build_with_runtime_steps(dir: &Path, steps: &[super::script::ShimStep]) -> Self {
+        let fixture = dir.join("fixture-runtime");
+        std::fs::create_dir_all(&fixture).expect("create runtime fixture directory");
+        let program = super::script::program(&fixture, "probe", steps);
+        let name = program
+            .file_name()
+            .expect("fixture program name")
+            .to_string_lossy();
+        let mut launch = canonical_manifest().launch;
+        launch.program = name.to_string();
+        let relative = format!("{}/{name}", launch.bindir);
+        Self::build_with(
+            dir,
+            &ArtifactOptions {
+                launch: Some(launch),
+                extra_files: vec![
+                    (
+                        relative.clone(),
+                        0o755,
+                        std::fs::read(&program).expect("read fixture program"),
+                        Category::ErtsBinary,
+                    ),
+                    (
+                        format!("{relative}.steps"),
+                        0o644,
+                        super::script::compiled_steps_text(steps).into_bytes(),
+                        Category::ErtsBinary,
+                    ),
+                ],
+                ..ArtifactOptions::default()
+            },
+        )
+    }
+
     /// Builds an artifact with the staging root or the manifest changed.
     ///
     /// # Panics

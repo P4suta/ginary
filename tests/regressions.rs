@@ -529,3 +529,35 @@ mod e23_the_help_text_denied_the_targets_the_tool_supports;
 mod e23_the_windows_allowlist_named_no_api_set_but_the_crt_one;
 #[path = "regressions/e23_the_windows_job_proved_erlang_rather_than_the_launcher.rs"]
 mod e23_the_windows_job_proved_erlang_rather_than_the_launcher;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_beam_batches_exceeded_windows_command_lines.rs"]
+mod f1_beam_batches_exceeded_windows_command_lines;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_build_outputs_were_not_isolated.rs"]
+mod f1_build_outputs_were_not_isolated;
+#[path = "regressions/f1_cache_maintenance_discarded_live_work.rs"]
+mod f1_cache_maintenance_discarded_live_work;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_diagnosis_lost_failure_evidence.rs"]
+mod f1_diagnosis_lost_failure_evidence;
+#[path = "regressions/f1_distribution_executed_a_tag_in_the_default_branch_context.rs"]
+mod f1_distribution_executed_a_tag_in_the_default_branch_context;
+#[path = "regressions/f1_foreign_payload_paths_used_the_hosts_separators.rs"]
+mod f1_foreign_payload_paths_used_the_hosts_separators;
+#[path = "regressions/f1_formal_state_evidence_was_hidden.rs"]
+mod f1_formal_state_evidence_was_hidden;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_macos_signature_verification_was_only_a_test_helper.rs"]
+mod f1_macos_signature_verification_was_only_a_test_helper;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_multi_target_cli_lost_results.rs"]
+mod f1_multi_target_cli_lost_results;
+#[path = "regressions/f1_process_timeouts_lost_their_output.rs"]
+mod f1_process_timeouts_lost_their_output;
+#[path = "regressions/f1_selftest_did_not_use_the_launchers_environment_or_lock.rs"]
+mod f1_selftest_did_not_use_the_launchers_environment_or_lock;
+#[path = "regressions/f1_trace_could_not_be_shared_or_correlated.rs"]
+mod f1_trace_could_not_be_shared_or_correlated;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_verify_accepted_inconsistent_destinations.rs"]
+mod f1_verify_accepted_inconsistent_destinations;

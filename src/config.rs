@@ -20,6 +20,17 @@
 //! that the message can name which of the seven sub-tables holds it; see
 //! [`TargetConfig::unknown`].
 
+// Windows OsString storage makes the established public error reach Clippy's
+// size threshold. Boxing its public fields would break callers constructing or
+// matching ConfigError; retain that compatibility while checking other targets.
+#![cfg_attr(
+    windows,
+    allow(
+        clippy::result_large_err,
+        reason = "preserve the existing public ConfigError field types on Windows"
+    )
+)]
+
 #[cfg(feature = "cli")]
 use std::collections::BTreeMap;
 #[cfg(feature = "cli")]

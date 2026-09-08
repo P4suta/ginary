@@ -110,6 +110,65 @@ fn a_stub_that_is_not_there_is_an_io_error_naming_it() {
 }
 
 #[test]
+fn a_damaged_trailer_is_refused_as_a_bundled_stub_before_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("damaged-stub");
+    let mut bytes = vec![0_u8; 128];
+    bytes[64..72].copy_from_slice(&ginary::trailer::MAGIC);
+    bytes[64 + 56] = 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let error = bundle::check_stub(&path).unwrap_err();
+    assert!(matches!(error, BundleError::BundledStub { path: named } if named == path));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn an_embedding_caller_with_no_targets_gets_a_typed_error_from_both_wrappers() {
+    let project = TempProject::named("hello");
+    let mut opts = build_options(&project);
+    opts.targets.clear();
+    let detailed = bundle::build_detailed(&opts, &Diag::disabled()).unwrap_err();
+    assert!(matches!(detailed.source.as_ref(), BundleError::NoTargets));
+    assert!(detailed.completed.is_empty() && detailed.unattempted.is_empty());
+    assert!(detailed.staging.is_none());
+    let legacy = bundle::build(&opts, &Diag::disabled()).unwrap_err();
+    assert!(matches!(legacy, BundleError::NoTargets));
+    assert!(!project.root().join("build/ginary").exists());
+}
+
+#[test]
+fn a_missing_project_root_is_reported_before_any_work_directory_is_created() {
+    let project = TempProject::named("hello");
+    let mut opts = build_options(&project);
+    opts.root = project.root().join("missing-project");
+    let failure =
+        bundle::build_with_stub_detailed(&opts, &ginary_bin(), &Diag::disabled()).unwrap_err();
+    assert!(
+        matches!(failure.source.as_ref(), BundleError::Io { what, .. } if what.contains("cannot resolve the project")),
+        "{failure}"
+    );
+    assert!(failure.completed.is_empty() && failure.staging.is_none());
+    assert!(!opts.root.exists());
+}
+
+#[test]
+fn a_work_cleanup_refusal_keeps_the_path_and_os_reason_available_to_the_caller() {
+    let dir = tempfile::tempdir().unwrap();
+    let already_gone = dir.path().join("gone");
+    assert!(bundle::remove_work_dir(&already_gone).is_none());
+    let blocked = dir.path().join("unexpected-file");
+    std::fs::write(&blocked, b"preserve this unrelated file").unwrap();
+    let warning =
+        bundle::remove_work_dir(&blocked).expect("a regular file cannot be removed as a work tree");
+    assert!(warning.contains(&blocked.display().to_string()));
+    assert!(warning.contains("could not be removed"));
+    assert_eq!(
+        std::fs::read(&blocked).unwrap(),
+        b"preserve this unrelated file"
+    );
+}
+
+#[test]
 fn a_build_refuses_a_bundled_stub_before_it_looks_at_the_project() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let artifact = SyntheticArtifact::build(dir.path());

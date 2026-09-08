@@ -44,6 +44,9 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path tools/mutation-plan/Cargo.toml -- --check
+      - run: cargo test --manifest-path tools/mutation-plan/Cargo.toml --locked --no-fail-fast
+      - run: cargo clippy --manifest-path tools/mutation-plan/Cargo.toml --all-targets --locked -- -D warnings
       # Three clippy flavors. `--all-features` compiles the fault-injection
       # tests in; the plain run is what a contributor's `cargo clippy` does and
       # keeps a helper only the gated tests call from rotting; the stub run is
@@ -73,6 +76,9 @@ jobs:
       # this file carries it — one run, one full report — and because a rule
       # with an exception is one the next author has to relitigate.
       - run: cargo test --locked --no-fail-fast --test regressions actionlint_accepts_every_workflow
+      # The long native script is linted by file path: actionlint's Windows
+      # stdin pipe can block before it starts ShellCheck for a large run block.
+      - run: shellcheck scripts/ci/macos-smoke.sh scripts/ci/coverage.sh scripts/ci/coverage-gate.sh scripts/ci/fuzz-evidence.sh scripts/ci/smoke-matrix-evidence.sh scripts/smoke-matrix.sh
 
   msrv:
     name: MSRV check (the declared floor)
@@ -101,11 +107,22 @@ jobs:
       # and the one `cross-build`, `macos` and `windows` build.
       - run: cargo check --workspace --all-features --locked
       - run: cargo check --workspace --no-default-features --locked
+      - run: cargo check --manifest-path tools/mutation-plan/Cargo.toml --all-targets --locked
 
   test:
-    name: Test (both flavors, stable)
+    name: Test (${{ matrix.configuration }}, stable)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: faults
+            features: --features fault-injection
+          - configuration: plain
+            features: ''
+          - configuration: stub
+            features: --no-default-features
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
@@ -130,9 +147,22 @@ jobs:
       # slice of one rather than the whole. One run, one full report.
       #
       # The full command line tool, with the launcher fault points compiled in.
-      - run: cargo test --features fault-injection --locked --no-fail-fast
-      # The launcher-only stub flavor: no clap, no TOML reader, no build side.
-      - run: cargo test --no-default-features --locked --no-fail-fast
+      - name: Run every test target and retain the complete output
+        env:
+          TEST_FEATURES: ${{ matrix.features }}
+          GINARY_TEST_EVIDENCE_DIR: ${{ github.workspace }}/target/assurance/evidence
+        run: |
+          python3 -m unittest discover -s scripts/ci -p '*_test.py'
+          read -r -a feature_args <<< "$TEST_FEATURES"
+          python3 scripts/ci/test-evidence.py --output target/assurance -- \
+            cargo test "${feature_args[@]}" --locked --no-fail-fast
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: tests-${{ matrix.configuration }}
+          path: target/assurance
+          retention-days: 30
+          if-no-files-found: warn
 
   smoke:
     name: Clean-room smoke test
@@ -294,7 +324,11 @@ jobs:
           # all this needs; the token moves the read onto this repository's own
           # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
           GITHUB_TOKEN: ${{ github.token }}
-      - run: scripts/smoke-matrix.sh
+      - name: Run the cross smoke matrix with retained output
+        run: |
+          set -euo pipefail
+          mkdir -p target/assurance/smoke-matrix
+          scripts/smoke-matrix.sh 2>&1 | tee target/assurance/smoke-matrix/smoke.log
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
       # The stub-gated tests, run in the job that cross-builds the stubs. Here
@@ -309,10 +343,19 @@ jobs:
       # counting it by hand is how five of the nine came to run nowhere.
       - name: Run the tests that need a cross-built stub
         run: |
-          cargo test --locked --no-fail-fast \
-            --test e2e_cross --test stub --test e2e_native --test regressions
+          python3 scripts/ci/test-evidence.py --output target/assurance/smoke-matrix -- \
+            cargo test --locked --no-fail-fast \
+              --test e2e_cross --test stub --test e2e_native --test regressions
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
+          GINARY_TEST_EVIDENCE_DIR: ${{ github.workspace }}/target/assurance/smoke-matrix/evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: tests-smoke-matrix
+          path: target/assurance/smoke-matrix
+          retention-days: 30
+          if-no-files-found: warn
 
   macos:
     name: macOS build, launch and signature
@@ -378,71 +421,15 @@ jobs:
       - name: Package, run and verify a hello_ffi artifact
         env:
           GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
-        run: |
-          otp_root="$(dirname "$(dirname "$(command -v erl)")")"
-          work=$(mktemp -d)
-          cp -R tests/fixtures/hello_ffi "$work/hello_ffi"
-          printf '\n[tools.ginary.target."%s"]\nerts = "dir:%s"\n' \
-            "${{ matrix.target }}" "$otp_root" >> "$work/hello_ffi/gleam.toml"
-          ( cd "$work/hello_ffi"
-            "$GITHUB_WORKSPACE/target/release/ginary" build \
-              --target "${{ matrix.target }}" )
-          artifact="$work/hello_ffi/build/ginary/hello_ffi-${{ matrix.target }}"
-          # Diagnostic: the stub's load commands beside the finished artifact's.
-          # A valid signature over a structurally broken image verifies and then
-          # segfaults on exec (exit 139), which is what both runners reported on
-          # run 33724862229: the E8 writer injected a new segment, and making
-          # room for its load command slid the code forward — invalidating the
-          # entry point and every LC_DYLD_CHAINED_FIXUPS rebase target, which the
-          # signature happily covered. E9 rewrote the writer to grow __LINKEDIT
-          # over the payload instead, moving nothing. These dumps are the
-          # evidence: __TEXT's fileoff/filesize, LC_MAIN's entryoff and every
-          # segment before __LINKEDIT must read identically in both columns, and
-          # only __LINKEDIT's filesize/vmsize and LC_CODE_SIGNATURE's
-          # dataoff/datasize may differ. They cost a second on the third round
-          # of this bug and stay for the fourth. See docs/dev/log/E9.md.
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          stub="$GITHUB_WORKSPACE/target/stubs/ginary-stub-${version}-${{ matrix.target }}"
-          fields='cmd |segname|fileoff|filesize |vmaddr|vmsize|entryoff|dataoff|datasize'
-          echo "== stub load commands =="
-          otool -l "$stub" | grep -E "$fields" || true
-          echo "== artifact load commands =="
-          otool -l "$artifact" | grep -E "$fields" || true
-          # The signature is read and checked *before* the artifact is run, and
-          # not only after it. An invalid ad-hoc signature is not a program
-          # that starts and misbehaves: the kernel refuses to map a page whose
-          # hash disagrees with the CodeDirectory and kills the process with
-          # SIGKILL before `main`. Checking first turns that back into a sentence
-          # naming the defect, and `--display` prints the geometry a future one
-          # needs: the CDHash, the flags, the hash type and the executable
-          # segment. See docs/dev/log/E8.md and docs/dev/log/E9.md.
-          codesign --display --verbose=4 "$artifact" || true
-          codesign --verify --strict --verbose=4 "$artifact"
-          # Run the artifact, and on any non-zero exit print the crash report the
-          # runner keeps before failing: a low faulting address is a null deref
-          # in our own first instructions, a fault inside dyld is a malformed
-          # image. The exit code is still asserted — the diagnostics do not
-          # soften it.
-          set +e
-          "$artifact" 0 hello world
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "::error::the hello_ffi artifact exited $status, not 0"
-            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \
-              -name '*.ips' 2>/dev/null || true
-            for report in "$HOME"/Library/Logs/DiagnosticReports/hello_ffi-*.ips; do
-              [ -f "$report" ] && { echo "== $report =="; cat "$report"; }
-            done
-            log show --last 5m \
-              --predicate 'process == "hello_ffi-${{ matrix.target }}"' 2>/dev/null \
-              | tail -n 40 || true
-            exit "$status"
-          fi
-          set +e; "$artifact" 3; test $? -eq 3; set -e
-          # And again afterwards: the artifact extracts its payload into a
-          # cache directory and must not have touched its own file to do it.
-          codesign --verify --strict --verbose=4 "$artifact"
+          GINARY_SMOKE_TARGET: ${{ matrix.target }}
+        run: bash scripts/ci/macos-smoke.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: native-${{ matrix.target }}-evidence
+          path: target/assurance/${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: warn
 
   windows:
     name: Windows build and exit-code propagation
@@ -496,7 +483,13 @@ jobs:
       # every target after the first that fails, so the seven library failures
       # this job reported on the first Windows-native run were the first slice
       # of a report rather than the whole of one.
-      - run: cargo test --locked --no-fail-fast
+      - name: Run native Windows tests with retained outcomes
+        env:
+          GINARY_TEST_EVIDENCE_DIR: ${{ github.workspace }}/target/assurance/windows/evidence
+        run: |
+          python scripts/ci/test-evidence.py --output target/assurance/windows -- cargo test --locked --no-fail-fast
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          exit 0
       # Rustdoc, here as well as in `lint`, because an intra-doc link to a
       # `#[cfg(unix)]` item resolves on Linux and is a hard error on Windows —
       # and the `lint` job documents only Linux. Three such links were in the
@@ -531,6 +524,10 @@ jobs:
       - name: Assert exit-code propagation
         shell: pwsh
         run: |
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'target/assurance/windows'
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          Start-Transcript -LiteralPath (Join-Path $evidence 'exit-code.log') -Force
+          try {
           $otp = $env:INSTALL_DIR_FOR_OTP
           if (-not $otp -or -not (Test-Path -LiteralPath $otp)) {
             Write-Host "::error::INSTALL_DIR_FOR_OTP names no directory: '$otp'"
@@ -551,10 +548,15 @@ jobs:
           Write-Host "probing $erl"
           & $erl -noshell -eval "halt(3)"
           $code = $LASTEXITCODE
+          @{ expected = 3; observed = $code } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence 'exit-code.json')
           Write-Host "erl -noshell -eval halt(3) left exit code $code"
           if ($code -ne 3) {
             Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
             exit 1
+          }
+          } finally {
+            Stop-Transcript
           }
           exit 0
       # The claim the readiness checklist books against this job, and until E23
@@ -641,9 +643,26 @@ jobs:
             exit 1
           }
           exit 0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: native-windows-evidence
+          path: target/assurance/windows
+          retention-days: 30
+          if-no-files-found: warn
 
   coverage:
-    name: Coverage
+    name: Coverage (${{ matrix.measurement }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - measurement: lines
+            toolchain: stable
+            flags: ''
+          - measurement: branches
+            toolchain: nightly
+            flags: --branch
     runs-on: ubuntu-24.04
     # Forty minutes was the budget before this job also repacked the runtimes
     # and stopped skipping nine end-to-end tests; the download, the repack and
@@ -679,7 +698,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
           components: llvm-tools-preview
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
@@ -734,27 +753,50 @@ jobs:
           # all this needs; the token moves the read onto this repository's own
           # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
           GITHUB_TOKEN: ${{ github.token }}
-      # Line coverage, gated at 90%. The branch floor is documented as
-      # nightly-only (it needs a `-Z coverage-options=branch` build); see
-      # docs/dev/testing.md. The threshold lives here, not only in the script's
+      # Both measurements are required on pull requests: line coverage at 90%
+      # and branch coverage at 80%. The branch measurement uses the nightly
+      # compiler for `-Z coverage-options=branch`; see docs/dev/testing.md.
+      # The threshold lives here, not only in the script's
       # default, so it cannot be lowered without the diff showing it. The
       # full end-to-end suite runs under coverage (the toolchain is present and
       # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure, and the
       # stubs downloaded above plus the runtimes repacked above keep the nine
       # stub-gated tests in the run), so the number reflects the whole tree
       # rather than a subset of it.
-      - run: cargo llvm-cov --all-features --workspace --lcov --output-path target/lcov.info
-      - run: scripts/ci/coverage-gate.sh target/lcov.info 90
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - run: bash scripts/ci/coverage.sh "${{ matrix.measurement }}"
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lcov
-          path: target/lcov.info
+          name: coverage-${{ matrix.measurement }}
+          path: target/assurance/coverage-${{ matrix.measurement }}
+          retention-days: 30
           if-no-files-found: error
 
+  formal:
+    name: Cache protocol model checking
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci/formal.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: formal-evidence
+          path: |
+            target/assurance/formal
+            .cache/tla/states
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: warn
   required:
     name: Required CI
     if: ${{ always() && !cancelled() }}
-    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage]
+    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

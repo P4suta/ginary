@@ -104,10 +104,7 @@ fn an_uninstall_still_reports_the_paths_the_caller_gave_it() {
 
 /// A complete entry: a `<key>` directory with a `ginary.json` in it.
 fn plant(app_dir: &Path, key: &str) -> PathBuf {
-    let entry = app_dir.join(key);
-    std::fs::create_dir_all(&entry).expect("create the entry");
-    std::fs::write(entry.join("ginary.json"), b"{}").expect("write the manifest");
-    entry
+    crate::common::cachefs::plant_entry(app_dir, key, std::time::Duration::ZERO)
 }
 
 /// Residue: a tree an interrupted extraction left behind.

@@ -64,7 +64,8 @@ Use the default `CARGO_HOME`. If `~/.cargo` is read-only (sandboxed agent), expo
 - No `unsafe` outside `launch_windows::win32`. The crate declares `#![deny(unsafe_code)]`, and
   that module carries the only `#[allow(unsafe_code)]` there is: the `kernel32` calls with no
   safe counterpart — the console control handler and the job object the resident launcher needs,
-  and the `OpenProcess` probe `cache::sweep` asks a process id about — argued and enumerated in
+  the `OpenProcess` probe `cache::sweep` asks a process id about, and `MoveFileExW` without
+  replacement flags for assembly publication — argued and enumerated in
   ADR [0015](docs/adr/0015-windows-launcher-stays-resident.md). A new `#[allow(unsafe_code)]`
   anywhere needs an ADR of its own.
 - Never `git add -A` or `git add .`. The sandbox puts character-device shims (`.bashrc`,

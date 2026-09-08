@@ -66,7 +66,7 @@
 | `tests/e2e_native.rs` | four-way gated, the cross-built stub among the four: `ginary build` over a shipment with an object planted in its `priv` — a host build recording it in the manifest, a cross build refused with the table, the same build allowed through, a static runtime refusing a NIF it could not load, and a `native` override replacing one and saying so in the manifest |
 | `tests/formal.rs` | the TLA+ model held against the repository: both files committed, every action and state named, the `.cfg` naming the four invariants, `mise run formal` pinning its checker by digest and passing `-deadlock` on no command line, and `docs/dev/formal.md` mapping the model onto `src/cache.rs`. It does not run TLC; `mise run formal` does |
 | `tests/windows.rs` | the launcher half of Windows support, held to what a Linux machine can honestly check — every claim is a pure function: the cache root (`GINARY_CACHE_DIR`, `%LOCALAPPDATA%\ginary`, the `%TEMP%\ginary-<user>` fallback and its three bases, an empty variable counting as unset, the `%USERNAME%` that is not one path component) with the provenance table as a snapshot; the `\\?\` prefix over a drive-absolute path, forward slashes, UNC, an already-prefixed path, a relative one, and the identity that borrows on unix; the exit code a spawned child becomes, 256 and an access violation included; the two share modes the locks become — `FILE_SHARE_READ` for a runtime and `FILE_SHARE_DELETE` for a prune, which shares no reading and no writing and permits the rename the prune performs while holding the entry; `erl.exe` as the launch program of the Windows row of `target::ALL`; and that a Windows launch plan is the unix one with a different program name. Ungated, so the stub flavor asserts it too — the stub is the binary a Windows artifact is made of |
-| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, the four runtime sources a Windows build may not take its runtime from and the one it may, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry; E15 adds the ADR's citation of the run that measured `halt(3)` propagation on a real Windows host — run 33864729638, job 100996872499 — so the claim can be re-read rather than believed |
+| `tests/windows_build.rs` | the build half and the D2 scaffolding: the data-driven required-file probe over a `FakeOtp::windows()` — `erl.exe`, `beam.smp.dll`, `inet_gethost.exe` and every DLL beside them, sorted, with `erl.ini`, `erlsrv.exe` and `werl.exe` left behind — the three refusals by name, the `erl.ini` removal and its size in the junk account, explicit directory/catalog/tarball eligibility for Windows cross builds on every host, with the Windows-only host-runtime rule covered by E8 and actual verified-runtime consumption covered by the F1 CLI regression, and five documents nothing else would notice going stale: the `build:windows` task, the README's `## Windows` section, the Windows half of `docs/dev/debugging.md`, ADR 0015 and its index entry; E15 adds the ADR's citation of the run that measured `halt(3)` propagation on a real Windows host — run 33864729638, job 100996872499 — so the claim can be re-read rather than believed |
 | `tests/ci_matrix.rs` | the repository's own CI, held as data (E1, extended in E3): every job `ci.yml` promises and the fan-in's `needs:` list, the nightly and release workflows, the two committed CI scripts and their executable bits, the three security workflows — the CodeQL matrix parsed to `language: build-mode` rows, its weekly slot, Scorecard's publication and SARIF upload, dependency-review deferring to `deny.toml` — the dependabot policy parsed entry by entry and pinned as a snapshot, and the two hardening guards over *every* workflow: a top-level token that grants nothing but reads, a `permissions:` mapping on every job, and a full-SHA pin with a `# vX.Y.Z` comment behind every `uses:`; extended again in E4 with the toolchain matrix — the one `msrv` job that checks the declared floor and nothing else, its toolchain string held equal to `rust-version` in `Cargo.toml` so the two copies of the number cannot drift, and every other site across all seven workflows installing `stable`, `nightly.yml`'s `fuzz` excepted because cargo-fuzz has no stable equivalent; and the scope of `renovate.local.json5`, the one exception the local freshness gate is given — parsed with `serde_json` and held to a single `packageRules` entry over one datasource in one file, because a config that silences a gate is worth exactly its scope; extended in E15 with the Windows job's exit-code probe held to three things at once — it probes the runtime the job installed through `INSTALL_DIR_FOR_OTP` rather than a bare `erl` off `PATH`, it says the code it saw, and it ends on a verdict of its own; extended in E16 with the privileged-image rule — `every_privileged_container_ci_runs_is_pinned_to_a_manifest_digest` reads every workflow and composite action under `.github/`, every `.sh` under `scripts/` and `.github/`, and `mise.toml` (the reach `privileged_scan_set` names, because the task file is neither YAML nor a `.sh` and already runs a container), joins backslash continuations, drops shell comments through `shell_code`, and requires every image run with `--privileged` to be named `name@sha256:<64 hex>` rather than by any tag — an image with the host runner's own kernel capabilities is code this repository executes with more authority than its own workflows have, and a tag can be moved upstream between two runs with no line in any diff |
 | `tests/repo_hardening.rs` | the half of a public repository that is not code (E3): the two rulesets parsed through `serde_json` and snapshotted in canonical form, the required status check compared against the `name:` of `ci.yml`'s `required:` job, CODEOWNERS, the pull-request template's `mise run check` and regression-test rows, the two issue forms and their config parsed as YAML — the target dropdown's own options, which fields are `required`, the private-advisory link first — a contact link tied to the repository setting it needs, and `SECURITY.md` |
 | `tests/v1_readiness.rs` | the documents and metadata a v1 is judged by (E1): the README's structure and badges against the published slug, the licence files, the changelog, `CONTRIBUTING.md`, and the crate metadata `Cargo.toml` carries |
@@ -128,7 +128,7 @@ reason:
 | `tests/cli.rs` | the same, plus the `otp` field, which runs the ambient `erl` | the two `otp` assertions are gated on `require_tools(&["erl"])` |
 | `tests/otp.rs`, `tests/appfile.rs`, `tests/closure.rs` | `otp::discover(None)` and the host OTP tree it names | every one of those tests is gated on `require_tools` |
 | `tests/stage_run.rs` | `gleam export erlang-shipment`, `otp::discover(None)`, and the `erlexec` of the staged tree | every test is gated on `require_tools(&["gleam", "erl"])`; the launched runtime gets `env_clear()`, an empty `PATH` directory and a `HOME` inside the test's temporary tree, and both children run under a deadline — `fixture::EXPORT_BUDGET` (180 s) and `erl::RUN_BUDGET` (60 s) — with stdin on the null device |
-| `tests/gleam.rs`, `tests/e2e_hello.rs` | the real `gleam`, and through `ginary build` the real `erl` and `strip` | every one of those tests is gated on `require_tools`; the build runs under `built::BUILD_BUDGET` (900 s) and each run of the artifact under `built::RUN_BUDGET` (120 s), and the artifact itself is run with `env_clear()` and an empty-directory `PATH`, so nothing ambient reaches the packaged application |
+| `tests/gleam.rs`, `tests/e2e_hello.rs` | the real `gleam`, and through `ginary build` the real `erl`; Linux ELF builds also need `strip` | every one of those tests is gated on `require_tools`; native fixture builds use `built::HOST_BUILD_TOOLS`, so a Windows PE or macOS Mach-O runtime is not skipped for lacking an ELF stripper. The build runs under `built::BUILD_BUDGET` (900 s) and each artifact run under `built::RUN_BUDGET` (120 s), with `env_clear()` and an empty-directory `PATH`, so nothing ambient reaches the packaged application |
 | `tests/regressions.rs` | nothing ambient: it *replaces* `PATH` with a temporary directory holding stub scripts | the stubs exit at once |
 | `tests/cache_lock.rs`, `tests/launcher.rs`, `tests/regressions.rs` | util-linux `flock(1)`, and `sleep(1)` for the ADR 0010 proof | every one of those tests is gated on `require_tools(&["flock"])` — the lock has to be observed by a program that is not ginary, or it proves nothing about the kernel — and `GINARY_REQUIRE_TOOLCHAIN=1` turns the skip into a failure, which is how CI keeps them from quietly not running |
 | `tests/crashdump.rs` | one `erl` run that writes a real `erl_crash.dump`, so the parser is held against a file its author did not write | gated on `require_tools(&["erl"])`; the recipe is `erl -noshell -env ERL_CRASH_DUMP <tmp>/dump -eval 'spawn(fun() -> exit(kaboom) end), timer:sleep(100), erlang:halt("kaboom", [{flush,true}]).'`, which exits 1 and leaves a whole dump ending in `=end` |
@@ -184,17 +184,20 @@ stay gated and each names its reason in the source. A sixth test is Windows-only
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` sets up, driven by killing the launcher and watching the
 runtime go with it.
 
-What that buys is the first execution of the `\\?\` extraction, the two-open share-mode lock, the
-`OpenProcess` probe `cache::sweep` uses, and the spawn-and-wait of `launch_windows::run` — every
-one of which had a test before and no machine to run it on. What it does not buy is a runtime:
-this is still a suite that runs with no Erlang installed, so `halt(3)` reaching `%ERRORLEVEL%`
-through a *real* `erl.exe` remains the CI `windows` job's to prove.
+E23 first exercised the `\\?\` extraction, the two-open share-mode lock, the `OpenProcess`
+probe `cache::sweep` uses, and the spawn-and-wait of `launch_windows::run` on a Windows host.
+Those synthetic tests run without Erlang and make the launcher's own behavior observable.
+The separate native CI artifact run proved `halt(3)` reaching `%ERRORLEVEL%` through real
+`erl.exe`; [E23](log/E23.md) records that hosted execution. F1 subsequently repacked an installed
+OTP root, consumed its local catalog and built, verified and ran a real artifact on a Windows
+development machine. [F1-build](log/F1-build.md) retains that independent qualification.
 
-A Windows contributor should expect the toolchain-gated tests to skip (no `gleam`, no `erl`, no
-ELF `strip`) and must not set `GINARY_REQUIRE_TOOLCHAIN=1` there — the skips are honest on that
-host and CI asserts them where they are not. `mise run <task>` cannot provision a Windows host at
-all, because `mise.toml` pins an `erlang` that mise builds from source through kerl; run the
-`cargo` command line each task wraps instead.
+Toolchain-gated tests skip when their required tools are unavailable. Set
+`GINARY_REQUIRE_TOOLCHAIN=1` only when the environment supplies every prerequisite required by
+the selected tests; installing Gleam and Erlang alone does not supply Docker, cross-target stubs
+or Unix utilities. Keep reported skips distinct from executed tests. Mise backends and shell
+tasks have their own platform requirements: inspect the task before running it on Windows, and
+use its underlying `cargo` command directly when its wrapper requires a Unix environment.
 
 **A test that differs between the flavors asserts both branches rather than one.**
 `tests/stub_flavor.rs` is the pattern: the sentence a payloadless stub prints lives in
@@ -306,6 +309,14 @@ whose toolchain was complete. `tests/common/tools.rs::require_actionlint` reads
 then *runs the test by name*. Both halves are asserted, because a check moved out of three jobs
 and into none is a check that was deleted rather than fixed; see
 `tests/regressions/e7_actionlint_was_required_of_every_toolchain_job.rs`.
+
+Each actionlint invocation has a 60-second process budget and saves failed-process evidence
+through the common bounded harness. The same regression also invokes ShellCheck directly on
+`scripts/ci/macos-smoke.sh`; when `GINARY_REQUIRE_ACTIONLINT=1`, this companion linter must be
+present too. The helper keeps the complete macOS smoke check while avoiding actionlint
+1.7.12's write-before-spawn pipe deadlock on long inline scripts on Windows. ShellCheck reads
+the helper by file path, and all its checks remain enabled. See
+`docs/dev/log/F1-actionlint-pipe.md` for the short/long counterexample and tool evidence.
 
 E11 adds two gates that are not variables at all, and that is the point of them. Both live in
 `tests/common/tools.rs` beside the three above. `require_posix_shell` answers with `/bin/sh` by
@@ -1439,6 +1450,14 @@ no child process. `tests/diag.rs` runs entirely on those sinks except for the th
 *about* `from_env`: that a trace path creates its parent directories, that nothing set creates no
 file, and that a trace file which cannot be opened leaves the run working.
 
+F1 also checks independent recorders writing one trace, operation identity across overlapping
+spans, sink-health failures, default redaction and explicit sensitive capture. Library tests
+use `Diag::with_sensitive(true)` only when their assertion requires raw arguments or environment
+values. Process fixtures use `GINARY_TRACE_SENSITIVE=1` inside their isolated directories.
+Reader/recorder integration tests feed real schema-2 records into `diagnose::summarize`; legacy
+schema-1 fixtures remain supported. A relative trace path is tested in an isolated child that
+changes directory, and Windows file-open contention is tested with a real exclusive handle.
+
 ## Fuzzing
 
 `fuzz/` holds four `cargo-fuzz` targets, one per parser that reads bytes ginary did not write.
@@ -1454,8 +1473,13 @@ property, the fuzzer looks for the input that breaks it.
 
 ```console
 mise run fuzz:build      # cargo +nightly fuzz build
-mise run fuzz            # each target for 30 seconds, in turn
+mise run fuzz            # each target for 600 seconds, in turn
 ```
+
+Both tasks and the nightly workflow first resolve `fuzz/Cargo.toml` with Cargo's
+`--locked` option. The fuzz workspace has its own lockfile; when library dependencies
+change, refresh that file deliberately and review the resolved versions and checksums.
+An outdated lockfile stops the run instead of letting cargo-fuzz silently update it.
 
 **`unpack` is deliberately not a target.** It writes to disk and creates directories, so a
 fuzzer would spend its time in the kernel and leave a tree behind after every crash.
@@ -1648,8 +1672,9 @@ shell this repository does *not* carry can be handed to it as well.
 `fuzz` task — to the targets it names, the directories it creates before the first
 `cargo fuzz run`, the directories it passes and the libFuzzer flags after the `--`, so the two
 can be compared and a precondition one satisfies and the other does not stops being invisible.
-`MutantsPlan` reads the mutation matrix as one `MutantsShard` per row — module, `--shard i/n`,
-`--timeout` — and `measured_mutants` parses `tests/fixtures/nightly/mutants-measured.json`, the
+`MutantsPlan` reads `scripts/ci/mutation-divisions.json` as one `MutantsShard` per canonical
+division — module, `--shard i/n`, `--timeout` — and `measured_mutants` parses
+`tests/fixtures/nightly/mutants-measured.json`, the
 measured record the budget is argued from. A gate that cannot finish inside its own
 `timeout-minutes` is not a gate, and holding the configured side against the measured one is how
 that is checked here rather than in a `cancelled` job nobody reads. Still to come:
@@ -1670,9 +1695,6 @@ Planned test categories:
   honoured.
 - **Concurrency** — start N real processes on a cold cache at once, then assert exactly one
   extracted directory, no leftover temporary trees, and every process exiting 0.
-- **Fault injection** — `GINARY_FAULT` under `cfg(feature = "fault-injection")`. The canonical
-  case: `after-extract:pause`, `SIGKILL` the process to leave a half-written temporary tree, and
-  assert the next run cleans it up and succeeds.
 - **Trace assertions** — end-to-end tests read the JSON Lines trace and assert on phase order,
   on `cache hit` for the second run, and on per-phase time bounds.
 - **Property tests** — `proptest` over the trailer encoding, the `.app` parser and tar path
@@ -1688,14 +1710,19 @@ Planned test categories:
   `rename:eexist` (the losing side of the extraction race), `unpack:corrupt` (a payload that
   changes under the reader), `before-lock` (the cache entry is removed between the preflight and
   the shared lock, which is what a prune that won the race leaves behind), `launcher:panic` (a
-  panic on the launcher path) and `pack:fail` (the *builder* stops between the stub and the
-  payload). The first four are about *timing*, which is why no artifact a test can build reaches
+    panic on the launcher path), `pack:fail` (the *builder* stops between the stub and the
+    payload), `output-write:fail` (stop after writing part of a temporary artifact or document),
+    `output-persist:fail` (stop immediately before replacing its final name),
+    `output-write:fail-document` / `output-persist:fail-document` (reach document publication after the executable has been completed),
+    `artifact-sign:fail` (stop the macOS signing path after a partial temporary write), and
+    `artifact-sign:corrupt` (alter a completed signature before verification). The first four are
+    about *timing*, which is why no artifact a test can build reaches
   them, and each is paired with an assertion that the **next** run recovers: a fault that is only
   shown to fail is half a test. `launcher:panic` is about a promise: `main` installs a panic hook
   so that a bug in ginary is one attributed line and exit 121 rather than a Rust backtrace, and a
-  hook nothing can trigger is a hook no test can check. `pack:fail` is the one point on the build
-  side, and it is there so that a test can assert that a failed build leaves neither a work
-  directory nor a half-written artifact. `FAULT_POINTS` in `src/fault.rs` is the list both this
+    hook nothing can trigger is a hook no test can check. Build-side faults assert that a failed
+    write, publication or signature check preserves the previous artifact and leaves no partial
+    replacement. Retained staging is reported when requested. `FAULT_POINTS` in `src/fault.rs` is the list both this
   document and `debugging.md` are held against by unit test, so the three cannot drift apart.
 - **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job; see
   [what the nightly mutation pass covers](#what-the-nightly-mutation-pass-covers).
@@ -1715,11 +1742,90 @@ are all installed on the current development machine, and each has a mise task:
 | `mise run mutants` | `cargo mutants` | copies the tree; not `--in-place`; the nightly job shards it, see below |
 | `mise run test:nextest` | `cargo nextest run` | nextest does not run doc tests, so it is not a replacement for `mise run test` |
 | `mise run fuzz:build` | `cargo +nightly fuzz build` | builds the four targets; nightly, and outside the gate |
-| `mise run fuzz` | each target for 30 s, in turn | nightly; see the fuzzing section |
+| `mise run fuzz` | each target for 600 s, in turn | nightly; see the fuzzing section |
 
-The coverage gate is `--fail-under-lines 90`. The 80% branch floor is not enforced yet: branch
-coverage needs a nightly `-Z coverage-options=branch` build, and this crate is measured on
-stable. When that changes, the floor moves from prose into the `cov` task.
+The local line gate is `--fail-under-lines 90`. CI runs independent stable line and nightly
+branch measurements over the same complete runtime/stub prerequisites. Both enforce 90% lines;
+the nightly measurement also enforces 80% branches through `coverage-gate.sh ... 80 branches`.
+Missing branch records are an error, not an empty measurement counted as success. Coverage
+reports are uploaded for 30 days even when the floor fails.
+
+The coverage gate rejects malformed, duplicate, unpaired or negative counters, hits greater
+than the total, and unfinished source records. Its Bash fixtures also run through Git Bash
+on Windows, with bounded subprocess execution. A rounded display of `80.00%` or `90.00%`
+never changes the comparison against the unrounded ratio.
+
+CI calls `scripts/ci/coverage.sh` with `lines` or `branches`. The helper prepares a fresh
+instrumented build, runs the same per-test outcome adapter as the main test matrix, and
+produces LCOV even after test failures. Its `run.json` preserves the test, report and individual
+gate exits; a later successful report cannot erase a failed test. The thirty-day artifact
+contains raw profiles, LCOV, logs and subprocess evidence. The branch job instruments doctests
+and enforces both floors; the stable line job uses stable-compatible instrumentation.
+
+For local Windows branch evidence, use a fresh PowerShell process with the same MSVC,
+OTP and Gleam environment as the native tests. The inspected installation has
+`cargo-llvm-cov 0.8.7` and `nightly-x86_64-pc-windows-msvc` with LLVM tools. Version 0.8.7
+supports `show-env --pwsh --doctests`, but its `show-env` and `report` subcommands do not
+accept `--branch`; add the supported compiler option to the generated environment instead.
+Both target-directory variables must agree because `show-env` exports the Cargo metadata
+target directory. This recipe creates a new directory, retains the test verdict even if
+reporting succeeds, and runs the gates separately so a line failure still records branches:
+
+```powershell
+$coverageRun = Join-Path (Get-Location).Path "target/assurance/coverage-nightly-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $coverageRun | Out-Null
+$env:CARGO_TARGET_DIR = Join-Path $coverageRun 'build'
+$env:CARGO_LLVM_COV_TARGET_DIR = $env:CARGO_TARGET_DIR
+$env:CARGO_LLVM_COV_SETUP = 'no'
+$env:GINARY_TEST_EVIDENCE_DIR = Join-Path $coverageRun 'evidence'
+
+$coverageEnvironment = cargo +nightly llvm-cov show-env --pwsh --doctests | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'coverage environment setup failed' }
+Invoke-Expression $coverageEnvironment
+foreach ($name in @('RUSTFLAGS', 'RUSTDOCFLAGS')) {
+    $encodedName = "CARGO_ENCODED_$name"
+    $encoded = [Environment]::GetEnvironmentVariable($encodedName, 'Process')
+    if ($null -ne $encoded) {
+        [Environment]::SetEnvironmentVariable($encodedName, "$encoded$([char]31)-Zcoverage-options=branch", 'Process')
+    } else {
+        $flags = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, "$flags -Zcoverage-options=branch", 'Process')
+    }
+}
+
+python scripts/ci/test-evidence.py --output $coverageRun -- cargo +nightly test --all-features --workspace --locked --offline --no-fail-fast
+$testExit = $LASTEXITCODE
+$lcov = Join-Path $coverageRun 'coverage.lcov'
+cargo +nightly llvm-cov report --doctests --lcov --output-path $lcov --locked --offline 2>&1 |
+    Tee-Object -FilePath (Join-Path $coverageRun 'report.log')
+$reportExit = $LASTEXITCODE
+$lineExit = $branchExit = $null
+if ($reportExit -eq 0) {
+    $gitBash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
+    $portableLcov = $lcov.Replace('\', '/')
+    & $gitBash -c 'export PATH="/usr/bin:/bin:$PATH"; exec bash "$@"' gate scripts/ci/coverage-gate.sh $portableLcov 90 lines 2>&1 |
+        Tee-Object -FilePath (Join-Path $coverageRun 'lines.log')
+    $lineExit = $LASTEXITCODE
+    & $gitBash -c 'export PATH="/usr/bin:/bin:$PATH"; exec bash "$@"' gate scripts/ci/coverage-gate.sh $portableLcov 80 branches 2>&1 |
+        Tee-Object -FilePath (Join-Path $coverageRun 'branches.log')
+    $branchExit = $LASTEXITCODE
+}
+@{ tests = $testExit; report = $reportExit; lines = $lineExit; branches = $branchExit } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $coverageRun 'verdict.json')
+if ($testExit -ne 0 -or $reportExit -ne 0 -or $lineExit -ne 0 -or $branchExit -ne 0) {
+    throw "coverage assurance failed; inspect $coverageRun"
+}
+```
+
+Doctest instrumentation needs `--doctests` on both environment generation and reporting.
+Keep `--all-features` on the test command only. Versions 0.8.7 and 0.9.0 list that flag in
+report help but their parser rejects it for `report`, independently of the `show-env`
+environment. Reporting consumes the already-instrumented objects and their profiles.
+The installed nightly no longer lists Cargo's old `-Z doctest-in-workspace` option, so the
+recipe does not pass it. A local Windows result measures Windows-compiled code and records
+unavailable external prerequisites as skips; it does not replace the Linux coverage job's
+runtime/stub prerequisites. The [upstream 0.8.7 instructions](https://github.com/taiki-e/cargo-llvm-cov/blob/v0.8.7/README.md#get-coverage-of-external-tests)
+describe the external-runner environment and reporting contract.
 
 `cargo-fuzz` needs a nightly toolchain to build a target, which is why `fuzz/` is a workspace of
 its own; `mise run fuzz` and `mise run fuzz:build` are the two tasks, and neither is part of
@@ -1735,34 +1841,28 @@ a mismatch, and only reviewing them wants the subcommand.
 The `mutants` job in `.github/workflows/nightly.yml` is a *divided* pass, and a divided pass
 proves something narrower than "every mutant of this crate is caught". What it is, exactly:
 
-**It covers** every mutant `cargo-mutants` generates for the seven modules the matrix names —
+**It covers** every mutant `cargo-mutants` generates for the seven modules the canonical ledger names —
 `appfile`, `cache`, `closure`, `launch`, `payload`, `trailer` and `verify` — with the
-`fault-injection` feature on. Each module is divided with `--shard i/n` and **every** shard of
-every division is a matrix row, so the division makes each job smaller and takes nothing out of
-the pass. `tests/regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs` fails if
-a shard of a division is ever missing.
+`fault-injection` feature on. Each module is enumerated with `--shard i/n` and **every** shard
+of every division is retained. The Rust AST planner assigns every candidate to an applicable
+native Linux, Windows or macOS runner; a canonical shard with candidates for several operating
+systems produces several jobs. No candidate is discarded by this partition.
+`tests/regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs` fails if a
+canonical shard of a division is ever missing.
 
 **It does not cover** any other module of the crate: `src/main.rs`, `src/lib.rs`, `src/cli.rs`,
 `src/download.rs` and the rest are not mutated by CI at all. It does not cover a mutant whose
 suite run exceeds `--timeout 420`, which is reported as a timeout rather than as caught. It proves
-nothing about a build the `fault-injection` feature is off in. And **it cannot catch a mutant of
-code the runner does not compile**: a `#[cfg(windows)]` body mutated on a Linux runner changes
-nothing the tests can run, so it survives whatever the suite asserts. The shards run on
-`ubuntu-24.04`, so every Windows-only body is in that position — which is a reason to keep such
-bodies to the thinnest possible delegation and to put the logic in a function both platforms
-compile. `src/trailer.rs`'s `ReadAt` seam is what that looks like: three lines per platform, one
-loop tested everywhere.
+nothing about a build the `fault-injection` feature is off in. It tests each candidate on one
+applicable operating system, not every possible CPU/OS/feature combination. Linux is preferred
+for shared code, Windows for Windows-only code, and macOS for non-Linux Unix code.
 
-**It does not cover the worst case of its own budget.** `--timeout 420` caps what *one* mutant
-may spend, not what a shard may: the largest shard holds 35 mutants, so a shard in which every
-mutant hangs costs about four hours against `timeout-minutes: 150` and is cancelled exactly as
-before. The pass is bounded in expectation — 35 mutants at the measured 210 seconds each is about
-127 minutes — and not in the worst case, and the regression test that checks the budget multiplies
-by the measured average, so it cannot see that tail. Bounding it would mean either a `--timeout`
-small enough that shard size times timeout fits the budget (about 257 seconds, which is 1.5 times
-the measured test time and would start reporting slow mutants as timeouts) or roughly twice as
-many shards. Neither is paid for by a failure anybody has seen; a shard cancelled for this reason
-is the signal to pay for one.
+**The execution budget includes the full configured build and test caps.** Each mutation has
+`--build-timeout 120` and `--timeout 420`. All divisions are complete; the largest measured
+shard holds 13 mutants, which can consume 117 minutes plus baseline and evidence time inside
+`timeout-minutes: 150`. Before executing, the workflow lists the current shard and refuses more
+than 13 mutants, so growth causes a named precondition failure rather than a cancelled pass.
+The mutation plan, outcomes, diffs and logs are retained for 30 days even when testing fails.
 
 **The budget is measured, not guessed.** `tests/fixtures/nightly/mutants-measured.json` records
 what one mutant costs and how many each module produces, read off nightly run
@@ -1773,6 +1873,48 @@ job's `timeout-minutes` against that record, so a shard that could not finish is
 here rather than a `cancelled` job nobody reads. **Re-measure the record when the suite's runtime
 changes materially** — a pass sized from a stale measurement is the same cancelled job with a
 newer date.
+
+The previous Ubuntu-only matrix could not catch mutations of `#[cfg(windows)]` bodies because
+those bodies were not compiled. F1 reproduced this with two surviving `ReadAt::read_at` mutations.
+The [upstream cfg discovery limitation](https://github.com/sourcefrog/cargo-mutants/issues/50)
+is addressed here by preserving cargo-mutants 27.1.0's entire discovery, then parsing enclosing
+Rust `cfg` attributes with `syn`. Unknown predicates, ambiguous ownership and a candidate with
+no supported native platform fail planning. The planner is a separate unpublished Cargo workspace
+at `tools/mutation-plan`, with its own lockfile and required tests; it adds no product dependency.
+
+Each native job rechecks the checkout hashes and re-lists its exact candidate names before
+execution. Selection uses an anchored regex and **does not apply `--shard` again**, since
+cargo-mutants filters before sharding. The final `mutation-gate` job runs even after a native
+failure and reconciles the original plan against every raw outcome, phase result, diff, log,
+process status and selection record. Missing, duplicate, unknown, changed, timed-out and surviving
+results fail the gate. Compile-rejected mutations remain separately classified as unviable.
+The final counts retain failed jobs and candidates that were never run.
+
+Native jobs require successful startup of Gleam and Erlang. Linux additionally asserts its
+installed Docker/POSIX toolchain through `GINARY_REQUIRE_TOOLCHAIN=1`; Windows and macOS do not
+claim those Linux capabilities. `--show-output` preserves explicit optional-tool and platform
+skips in the full test logs, including for the baseline.
+
+To inspect or reproduce the same assignment locally (Rust and cargo-mutants 27.1.0 required):
+
+```sh
+cargo build --manifest-path tools/mutation-plan/Cargo.toml --locked
+python3 scripts/ci/mutation.py plan \
+  --planner tools/mutation-plan/target/debug/ginary-mutation-plan \
+  --output target/mutation-plan-local
+# Use a job ID assigned to this OS from target/mutation-plan-local/matrix.json.
+python3 scripts/ci/mutation.py run \
+  --bundle target/mutation-plan-local/plan.json \
+  --job trailer-1-windows --output target/mutation-local/trailer-1-windows
+```
+
+On Windows, append `.exe` to the planner path. Use a fresh output directory for each plan and
+keep its source checkout unchanged while executing it. `mise run mutants` remains the raw
+whole-crate cargo-mutants command; its cfg-inactive candidates are not a qualified native gate.
+The adapter removes inherited Cargo target-directory overrides from the mutation child so that
+cargo-mutants owns its fresh scratch build. Reusing another run's target can reuse a test binary
+whose embedded source paths name a deleted scratch directory. Each local run also places the
+tests' bounded subprocess JSON evidence under its own `test-failures` output directory.
 
 Before E21 the job took whole modules against `timeout-minutes: 90`, which was five to twelve
 hours of work each: six of the seven shards of run 33969332537 were cancelled at the cap or lost
@@ -1847,3 +1989,50 @@ repository does not carry, and
 `tests/regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs` runs the block itself
 over a throwaway tree. This section is pinned by
 `the_cache_cleaner_is_documented_beside_the_other_tasks`.
+
+## F1: distribution and assurance evidence
+
+The F1 cache/doctor regressions also protect diagnostic work from damaging user data.
+The doctor test starts fresh native test processes and plants both a file and a hard link
+at the former predictable probe name, then runs the real cache executable probe. A Windows
+unit holds a handle that denies deletion and verifies the cleanup error and owned path remain
+visible. Sweep tests cover exact residue ownership, invalid manifests, held locks, dead-owner
+cleanup and preservation of every live PID, including concurrent work in the caller's process.
+Unix directory-link protection is platform gated and reported separately from Windows evidence.
+
+`f1_beam_batches_exceeded_windows_command_lines` exercises an actual native process with
+400 module paths that exceed Windows' command-line limit as one batch. The fixture rewrites
+every module; an installed-Erlang companion rewrites 400 real BEAM copies and checks code,
+debug chunks and the unchanged source. Separate checks preserve failed-batch context and
+account for UTF-16, escaped quotes/backslashes, fixed arguments and oversized individual paths.
+
+`tests/distribution.rs` exercises native-root repacking for Windows and macOS using real object
+headers in fake OTP roots, source preservation, deterministic output, target/version refusal,
+conflicting catalog entries, and complete seven-target distribution assembly. Binary identity,
+architecture and flavor are checked independently of filenames; runtime digests and lengths
+must match their catalog entries. Copied binaries are revalidated before inventory creation.
+Output assembly exclusively reserves a new directory and publishes each file without
+replacement, with `SHA256SUMS` last as its completion marker. A directory created concurrently
+is refused and preserved. Publication failure retains the staging path for diagnosis, and a
+partial output has no completion marker. Catalog file replacement is atomic.
+
+The publisher transaction is executed only against a readonly mock `gh` shell function in its
+local rehearsal test. The successful transaction and attestation failure, an already-published
+release, and unexpected stale assets are separate assertions. These tests never make hosted
+release calls. The ordinary distribution workflow also defaults to no hosted release operation.
+
+CI test configurations (plain, fault-injection, stub) use independent matrix jobs and
+`--no-fail-fast`; failures cannot suppress the next configuration. The stable libtest evidence
+adapter first lists planned tests, then runs with `--show-output --test-threads=1`, retaining
+`planned.log`, `tests.log` and versioned `outcomes.json`. Reported tool skips remain visible as
+skips even when libtest itself labels an early-return test successful. Unstarted tests remain
+`not_run`; an observed unfinished test is `interrupted`. A forcibly killed runner retains its
+last `running` record instead of claiming success. Nightly fuzzing retains its
+corpus and crash artifacts for 30 days and restores the previous completed run's corpus. Each
+parser receives 600 seconds. CI and Nightly run TLC and retain its output; repository shape
+checks remain distinct from running the checker itself. `tests/assurance.rs` verifies the
+retention and worst-case mutation budget contracts.
+
+Tool installation is a property of a host, not of this document. The F1 record names the tools
+actually available on its Windows host and records each locally executed check, including the
+TLC verdict, separately from hosted CI and other qualification still awaiting execution.

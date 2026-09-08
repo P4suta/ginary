@@ -48,18 +48,20 @@ fn the_release_workflow_is_driven_by_release_please() {
 }
 
 #[test]
-fn a_published_release_triggers_the_distribute_workflow() {
-    let release = read(".github/workflows/release.yml");
-    let distribute = read(".github/workflows/distribute.yml");
-    // distribute runs on `release: published` or is called by release.yml.
-    assert!(
-        distribute.contains("workflow_call") || distribute.contains("release:"),
-        "distribute.yml runs on a published release or as a reusable workflow:\n{distribute}"
-    );
-    assert!(
-        release.contains("distribute") || distribute.contains("workflow_call"),
-        "the two workflows are wired together"
-    );
+fn distribution_is_an_explicit_tagged_rehearsal_by_default() {
+    let workflow = yaml(".github/workflows/distribute.yml");
+    let events = &workflow["on"];
+    assert!(events.as_mapping_get("release").is_none());
+    for trigger in ["workflow_dispatch", "workflow_call"] {
+        assert_eq!(
+            events[trigger]["inputs"]["tag"]["required"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            events[trigger]["inputs"]["publish"]["default"].as_bool(),
+            Some(false)
+        );
+    }
 }
 
 // ---------------------------------------------------- distribute.yml --
@@ -113,36 +115,33 @@ fn distribute_verifies_before_it_publishes() {
              incomplete"
         );
     }
+    let script = read("scripts/ci/publish-distribution.sh");
     assert!(
-        distribute.contains("attestation verify") || distribute.contains("gh attestation"),
+        script.contains("gh attestation verify") && script.contains("gh release download"),
         "the attestation is verified after re-download, not only produced"
     );
 }
 
 #[test]
-fn distribute_creates_a_draft_first_and_flips_it_only_after_the_checks() {
-    let distribute = read(".github/workflows/distribute.yml");
-    let draft = distribute
-        .find("draft: true")
-        .or_else(|| distribute.find("--draft"))
-        .expect("the release is created as a draft first");
-    let flip = distribute
-        .find("draft=false")
-        .or_else(|| distribute.find("draft: false"))
-        .or_else(|| distribute.find("--draft=false"))
-        .expect("and the draft is flipped to a published release at the end");
-    assert!(
-        draft < flip,
-        "the draft is created before it is flipped: an artifact that fails its checks never \
-         becomes a published release"
-    );
-    let check = distribute
-        .find("--check")
-        .expect("sha256sum --check runs on the re-downloaded assets");
-    assert!(
-        check < flip,
-        "the checksum re-check comes before the flip, or a bad asset would already be public"
-    );
+fn distribution_reuses_an_existing_draft_and_publishes_only_after_verification() {
+    let script = read("scripts/ci/publish-distribution.sh");
+    assert!(!script.contains("gh release create"));
+    let draft = script.find("--json isDraft").unwrap();
+    let upload = script.find("gh release upload").unwrap();
+    let verify = script.find("gh attestation verify").unwrap();
+    let publish = script.find("--draft=false").unwrap();
+    assert!(draft < upload && upload < verify && verify < publish);
+    for step in workflow_steps(".github/workflows/distribute.yml") {
+        if step.run.contains("publish-distribution.sh")
+            || step.uses.contains("attest-build-provenance")
+        {
+            assert!(
+                step.cond.contains("inputs.publish"),
+                "hosted mutation requires an explicit publish option: {}",
+                step.name
+            );
+        }
+    }
 }
 
 #[test]

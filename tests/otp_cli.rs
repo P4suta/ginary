@@ -25,9 +25,11 @@ use serde_json::Value;
 use ginary::catalog::{CATALOG_ENV_VAR, SCHEMA_VERSION};
 
 use crate::common::catalog::{
-    CatalogBuilder, ERTS_VSN, RELEASE, VERSION, gnu_variant, plant_cached_otp, static_variant,
-    write_catalog_text,
+    CatalogBuilder, ERTS_VSN, RELEASE, VERSION, gnu_variant, plant_cached_otp, runtime_tarball,
+    static_variant, write_catalog_text,
 };
+use crate::common::fake_otp::FakeOtp;
+use crate::common::payload::sha256_hex;
 
 /// The musl target the fixture catalogue holds.
 const MUSL: &str = "linux-x86_64-musl";
@@ -295,7 +297,20 @@ fn otp_path_refuses_a_runtime_that_is_not_cached_and_names_the_command_that_fetc
 #[test]
 fn otp_fetch_offline_names_the_url_it_would_have_asked_for() {
     let dir = tempdir();
-    let catalog = fixture_catalog(dir.path());
+    let catalog = CatalogBuilder::new()
+        .entry(
+            VERSION,
+            RELEASE,
+            ERTS_VSN,
+            GNU,
+            "default",
+            gnu_variant(
+                "https://example.invalid/otp-29.0.5-linux-x86_64-gnu.tar.zst",
+                &"b".repeat(64),
+                39_845_888,
+            ),
+        )
+        .write_in(dir.path());
     let cache = dir.path().join("cache");
 
     let assert = ginary_with_cache(&cache)
@@ -322,6 +337,115 @@ fn otp_fetch_offline_names_the_url_it_would_have_asked_for() {
         stderr.contains("otp-29.0.5-linux-x86_64-gnu.tar.zst"),
         "and names the file it would have fetched: {stderr}"
     );
+}
+
+#[test]
+fn otp_fetch_offline_local_archive_adjacent_verifies_and_fills_an_empty_cache() {
+    offline_local_archive_verifies_and_fills_an_empty_cache(false);
+}
+
+#[test]
+fn otp_fetch_offline_local_archive_absolute_verifies_and_fills_an_empty_cache() {
+    offline_local_archive_verifies_and_fills_an_empty_cache(true);
+}
+
+fn offline_local_archive_verifies_and_fills_an_empty_cache(absolute: bool) {
+    let dir = tempdir();
+    let source = dir.path().join("source");
+    FakeOtp::new().build_in(&source);
+    let bytes = runtime_tarball(&source);
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, &bytes).expect("local runtime archive");
+    let url = if absolute {
+        archive.display().to_string()
+    } else {
+        "runtime.tar.zst".to_owned()
+    };
+    let digest = sha256_hex(&bytes);
+    let catalog = CatalogBuilder::new()
+        .entry(
+            VERSION,
+            RELEASE,
+            ERTS_VSN,
+            MUSL,
+            "static",
+            static_variant(&url, &digest, bytes.len() as u64),
+        )
+        .write_in(dir.path());
+    let cache = dir.path().join("cache");
+    let stdout = stdout_of(
+        ginary_with_cache(&cache)
+            .env("GINARY_OFFLINE", "1")
+            .args([
+                "otp",
+                "fetch",
+                "--version",
+                VERSION,
+                "--target",
+                MUSL,
+                "--catalog",
+            ])
+            .arg(&catalog)
+            .assert()
+            .success(),
+    );
+    let extracted = cache.join("otp/29.0.5-linux-x86_64-musl-static");
+    assert_eq!(Path::new(stdout.trim()), extracted);
+    assert!(ginary::catalog::is_complete(&extracted));
+    assert!(
+        extracted
+            .join(format!("erts-{ERTS_VSN}/bin/beam.smp"))
+            .is_file()
+    );
+    assert_eq!(std::fs::read(&archive).expect("source remains"), bytes);
+    let meta: Value = serde_json::from_slice(
+        &std::fs::read(extracted.join(ginary::catalog::META_FILE)).expect("completion marker"),
+    )
+    .expect("marker JSON");
+    assert_eq!(meta["entry"]["sha256"], digest);
+}
+
+#[test]
+fn otp_fetch_offline_local_archive_still_refuses_a_digest_mismatch() {
+    let dir = tempdir();
+    let bytes = b"local archive with the wrong digest";
+    let archive = dir.path().join("runtime.tar.zst");
+    std::fs::write(&archive, bytes).expect("local archive");
+    let catalog = CatalogBuilder::new()
+        .entry(
+            VERSION,
+            RELEASE,
+            ERTS_VSN,
+            MUSL,
+            "static",
+            static_variant("runtime.tar.zst", &"0".repeat(64), bytes.len() as u64),
+        )
+        .write_in(dir.path());
+    let cache = dir.path().join("cache");
+    let assertion = ginary_with_cache(&cache)
+        .env("GINARY_OFFLINE", "1")
+        .args([
+            "otp",
+            "fetch",
+            "--version",
+            VERSION,
+            "--target",
+            MUSL,
+            "--catalog",
+        ])
+        .arg(&catalog)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        stderr.contains("SHA-256") || stderr.contains("sha256"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("offline:"), "{stderr}");
+    assert!(!ginary::catalog::is_complete(
+        &cache.join("otp/29.0.5-linux-x86_64-musl-static")
+    ));
+    assert_eq!(std::fs::read(&archive).expect("source remains"), bytes);
 }
 
 #[test]

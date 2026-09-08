@@ -745,7 +745,7 @@ fn verify_json_names_the_issue_kind() {
 
 #[test]
 fn a_real_artifact_verifies_clean() {
-    let Some(_tools) = require_tools(&["gleam", "erl", "strip"]) else {
+    let Some(_tools) = require_tools(crate::common::built::HOST_BUILD_TOOLS) else {
         return;
     };
     let project = BuiltProject::copy("hello_ffi");

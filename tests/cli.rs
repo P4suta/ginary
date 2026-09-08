@@ -1403,10 +1403,14 @@ fn ginary_with_cache(root: &Path) -> Command {
 }
 
 /// Plants `<root>/<app>/<key>/ginary.json`, the shape one complete entry has.
-fn plant_entry(root: &Path, app: &str, bytes: &[u8]) {
+fn plant_entry(root: &Path, app: &str) -> u64 {
     let entry = root.join(app).join("0123456789abcdef");
     std::fs::create_dir_all(&entry).expect("create a cache entry");
-    std::fs::write(entry.join("ginary.json"), bytes).expect("write the marker");
+    let mut manifest = crate::common::payload::sample_manifest();
+    manifest.app = app.to_owned();
+    let bytes = serde_json::to_vec(&manifest).expect("valid manifest");
+    std::fs::write(entry.join("ginary.json"), &bytes).expect("write the marker");
+    bytes.len() as u64
 }
 
 #[test]
@@ -1469,8 +1473,8 @@ fn cache_dir_reports_the_temporary_fallback_when_nothing_is_set() {
 fn cache_clean_empties_one_application_and_leaves_the_others() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("cache");
-    plant_entry(&root, "hello", b"{}");
-    plant_entry(&root, "other", b"{}");
+    let bytes = plant_entry(&root, "hello");
+    plant_entry(&root, "other");
 
     let assert = ginary_with_cache(&root)
         .args(["cache", "clean", "--app", "hello"])
@@ -1479,11 +1483,14 @@ fn cache_clean_empties_one_application_and_leaves_the_others() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8");
 
     assert!(
-        stdout.contains(&format!("removed {}", root.join("hello").display())),
+        stdout.contains(&format!(
+            "removed {}",
+            root.join("hello").join("0123456789abcdef").display()
+        )),
         "the removal must name what went, and it said:\n{stdout}"
     );
     assert!(
-        stdout.contains("total: 1 directory, 2 bytes"),
+        stdout.contains(&format!("total: 1 directory, {bytes} bytes")),
         "the summary must count what went, and it said:\n{stdout}"
     );
     assert!(!root.join("hello").exists());
@@ -1497,8 +1504,7 @@ fn cache_clean_empties_one_application_and_leaves_the_others() {
 fn cache_clean_without_an_application_empties_the_root_and_keeps_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("cache");
-    plant_entry(&root, "hello", b"{}");
-    plant_entry(&root, "other", b"{}");
+    let bytes = plant_entry(&root, "hello") + plant_entry(&root, "other");
 
     let assert = ginary_with_cache(&root)
         .args(["cache", "clean", "--json"])
@@ -1506,14 +1512,21 @@ fn cache_clean_without_an_application_empties_the_root_and_keeps_it() {
         .success();
     let value: Value = serde_json::from_slice(&assert.get_output().stdout).expect("JSON");
 
-    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["format_version"], Value::from(2));
     assert_eq!(value["app"], Value::Null);
-    assert_eq!(value["bytes"], Value::from(4));
+    assert_eq!(value["bytes"], Value::from(bytes));
+    assert_eq!(value["kept"], serde_json::json!([]));
     assert_eq!(
         value["removed"],
         Value::from(vec![
-            root.join("hello").display().to_string(),
-            root.join("other").display().to_string(),
+            root.join("hello")
+                .join("0123456789abcdef")
+                .display()
+                .to_string(),
+            root.join("other")
+                .join("0123456789abcdef")
+                .display()
+                .to_string(),
         ])
     );
     assert!(root.is_dir(), "the cache root itself stays");
@@ -1537,17 +1550,11 @@ fn cache_clean_of_a_cache_that_was_never_created_removes_nothing() {
 
 /// Plants `<root>/<app>/<key>/ginary.json` and back-dates it by `days`.
 fn plant_aged(root: &Path, app: &str, key: &str, days: u64) -> PathBuf {
-    let entry = root.join(app).join(key);
-    std::fs::create_dir_all(&entry).expect("create a cache entry");
-    let manifest = entry.join("ginary.json");
-    std::fs::write(&manifest, b"{}\n").expect("write the marker");
-    crate::common::cachefs::set_mtime(
-        &manifest,
-        std::time::SystemTime::now()
-            .checked_sub(crate::common::cachefs::DAY * u32::try_from(days).expect("a day count"))
-            .expect("a date the clock can hold"),
-    );
-    entry
+    crate::common::cachefs::plant_entry(
+        &root.join(app),
+        key,
+        crate::common::cachefs::DAY * u32::try_from(days).expect("a day count"),
+    )
 }
 
 #[test]

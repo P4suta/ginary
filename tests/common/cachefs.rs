@@ -27,7 +27,8 @@ pub const LOCK_BUDGET: Duration = Duration::from_secs(10);
 ///
 /// The manifest is the completeness marker and its modification time is what
 /// pruning reads, so this is the whole of what one prunable entry is. The
-/// contents are a placeholder object: nothing in pruning parses it.
+/// contents are a valid manifest identifying the containing application, so
+/// maintenance can prove ownership before deleting the entry.
 ///
 /// # Panics
 ///
@@ -38,8 +39,17 @@ pub fn plant_entry(app_dir: &Path, key: &str, age: Duration) -> PathBuf {
     std::fs::create_dir_all(&entry)
         .unwrap_or_else(|error| panic!("cannot create {}: {error}", entry.display()));
     let manifest = entry.join("ginary.json");
-    std::fs::write(&manifest, b"{}\n")
-        .unwrap_or_else(|error| panic!("cannot write {}: {error}", manifest.display()));
+    let mut contents = super::artifact::canonical_manifest();
+    contents.app = app_dir
+        .file_name()
+        .expect("an application directory name")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&contents).expect("manifest JSON"),
+    )
+    .unwrap_or_else(|error| panic!("cannot write {}: {error}", manifest.display()));
     let when = SystemTime::now()
         .checked_sub(age)
         .unwrap_or_else(|| panic!("the clock cannot represent {age:?} ago"));

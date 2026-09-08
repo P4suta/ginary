@@ -10,29 +10,30 @@
 //! The hard part is the timeout. A child can outlive its own exit through a
 //! grandchild that inherited the pipes, so the readers are detached threads
 //! that publish what they have read rather than threads the caller joins. The
-//! budget then bounds the whole call, not just the wait — see
+//! execution budget plus finite cleanup slack bounds the whole call — see
 //! [`run_with_timeout`] for what that costs on the timeout path.
 //!
 //! Nothing in this module runs on the launcher path.
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod capture;
+pub use capture::{
+    CAPTURE_LIMIT, CapturedOutput, ChildCleanup, ProcessReport, run_command, wait_child,
+};
 
 /// How often a running child is polled for completion.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// The least time the output readers get after the child has been reaped.
+/// The time output readers get after bounded child cleanup.
 ///
 /// Exiting closes the child's own ends of the pipes, so a reader that nothing
 /// else is holding open reaches end of file at once. This is slack for that
-/// thread to be scheduled, not a second budget: when the call's own deadline
-/// is further away, the deadline wins.
+/// thread to be scheduled. Both readers share this deadline.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 /// How much of a pipe the reader threads move per `read` call.
@@ -79,6 +80,27 @@ pub struct ProcessOutput {
 /// Why a child process produced no output.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
+    /// A failed program's bounded output, retained with its original cause.
+    #[error("{source}; {detail}; stdout: {stdout}; stderr: {stderr}")]
+    Captured {
+        /// Original execution failure.
+        #[source]
+        source: Box<ProcessError>,
+        /// Standard output before failure.
+        stdout: String,
+        /// Standard error before failure.
+        stderr: String,
+        /// Output completeness and child cleanup details.
+        detail: String,
+    },
+    /// The output cannot be used as a complete parse input.
+    #[error("`{program}` output is incomplete: {detail}")]
+    Incomplete {
+        /// Executed program.
+        program: String,
+        /// Truncation, read error, or pipe deadline information.
+        detail: String,
+    },
     /// The program could not be spawned.
     #[error("cannot run `{program}`: {source}")]
     Spawn {
@@ -101,8 +123,8 @@ pub enum ProcessError {
         #[source]
         source: std::io::Error,
     },
-    /// The program did not exit within the timeout and was killed.
-    #[error("`{program}` did not exit within {}s", .timeout.as_secs())]
+    /// The program did not exit within the timeout; cleanup was requested.
+    #[error("`{program}` did not exit within {}ms", .timeout.as_millis())]
     Timeout {
         /// The program that hung.
         program: String,
@@ -152,30 +174,29 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-/// Runs a program with a hard timeout, capturing both of its output streams.
+/// Runs a program with an execution deadline and bounded output capture.
 ///
 /// Standard output and standard error are drained by dedicated threads, so a
 /// chatty child cannot deadlock on a full pipe while we are polling it, and
 /// both are returned: what a failing program wrote to standard error is the
-/// only explanation its caller has. The timeout bounds the whole call, not just
-/// the wait: the readers are never joined, only given until the deadline (or
-/// half a second past the child's exit, whichever is later) to reach end of
-/// file. A process the child backgrounded inherits the pipes and can hold them
-/// open long after the child itself has exited, so a join would wait on the
-/// grandchild instead of on the budget.
+/// only explanation its caller has. The execution deadline is followed by at
+/// most 500 ms of child cleanup and 500 ms of pipe observation, plus scheduling
+/// overhead. Readers are detached because descendants can retain inherited
+/// pipes after the direct child exits.
 ///
-/// The direct child never outlives the call: it is owned by a guard that kills
-/// and reaps it on the way out, whether the call timed out, could not wait, or
-/// simply finished. Grandchildren are not killed — ginary does not put these
-/// processes in a process group — so on the timeout path the output is whatever
-/// the readers had collected by the deadline, and the detached reader threads
-/// end when the pipes finally close.
+/// Cleanup requests termination of a running direct child and polls for its
+/// status. If the operating system refuses termination or reaping, the failure
+/// is reported and a background reaper owns the unfinished child. Descendants
+/// are not terminated. [`run_command`] exposes exact retained bytes, omission
+/// counts, EOF status and cleanup details for callers needing this evidence.
 ///
 /// # Errors
 ///
 /// [`ProcessError::Spawn`] when the program cannot be started,
 /// [`ProcessError::Wait`] when it cannot be waited for, and
-/// [`ProcessError::Timeout`] when it outlives `timeout`.
+/// [`ProcessError::Timeout`] when it outlives `timeout`. Failure evidence wraps
+/// the original cause in [`ProcessError::Captured`]; truncated or unobserved
+/// output is refused as [`ProcessError::Incomplete`] instead of accepted for parsing.
 pub fn run_with_timeout(
     program: &Path,
     args: &[&str],
@@ -235,97 +256,55 @@ pub fn run_env_in_dir_with_timeout(
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
-    let child = command.spawn().map_err(|source| ProcessError::Spawn {
-        program: program.display().to_string(),
-        source,
-    })?;
-    // From here on every exit runs the guard's destructor.
-    let mut child = ChildGuard(child);
-
-    let stdout = drain(child.0.stdout.take());
-    let stderr = drain(child.0.stderr.take());
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.0.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-            Ok(None) => break None,
-            Err(source) => {
-                return Err(ProcessError::Wait {
-                    program: program.display().to_string(),
-                    source,
-                });
-            }
+    let mut report = run_command(&mut command, timeout, CAPTURE_LIMIT);
+    let detail = format!(
+        "stdout omitted {} bytes, EOF={}, read error={:?}; stderr omitted {} bytes, EOF={}, read error={:?}; cleanup={:?}",
+        report.stdout.omitted_bytes,
+        report.stdout.complete,
+        report.stdout.error,
+        report.stderr.omitted_bytes,
+        report.stderr.complete,
+        report.stderr.error,
+        report.cleanup
+    );
+    if let Some(source) = report.error.take() {
+        if report.stdout.bytes.is_empty()
+            && report.stderr.bytes.is_empty()
+            && report
+                .cleanup
+                .as_ref()
+                .is_none_or(|cleanup| cleanup.error.is_none())
+        {
+            return Err(source);
         }
-    };
-
-    let Some(status) = status else {
-        return Err(ProcessError::Timeout {
-            program: program.display().to_string(),
-            timeout,
+        return Err(ProcessError::Captured {
+            source: Box::new(source),
+            stdout: report.stdout.text(),
+            stderr: report.stderr.text(),
+            detail,
         });
-    };
-
-    let drained_by = deadline.max(Instant::now() + DRAIN_GRACE);
-    let stdout = stdout.take_until(drained_by);
-    let stderr = stderr.take_until(drained_by);
-    Ok(ProcessOutput {
-        success: status.success(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-    })
-}
-
-/// A pipe being read by a detached background thread.
-///
-/// The bytes are published as they arrive rather than returned at end of file,
-/// so the caller can take what has been read so far without joining a thread
-/// that may be blocked on a pipe nobody will close.
-struct Drain {
-    /// Everything read so far. The reader appends, the caller copies.
-    buffer: Arc<Mutex<Vec<u8>>>,
-    /// Signalled exactly once, when the reader reaches end of file.
-    finished: Receiver<()>,
-}
-
-impl Drain {
-    /// Returns the bytes read, waiting no later than `deadline` for the reader
-    /// to reach end of file.
-    ///
-    /// A reader that is still blocked at the deadline is abandoned, and what it
-    /// had already published is returned.
-    fn take_until(self, deadline: Instant) -> Vec<u8> {
-        let _ = self
-            .finished
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
-        let buffer = unpoison(self.buffer.lock());
-        buffer.clone()
     }
-}
-
-/// Spawns a detached thread that reads a pipe to end of file.
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Drain {
-    let buffer = Arc::new(Mutex::new(Vec::new()));
-    let (sender, finished) = mpsc::channel();
-    let writer = Arc::clone(&buffer);
-    std::thread::spawn(move || {
-        if let Some(mut pipe) = pipe {
-            let mut chunk = [0_u8; DRAIN_CHUNK];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(read) => unpoison(writer.lock()).extend_from_slice(&chunk[..read]),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-        }
-        // The receiver is gone once the caller has given up; that is not an
-        // error, it is the timeout path.
-        let _ = sender.send(());
-    });
-    Drain { buffer, finished }
+    if !report.stdout.is_complete()
+        || !report.stderr.is_complete()
+        || report
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| !cleanup.reaped || cleanup.error.is_some())
+    {
+        return Err(ProcessError::Incomplete {
+            program: program.display().to_string(),
+            detail: format!(
+                "{detail}; stdout: {}; stderr: {}",
+                report.stdout.text(),
+                report.stderr.text()
+            ),
+        });
+    }
+    Ok(ProcessOutput {
+        success: report.success(),
+        stdout: report.stdout.text(),
+        stderr: report.stderr.text(),
+    })
 }
 
 /// Takes a lock result, treating poisoning as ordinary access.
@@ -395,20 +374,18 @@ pub fn shell_quote_path(path: &Path) -> String {
     shell_quote(&path.to_string_lossy()).into_owned()
 }
 
-/// A child process that is killed and reaped when it goes out of scope.
+/// A child process whose bounded cleanup starts when it goes out of scope.
 ///
 /// The obligation belongs to the value rather than to each `return`, so a new
 /// error path cannot forget it: the A0 review found exactly that, a `try_wait`
 /// failure that abandoned a running child.
-struct ChildGuard(Child);
+struct ChildGuard(Option<Child>);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        // Both calls are harmless once the child has exited and been waited
-        // for: `kill` reports an invalid argument and `wait` returns the status
-        // the standard library already cached.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(child) = self.0.take() {
+            let _ = capture::finish_child(child);
+        }
     }
 }
 
@@ -490,6 +467,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[cfg(unix)]
     use super::test_support::script;
@@ -694,15 +673,23 @@ mod tests {
         // enough that the detached process is gone soon after the suite.
         let path = script(dir.path(), "prog", "sleep 10 & echo gleam 1.2.3");
         let started = Instant::now();
-        let output = run_with_timeout(&path, &[], Duration::from_millis(200)).expect("runs");
+        let output = run_command(
+            &mut Command::new(&path),
+            Duration::from_millis(200),
+            CAPTURE_LIMIT,
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "waited {:?} on a 200ms budget",
             started.elapsed()
         );
-        assert!(output.success);
+        assert!(output.success());
         assert!(
-            output.stdout.contains("gleam 1.2.3"),
+            !output.stdout.is_complete(),
+            "the inherited pipe did not reach EOF"
+        );
+        assert!(
+            output.stdout.text().contains("gleam 1.2.3"),
             "the output written before the deadline must still be reported: {:?}",
             output.stdout
         );
@@ -809,7 +796,7 @@ mod tests {
             .spawn()
             .expect("spawns");
         let pid = child.id();
-        let guard = ChildGuard(child);
+        let guard = ChildGuard(Some(child));
 
         // Wait until the child is demonstrably running.
         let started = Instant::now();

@@ -52,6 +52,7 @@
 //! survive this phase.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,7 +64,7 @@ use crate::elf::{self, ElfError, ElfInfo, ElfKind};
 use crate::otp::OtpInfo;
 use crate::platform::ObjectFormat;
 use crate::process::{self, ProcessError};
-use crate::target::Target;
+use crate::target::{Os, Target};
 
 /// The program that strips an ELF file.
 pub const STRIP_PROGRAM: &str = "strip";
@@ -102,7 +103,7 @@ pub const STRIP_FILES_EVAL: &str = "Files=init:get_plain_arguments(), \
 case beam_lib:strip_files(Files) of {ok,_} -> halt(0); \
 Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end.";
 
-/// How many bytes of module paths one `erl` gets.
+/// The upper byte budget for module paths in a Unix `erl` invocation.
 ///
 /// `execve(2)` bounds the argument vector — two megabytes on a common Linux,
 /// a quarter of that on macOS — and the whole of an OTP release is about
@@ -111,6 +112,10 @@ Err -> io:format(standard_error,\"~p~n\",[Err]), halt(1) end.";
 /// calls rather than failing with an error from the kernel that says nothing
 /// about modules.
 pub const MAX_ARGUMENT_BYTES: usize = 256 * 1024;
+
+/// Windows allows 32,767 UTF-16 units for the entire command line, including
+/// its terminator. Keep additional room for the runtime launcher's own flags.
+const WINDOWS_COMMAND_LINE_UNITS: usize = 30 * 1024;
 
 /// Which halves of the staged root to strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,7 +386,7 @@ pub enum StripError {
     /// `beam_lib:strip_files/1` reported a failure.
     #[error("beam_lib:strip_files/1 failed: {stderr}")]
     BeamStripFailed {
-        /// The Erlang term the runtime printed, trimmed.
+        /// The runtime's trimmed error, with its file range for a multi-batch run.
         stderr: String,
     },
     /// The runtime could not be run at all.
@@ -769,16 +774,18 @@ fn strip_beams(
         sizes.push(size_of(&module.path)?);
     }
 
-    for batch in batches(&modules, MAX_ARGUMENT_BYTES) {
-        let mut arguments: Vec<&str> = vec![
-            "-noshell",
-            "-env",
-            "ERL_CRASH_DUMP",
-            process::NULL_DEVICE,
-            "-eval",
-            STRIP_FILES_EVAL,
-            "-extra",
-        ];
+    let fixed = [
+        "-noshell",
+        "-env",
+        "ERL_CRASH_DUMP",
+        process::NULL_DEVICE,
+        "-eval",
+        STRIP_FILES_EVAL,
+        "-extra",
+    ];
+    let batches = beam_batches(&modules, &erl, &fixed, crate::platform::HOST)?;
+    for (index, batch) in batches.iter().enumerate() {
+        let mut arguments = fixed.to_vec();
         for module in batch {
             arguments.push(as_argument(&module.path)?);
         }
@@ -790,9 +797,20 @@ fn strip_beams(
                 }
             })?;
         if !output.success {
-            return Err(StripError::BeamStripFailed {
-                stderr: said(&output.stderr, &output.stdout),
-            });
+            let mut stderr = said(&output.stderr, &output.stdout);
+            if batches.len() > 1
+                && let Some((first, last)) = batch.first().zip(batch.last())
+            {
+                stderr = format!(
+                    "BEAM batch {} of {} ({} modules, `{}` through `{}`): {stderr}",
+                    index.saturating_add(1),
+                    batches.len(),
+                    batch.len(),
+                    first.listed,
+                    last.listed,
+                );
+            }
+            return Err(StripError::BeamStripFailed { stderr });
         }
     }
 
@@ -817,18 +835,88 @@ fn strip_beams(
     })
 }
 
-/// Splits `modules` into runs whose paths fit in `limit` bytes of argument.
+/// Validates all arguments before any batch executes and reserves fixed argv
+/// space before applying the host's path budget.
+fn beam_batches<'a>(
+    modules: &[&'a Staged],
+    erl: &Path,
+    fixed: &[&str],
+    os: Os,
+) -> Result<Vec<Vec<&'a Staged>>, StripError> {
+    for module in modules {
+        as_argument(&module.path)?;
+    }
+    let limit = if os == Os::Windows {
+        let overhead = fixed.iter().fold(
+            argument_cost(erl.as_os_str(), os).saturating_add(1),
+            |used, argument| used.saturating_add(argument_cost(OsStr::new(argument), os)),
+        );
+        let remaining = WINDOWS_COMMAND_LINE_UNITS.checked_sub(overhead).ok_or_else(|| {
+            StripError::Io {
+                path: erl.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the runtime path and fixed arguments exceed the safe Windows command-line budget",
+                ),
+            }
+        })?;
+        for module in modules {
+            let cost = argument_cost(module.path.as_os_str(), os);
+            if cost > remaining {
+                return Err(StripError::Io {
+                    path: module.path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "this module path needs {cost} quoted UTF-16 command-line units; only {remaining} remain after the runtime and fixed arguments; use a shorter staging directory"
+                        ),
+                    ),
+                });
+            }
+        }
+        remaining
+    } else {
+        MAX_ARGUMENT_BYTES
+    };
+    Ok(batches(modules, limit, os))
+}
+
+/// Includes the separator, enclosing quotes and Windows backslash escaping.
+/// Always quoting is a conservative upper bound even when Command can use a
+/// shorter unquoted spelling. Unicode is counted in UTF-16 units on Windows.
+fn argument_cost(argument: &OsStr, os: Os) -> usize {
+    if os != Os::Windows {
+        return argument.as_encoded_bytes().len().saturating_add(1);
+    }
+    let mut cost = 3usize;
+    let mut backslashes = 0usize;
+    for unit in argument.to_string_lossy().encode_utf16() {
+        match unit {
+            92 => backslashes = backslashes.saturating_add(1),
+            34 => {
+                cost = cost.saturating_add(backslashes.saturating_mul(2).saturating_add(2));
+                backslashes = 0;
+            }
+            _ => {
+                cost = cost.saturating_add(backslashes.saturating_add(1));
+                backslashes = 0;
+            }
+        }
+    }
+    cost.saturating_add(backslashes.saturating_mul(2))
+}
+
+/// Splits `modules` into runs whose quoted paths fit the host's remaining budget.
 ///
 /// A module whose path alone is longer than `limit` travels in a batch of its
 /// own rather than in none: a bound that could produce an empty batch would
 /// either lose a module or spin.
-fn batches<'a>(modules: &[&'a Staged], limit: usize) -> Vec<Vec<&'a Staged>> {
+fn batches<'a>(modules: &[&'a Staged], limit: usize, os: Os) -> Vec<Vec<&'a Staged>> {
     let mut batches: Vec<Vec<&Staged>> = Vec::new();
     let mut current: Vec<&Staged> = Vec::new();
     let mut used = 0usize;
     for module in modules {
-        // One for the separator every argument costs the kernel.
-        let cost = module.path.as_os_str().len().saturating_add(1);
+        let cost = argument_cost(module.path.as_os_str(), os);
         if !current.is_empty() && used.saturating_add(cost) > limit {
             batches.push(std::mem::take(&mut current));
             used = 0;
@@ -1037,7 +1125,7 @@ mod tests {
         let modules = [staged("a.beam"), staged("b.beam")];
         let borrowed: Vec<&Staged> = modules.iter().collect();
 
-        let batches = batches(&borrowed, MAX_ARGUMENT_BYTES);
+        let batches = batches(&borrowed, MAX_ARGUMENT_BYTES, Os::Linux);
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 2);
@@ -1055,7 +1143,7 @@ mod tests {
         ];
         let borrowed: Vec<&Staged> = modules.iter().collect();
 
-        let batches = batches(&borrowed, 20);
+        let batches = batches(&borrowed, 20, Os::Linux);
 
         assert_eq!(
             batches
@@ -1074,7 +1162,7 @@ mod tests {
         let modules = [staged("a.beam"), staged("a_very_long_name_indeed.beam")];
         let borrowed: Vec<&Staged> = modules.iter().collect();
 
-        let batches = batches(&borrowed, 4);
+        let batches = batches(&borrowed, 4, Os::Linux);
 
         assert_eq!(batches.len(), 2, "no module may be dropped: {batches:?}");
         assert!(batches.iter().all(|batch| !batch.is_empty()));
@@ -1082,7 +1170,50 @@ mod tests {
 
     #[test]
     fn no_modules_at_all_is_no_call_at_all() {
-        assert!(batches(&[], MAX_ARGUMENT_BYTES).is_empty());
+        assert!(batches(&[], MAX_ARGUMENT_BYTES, Os::Linux).is_empty());
+    }
+
+    #[test]
+    fn windows_argument_cost_includes_utf16_quotes_and_backslash_expansion() {
+        for (argument, expected) in [
+            ("a b", 6),
+            ("a\\\"b", 9),
+            ("😀", 5),
+            ("C:\\folder\\", 14),
+            ("", 3),
+        ] {
+            assert_eq!(
+                argument_cost(OsStr::new(argument), Os::Windows),
+                expected,
+                "{argument:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_fixed_arguments_and_runtime_path_consume_the_batch_budget() {
+        let module = staged("small.beam");
+        let erl = PathBuf::from("e".repeat(WINDOWS_COMMAND_LINE_UNITS));
+        let error = beam_batches(&[&module], &erl, &["-eval", STRIP_FILES_EVAL], Os::Windows)
+            .expect_err("the executable and fixed arguments cannot be omitted from the budget");
+        assert!(matches!(error, StripError::Io { path, source }
+            if path == erl && source.kind() == std::io::ErrorKind::InvalidInput));
+    }
+
+    #[test]
+    fn windows_an_oversized_module_is_identified_before_any_batch_can_run() {
+        let small = staged("small.beam");
+        let large = staged(&format!("{}.beam", "x".repeat(WINDOWS_COMMAND_LINE_UNITS)));
+        let error = beam_batches(
+            &[&small, &large],
+            Path::new("erl.exe"),
+            &["-eval", STRIP_FILES_EVAL],
+            Os::Windows,
+        )
+        .expect_err("an individually oversized module must never be silently dropped");
+        assert!(matches!(error, StripError::Io { path, source }
+            if path == large.path && source.kind() == std::io::ErrorKind::InvalidInput
+                && source.to_string().contains("shorter staging directory")));
     }
 
     #[test]

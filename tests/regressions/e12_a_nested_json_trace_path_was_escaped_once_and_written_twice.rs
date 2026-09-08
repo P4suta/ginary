@@ -54,14 +54,14 @@ use crate::common::cachefs::{DAY, plant_entry};
 use crate::common::hostpath::{json_escaped, nested_json_escaped};
 use crate::common::payload::SharedSink;
 
-/// An application directory whose own name holds the one character a unix
+/// A cache directory whose own name holds the one character a unix
 /// path can carry and JSON has to escape.
 ///
 /// This is the whole instrument: on Windows every separator is such a
 /// character, and on Linux none of them is unless a test puts one there. With
 /// it, the runner's failure is reproduced on the machine ginary is developed
 /// on.
-const AWKWARD_APP: &str = r"back\slash";
+const AWKWARD_ROOT: &str = r"back\slash";
 
 /// How many JSON documents a path in a `prune` record is written into.
 ///
@@ -75,11 +75,14 @@ const OLD: &str = "0000000000000000";
 /// The one beside it that nobody has finished with.
 const FRESH: &str = "1111111111111111";
 
-/// Prunes an application directory named [`AWKWARD_APP`] and returns the
+/// Prunes an application under [`AWKWARD_ROOT`] and returns the
 /// `prune` record, with the removed and kept paths.
 fn pruned_record() -> (String, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let app_dir = dir.path().join(AWKWARD_APP);
+    // The escaped component belongs to the caller's cache location. The
+    // application name must still satisfy the portable manifest contract so
+    // maintenance can prove ownership before deleting its stale entry.
+    let app_dir = dir.path().join(AWKWARD_ROOT).join("hello");
     let old = plant_entry(&app_dir, OLD, DAY * 30);
     let fresh = plant_entry(&app_dir, FRESH, DAY);
     let sink = SharedSink::new();

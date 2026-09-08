@@ -18,7 +18,7 @@ categories = ["command-line-utilities", "development-tools"]
 # artifact is made from, which carries no clap, no TOML reader and none of the
 # build-side commands. See `docs/dev/log/C2.md`.
 default = ["cli"]
-cli = ["dep:clap", "dep:toml", "dep:ureq"]
+cli = ["dep:clap", "dep:toml", "dep:ureq", "dep:same-file"]
 # Fault injection for the launcher tests. Off by default, so a release build
 # holds none of the points and never reads `GINARY_FAULT`; `mise run test` and
 # CI turn it on. See `src/fault.rs` and `docs/dev/testing.md`.
@@ -46,6 +46,10 @@ object = { version = "0.40.0", default-features = false, features = [
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# Output planning must recognise hard links on both Unix and Windows before
+# an SBOM or manifest can replace the artifact it describes. This is build
+# side only; the safe identity wrapper adds no launcher dependency.
+same-file = { version = "1.0.6", optional = true }
 # The payload's checksum, the trailer's `sha256` and every entry of the index.
 # 0.11 is the `digest` 0.11 line: `Output<Sha256>` is a `hybrid-array` `Array`
 # rather than the `generic-array` one, and the `std` feature is gone — this
@@ -91,7 +95,8 @@ ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzi
 # `execve`, `syncfs` for the one-call durability barrier before an entry is
 # renamed into place, and `kill(pid, 0)` for the liveness probe `cache::sweep`
 # puts to the process table before it removes another launcher's temporary
-# tree. rustix wraps them all safely, so the unix launcher path opens no
+# tree. Assembly also uses `renameat_with` with NOREPLACE for atomic publication
+# without replacing a competing output. rustix wraps them all safely, so the unix launcher path opens no
 # `unsafe` block; on Linux it uses its own raw syscall backend, so nothing new
 # is dynamically linked. Unix only: Windows has none of them and takes a share
 # mode on the handle, a per-file `fsync` and `OpenProcess` instead. See
@@ -99,7 +104,7 @@ ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzi
 rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
-# The three Win32 facilities the crate's Windows path is built on, and nothing
+# The Win32 facilities the crate's Windows path is built on, and nothing
 # else. `SetConsoleCtrlHandler` keeps Ctrl-C from killing the launcher out from
 # under the runtime it is waiting for, and a job object with
 # `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` makes a killed launcher take the runtime
@@ -112,9 +117,12 @@ rustix = { version = "1.1.4", default-features = false, features = ["std", "fs",
 # `Win32_Security` is in it for a signature rather than for a call of ours: the
 # job-object entry points take a `SECURITY_ATTRIBUTES` pointer. See
 # `docs/adr/0015-windows-launcher-stays-resident.md`.
+# Stage publication also uses `MoveFileExW` without replacement flags, because
+# the standard library's rename may replace a competing empty directory.
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_JobObjects",
   "Win32_System_Threading",

@@ -24,9 +24,19 @@
 //! test can hand it a trailered file without needing a Gleam project.
 //!
 //! **The work directory is removed whether the build succeeds or not.**
-//! Staging happens under `<project>/build/ginary/.work-<pid>/root`, so a
-//! failed build leaves the project tree as it found it; `--keep-staging` keeps
-//! it and prints where it is.
+//! Each invocation owns a unique directory under `<project>/build/ginary`,
+//! with one staging root per target. `--keep-staging` preserves that directory
+//! on success and failure, and the detailed result names it.
+
+// BundleError retains the established public ConfigError variants. The larger
+// Windows path representation must not force an incompatible API change.
+#![cfg_attr(
+    windows,
+    allow(
+        clippy::result_large_err,
+        reason = "preserve the legacy BundleError and ConfigError public variants on Windows"
+    )
+)]
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -55,9 +65,8 @@ use crate::trailer::{TRAILER_LEN, Trailer, TrailerError};
 
 /// The prefix of the per-build staging directory, under `build/ginary`.
 ///
-/// The process id is what makes two concurrent builds of one project
-/// independent, and what lets a later build recognise the residue of a killed
-/// one as residue.
+/// Actual builds append the process id and a random unique suffix, so repeated
+/// library calls in one process never reuse a retained staging directory.
 pub const WORK_DIR_PREFIX: &str = ".work-";
 
 /// The staging root inside a work directory.
@@ -74,23 +83,16 @@ pub const LAUNCH_PROGRAM: &str = crate::target::LAUNCH_PROGRAM;
 
 /// The sentence a Windows build with no Windows runtime is refused with.
 ///
-/// A Windows ERTS tree is `otp_win64_<version>.zip` from `erlang/otp`, and
-/// nothing on a Linux or macOS build machine produces one: there is no host
-/// runtime to fall back to there and no way to build one. So the refusal names
-/// where such a tree comes from rather than what is missing, and a build that
-/// already has one unpacked says so with `erts = "dir:<path>"`. A Windows host
-/// is the exception [`check_windows_erts`] makes: its own installation is such
-/// a tree, so it never reaches this sentence.
-pub const WINDOWS_ERTS_FROM_CATALOG: &str =
-    "windows ERTS trees arrive with the windows catalog entry";
+/// Explicit runtime sources are eligible on every host and are verified from
+/// their contents. Only Windows can supply a Windows runtime through `host`.
+pub const WINDOWS_ERTS_FROM_CATALOG: &str = "use a verified Windows runtime from `dir:`, `catalog` or `tarball:`; the `host` source requires a Windows build host";
 
 /// Refuses a Windows build whose runtime cannot be a Windows one.
 ///
-/// `dir:` is the one source that can hold a tree somebody unpacked from the
-/// upstream zip, so it is the one source this milestone accepts; every other
-/// spelling — the host runtime, a catalogue with no Windows entry in it yet, a
-/// Linux tarball, a Docker image — would bundle a runtime that cannot run on
-/// the target and would only be found out by whoever ran the artifact.
+/// Explicit directory, catalog and tarball sources are eligible on every host.
+/// Passing this source-kind check does not establish compatibility: runtime
+/// resolution must still verify the actual PE architecture, required files and
+/// catalog claims before assembly. A host source requires a Windows build host.
 ///
 /// A target that is not Windows is always accepted: this check has nothing to
 /// say about it.
@@ -113,12 +115,12 @@ pub fn check_windows_erts(
     if target.os != crate::target::Os::Windows {
         return Ok(());
     }
-    if matches!(spec, ErtsSourceSpec::Dir(_)) {
+    if matches!(
+        spec,
+        ErtsSourceSpec::Dir(_) | ErtsSourceSpec::Catalog | ErtsSourceSpec::Tarball(_)
+    ) {
         return Ok(());
     }
-    // The host runtime on a Windows machine *is* a Windows ERTS tree, so the
-    // one source that could never hold one on Linux is the ordinary answer
-    // there. Every other spelling is refused on every host.
     if host_os == crate::target::Os::Windows && matches!(spec, ErtsSourceSpec::Host) {
         return Ok(());
     }
@@ -213,7 +215,7 @@ pub struct TargetBuild {
     pub stub_len: u64,
     /// The payload's length.
     pub payload_len: u64,
-    /// The artifact's length: stub, payload and the 64-byte trailer.
+    /// The completed artifact's measured length, including platform signing overhead.
     pub total_len: u64,
     /// The payload's SHA-256, in lower-case hexadecimal.
     pub sha256: String,
@@ -224,12 +226,7 @@ pub struct TargetBuild {
 impl TargetBuild {
     /// The one line that says what was written and what it is made of.
     pub fn artifact_line(&self) -> String {
-        format!(
-            "artifact: {} ({} stub + {} payload + {TRAILER_LEN} trailer)",
-            self.out.display(),
-            self.stub_len,
-            self.payload_len
-        )
+        render_artifact_line(&self.out, self.stub_len, self.payload_len, self.total_len)
     }
 
     /// The C library the runtime needs, as the table prints it.
@@ -246,6 +243,24 @@ impl TargetBuild {
             },
         }
     }
+}
+
+/// Renders measured size when platform signing changes the simple appended layout.
+fn render_artifact_line(out: &Path, stub_len: u64, payload_len: u64, total_len: u64) -> String {
+    if total_len
+        != stub_len
+            .saturating_add(payload_len)
+            .saturating_add(TRAILER_LEN)
+    {
+        return format!(
+            "artifact: {} ({total_len} bytes, {payload_len} payload)",
+            out.display()
+        );
+    }
+    format!(
+        "artifact: {} ({stub_len} stub + {payload_len} payload + {TRAILER_LEN} trailer)",
+        out.display()
+    )
 }
 
 /// The table one row per target, as [`BuildReport::render_text`] prints it.
@@ -285,7 +300,7 @@ pub struct BuildReport {
     pub stub_len: u64,
     /// The payload's length.
     pub payload_len: u64,
-    /// The artifact's length: stub, payload and the 64-byte trailer.
+    /// The completed artifact's measured length, including platform signing overhead.
     pub total_len: u64,
     /// The payload's SHA-256, in lower-case hexadecimal.
     pub sha256: String,
@@ -314,6 +329,75 @@ pub struct BuildReport {
     /// The accounts `--explain` asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<BuildExplain>,
+}
+
+/// A failed build together with the artifacts and evidence it left behind.
+///
+/// Completed artifacts remain usable when a later target fails. A target
+/// whose executable was published but whose manifest copy failed is included
+/// with `manifest_copy: None`.
+#[derive(Debug)]
+pub struct BuildFailure {
+    /// The original build failure, preserving its typed cause chain.
+    pub source: Box<BundleError>,
+    /// Executables already published, in the requested target order.
+    pub completed: Vec<TargetBuild>,
+    /// The target being built when the failure occurred, if one was started.
+    pub failed_target: Option<Target>,
+    /// Targets never started, in request order.
+    pub unattempted: Vec<Target>,
+    /// The retained work directory, including target-specific roots.
+    pub staging: Option<PathBuf>,
+    /// Non-fatal findings and cleanup failures that must remain visible.
+    pub warnings: Vec<String>,
+}
+
+impl std::fmt::Display for BuildFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)?;
+        if let Some(target) = self.failed_target {
+            write!(f, " (target {target})")?;
+        }
+        for artifact in &self.completed {
+            write!(f, "; artifact retained: {}", artifact.out.display())?;
+        }
+        if let Some(staging) = &self.staging {
+            write!(f, "; staging: {}", staging.display())?;
+        }
+        for warning in &self.warnings {
+            write!(f, "; warning: {warning}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BuildFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+impl BuildFailure {
+    /// Describes a failure before any target was started.
+    fn before_targets(source: BundleError, opts: &BuildOptions) -> Self {
+        Self {
+            source: Box::new(source),
+            completed: Vec::new(),
+            failed_target: None,
+            unattempted: opts.targets.clone(),
+            staging: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Keeps old error variants for early failures and retains later evidence.
+    fn into_legacy(self) -> BundleError {
+        if self.completed.is_empty() && self.staging.is_none() && self.warnings.is_empty() {
+            *self.source
+        } else {
+            BundleError::Incomplete(Box::new(self))
+        }
+    }
 }
 
 /// Serialises a path the way every report renders one: lossily.
@@ -345,12 +429,7 @@ impl BuildReport {
     /// artifact: build/ginary/hello_ffi (5242880 stub + 9437184 payload + 64 trailer)
     /// ```
     pub fn artifact_line(&self) -> String {
-        format!(
-            "artifact: {} ({} stub + {} payload + {TRAILER_LEN} trailer)",
-            self.out.display(),
-            self.stub_len,
-            self.payload_len
-        )
+        render_artifact_line(&self.out, self.stub_len, self.payload_len, self.total_len)
     }
 
     /// The size report's table, the `needs:` line, whatever the build could
@@ -377,26 +456,29 @@ impl BuildReport {
     }
 }
 
-/// The staging root one build stages into.
+/// The legacy deterministic staging-root spelling for a process identifier.
 ///
-/// `<project>/build/ginary/.work-<pid>/root`, whatever `--out` says: the work
-/// directory belongs to the project rather than to the destination, so an
-/// artifact written to `/usr/local/bin` does not stage there.
+/// Retained for source compatibility. Builds now create a unique work directory
+/// and stage below its target-named subdirectory. Read [`BuildReport::staging`]
+/// or [`BuildFailure::staging`] for the actual invocation's location.
 pub fn work_root(project: &Path, pid: u32) -> PathBuf {
     work_dir(project, pid).join(WORK_STAGE_NAME)
 }
 
-/// The per-build work directory, the parent of [`work_root`].
+/// The legacy deterministic work-directory spelling, the parent of [`work_root`].
 ///
-/// This is the directory `--keep-staging` keeps and prints, and the one a
-/// build removes on its way out however it ended.
+/// This pure path helper no longer allocates or names a build's actual work.
+/// Actual work includes a unique suffix to isolate calls within one process.
 pub fn work_dir(project: &Path, pid: u32) -> PathBuf {
     project
         .join(crate::config::DEFAULT_OUTPUT)
         .join(format!("{WORK_DIR_PREFIX}{pid}"))
 }
 
-/// Checks that `stub` is the ginary command line tool and returns its length.
+/// Refuses an already-packaged artifact and returns the candidate stub's length.
+///
+/// Build entrypoints additionally verify the candidate's ginary identity marker,
+/// version and object header through [`crate::stub::verify`].
 ///
 /// # Errors
 ///
@@ -449,13 +531,55 @@ pub fn check_stub(stub: &Path) -> Result<u64, BundleError> {
 ///
 /// # Errors
 ///
-/// [`BundleError`], wrapping whichever phase failed. Nothing is left behind
-/// on any of those paths: the work directory is removed and the artifact is
-/// written through a temporary file that is only renamed into place once it is
-/// complete.
+/// [`BundleError`], wrapping whichever phase failed. Complete artifacts from
+/// earlier targets remain available if a later target fails. Retained staging
+/// and partial results are exposed through [`BundleError::Incomplete`]; use
+/// [`build_detailed`] to access them directly. Each artifact replaces its final
+/// destination only after a complete temporary file has been prepared.
 pub fn build(opts: &BuildOptions, diag: &Diag) -> Result<BuildReport, BundleError> {
-    let (_file, path) = crate::selfexe::open_self()?;
-    build_with_stub(opts, &path, diag)
+    build_detailed(opts, diag).map_err(BuildFailure::into_legacy)
+}
+
+/// Builds using the running executable, retaining partial results on failure.
+///
+/// Embedding applications should use [`build_with_stub_detailed`] with a
+/// verified ginary executable instead of using their own executable as a stub.
+///
+/// # Errors
+///
+/// [`BuildFailure`] naming all artifacts and staging retained by this call.
+pub fn build_detailed(opts: &BuildOptions, diag: &Diag) -> Result<BuildReport, BuildFailure> {
+    build_finalized(opts, diag, |_| {})
+}
+
+/// Builds and finalizes auxiliary outputs while retaining the project lock.
+///
+/// `finalize` is called once with every published target, including completed
+/// targets from a failed multi-target build. It can read those artifacts and
+/// publish SBOMs before another build in this project may replace them. An
+/// early failure calls it with an empty slice. The callback records its own
+/// auxiliary failures; they do not change the build's typed result.
+///
+/// # Errors
+///
+/// As [`build_detailed`]. A callback panic unwinds with the lock still owned.
+pub fn build_finalized(
+    opts: &BuildOptions,
+    diag: &Diag,
+    finalize: impl FnOnce(&[TargetBuild]),
+) -> Result<BuildReport, BuildFailure> {
+    trace_build(diag, || {
+        let mut finalize = Some(finalize);
+        let outcome = crate::selfexe::open_self()
+            .map_err(|error| BuildFailure::before_targets(BundleError::SelfExe(error), opts))
+            .and_then(|(_file, path)| {
+                build_with_stub_finalize_inner(opts, &path, diag, &mut finalize)
+            });
+        if let Some(finalize) = finalize {
+            finalize(&[]);
+        }
+        outcome
+    })
 }
 
 /// [`build`], with the stub named explicitly.
@@ -472,23 +596,154 @@ pub fn build_with_stub(
     stub: &Path,
     diag: &Diag,
 ) -> Result<BuildReport, BundleError> {
+    build_with_stub_detailed(opts, stub, diag).map_err(BuildFailure::into_legacy)
+}
+
+/// Builds with an explicit stub and retains partial results on every failure.
+///
+/// A project lock covers both export and consumption of its shared shipment.
+/// Another ginary build receives a bounded lock error before it can touch
+/// those inputs. Retained work directories are never reused by a later call.
+///
+/// ```no_run
+/// use std::path::Path;
+/// use ginary::{bundle, config::{BuildFlags, BuildOptions, ProjectConfig}, diag::Diag};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let project = Path::new("my_project");
+/// let config = ProjectConfig::read(&project.join("gleam.toml"))?;
+/// let options = BuildOptions::merge(project, &config, &BuildFlags::default())?;
+/// match bundle::build_with_stub_detailed(&options, Path::new("/tools/ginary"), &Diag::disabled()) {
+///     Ok(report) => println!("{}", report.artifact_line()),
+///     Err(failure) => {
+///         for artifact in &failure.completed {
+///             eprintln!("completed: {}", artifact.out.display());
+///         }
+///         return Err(Box::new(failure));
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// [`BuildFailure`] preserves the typed cause, the failing target, completed
+/// outputs, unattempted targets, and any staging or cleanup warnings.
+pub fn build_with_stub_detailed(
+    opts: &BuildOptions,
+    stub: &Path,
+    diag: &Diag,
+) -> Result<BuildReport, BuildFailure> {
+    build_with_stub_finalized(opts, stub, diag, |_| {})
+}
+
+/// [`build_finalized`] for an embedding application with an explicit ginary stub.
+///
+/// Auxiliary output writers run while the project lock still protects the
+/// published artifacts. A failed build still supplies its completed targets.
+///
+/// # Errors
+///
+/// As [`build_with_stub_detailed`].
+pub fn build_with_stub_finalized(
+    opts: &BuildOptions,
+    stub: &Path,
+    diag: &Diag,
+    finalize: impl FnOnce(&[TargetBuild]),
+) -> Result<BuildReport, BuildFailure> {
+    trace_build(diag, || {
+        let mut finalize = Some(finalize);
+        let outcome = build_with_stub_finalize_inner(opts, stub, diag, &mut finalize);
+        if let Some(finalize) = finalize {
+            finalize(&[]);
+        }
+        outcome
+    })
+}
+
+/// Gives every library entrypoint one explicit operation outcome, even on early failure.
+fn trace_build(
+    diag: &Diag,
+    build: impl FnOnce() -> Result<BuildReport, BuildFailure>,
+) -> Result<BuildReport, BuildFailure> {
+    let operation = diag.operation("bundle");
+    let outcome = build();
+    let (completed, failed_target) = match &outcome {
+        Ok(report) => (report.targets.len(), String::new()),
+        Err(failure) => (
+            failure.completed.len(),
+            failure
+                .failed_target
+                .map(|target| target.name())
+                .unwrap_or_default(),
+        ),
+    };
+    operation.finish(
+        outcome.is_ok(),
+        &[
+            ("completed_targets", &completed.to_string()),
+            ("failed_target", &failed_target),
+        ],
+    );
+    outcome
+}
+
+/// Keeps auxiliary output publication in the shipment and artifact lock scope.
+fn build_with_stub_finalize_inner<F: FnOnce(&[TargetBuild])>(
+    opts: &BuildOptions,
+    stub: &Path,
+    diag: &Diag,
+    finalize: &mut Option<F>,
+) -> Result<BuildReport, BuildFailure> {
+    let before = |source| BuildFailure::before_targets(source, opts);
     // First, because it is the cheapest failure and the one whose remedy is
     // "install plain ginary": a build that exported a project and staged a
     // runtime before saying so would have wasted minutes to say it.
-    let stub_len = check_stub(stub)?;
+    let stub_len = check_stub(stub).map_err(before)?;
 
     // Second, and for the same reason: everything below is a fault in the
     // command line or in `gleam.toml`, and each of them is cheaper to report
     // than the export that would otherwise come first.
-    let targets = build_targets(opts)?;
-    let stubs = resolve_stubs(opts, stub, stub_len, &targets)?;
-    check_cross_erts(opts, &targets)?;
+    let targets = build_targets(opts).map_err(before)?;
+    validate_outputs(opts, stub).map_err(before)?;
+    let stubs = resolve_stubs(opts, stub, stub_len, &targets).map_err(before)?;
+    check_cross_erts(opts, &targets).map_err(before)?;
+
+    let canonical_root = opts.root.canonicalize().map_err(|source| {
+        before(BundleError::Io {
+            what: format!("cannot resolve the project {}", opts.root.display()),
+            source,
+        })
+    })?;
+    let lock_dir = canonical_root
+        .join(crate::config::DEFAULT_OUTPUT)
+        .join(".build-lock");
+    std::fs::create_dir_all(&lock_dir).map_err(|source| {
+        before(BundleError::Io {
+            what: format!(
+                "cannot create the build lock for {}",
+                canonical_root.display()
+            ),
+            source,
+        })
+    })?;
+    let _lock = crate::cache_lock::wait_exclusive(&lock_dir, std::time::Duration::ZERO).map_err(
+        |source| {
+            before(BundleError::Io {
+                what: format!(
+                    "cannot acquire the build lock for {}; another build may be using its shipment",
+                    canonical_root.display()
+                ),
+                source,
+            })
+        },
+    )?;
 
     let project = ProjectDir::new(opts.root.clone());
     let shipment = if opts.skip_export {
-        gleam::existing_shipment(&project)?
+        gleam::existing_shipment(&project).map_err(|error| before(error.into()))?
     } else {
-        gleam::export_shipment(&project, diag)?
+        gleam::export_shipment(&project, diag).map_err(|error| before(error.into()))?
     };
 
     // Once for the whole build, however many targets it produces: the
@@ -496,18 +751,32 @@ pub fn build_with_stub(
     // `priv` three times would say the same thing three times.
     let natives = {
         let _phase = diag.phase("native-scan");
-        native::scan_shipment(&shipment)?
+        native::scan_shipment(&shipment).map_err(|error| before(error.into()))?
     };
     diag.kv("native", &[("objects", &natives.len().to_string())]);
+    // Export can create a previously absent shipment. Validate its actual
+    // files while the project lock is held, before publishing any output.
+    validate_outputs(opts, stub).map_err(before)?;
 
-    let work = work_dir(&opts.root, std::process::id());
-    let outcome = build_each_target(opts, &stubs, &shipment, &natives, &work, diag);
+    let prefix = format!("{WORK_DIR_PREFIX}{}-", std::process::id());
+    let work = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempdir_in(canonical_root.join(crate::config::DEFAULT_OUTPUT))
+        .map_err(|source| {
+            before(BundleError::Io {
+                what: "cannot create the build work directory".to_owned(),
+                source,
+            })
+        })?
+        .keep();
+    let mut outcome = build_each_target(opts, &stubs, &shipment, &natives, &work, diag);
 
-    if opts.keep_staging {
-        outcome.map(|mut report| {
-            report.staging = Some(work);
-            report
-        })
+    let outcome = if opts.keep_staging {
+        match &mut outcome {
+            Ok(report) => report.staging = Some(work),
+            Err(failure) => failure.staging = Some(work),
+        }
+        outcome
     } else {
         // However it ended: a failed build leaves the project tree as it found
         // it, and a successful one leaves only the artifact. A removal that
@@ -516,18 +785,186 @@ pub fn build_with_stub(
             (None, outcome) => outcome,
             (Some(warning), Ok(mut report)) => {
                 diag.kv("cleanup", &[("warning", &warning)]);
+                report.staging = Some(work);
                 report.warnings.push(warning);
                 Ok(report)
             }
             // The build already failed and its error is what the user is
             // about to read; the residue goes to the recorder, because a
             // second headline would bury the first.
-            (Some(warning), Err(error)) => {
+            (Some(warning), Err(mut error)) => {
                 diag.kv("cleanup", &[("warning", &warning)]);
+                error.staging = Some(work);
+                error.warnings.push(warning);
                 Err(error)
             }
         }
+    };
+    if let Some(finalize) = finalize.take() {
+        finalize(match &outcome {
+            Ok(report) => &report.targets,
+            Err(failure) => &failure.completed,
+        });
     }
+    outcome
+}
+
+/// Refuses output collisions and destinations inside mutable build inputs.
+fn validate_outputs(opts: &BuildOptions, stub: &Path) -> Result<(), BundleError> {
+    validate_output_paths(opts, stub, &[])
+}
+
+/// Refuses collisions between build outputs, extra documents, and build inputs.
+///
+/// Callers can include SBOM destinations in `extra` before beginning a build.
+/// Runtime directories, the shipment, native overrides, configuration files,
+/// stubs, and owned work directories cannot be used as output destinations.
+///
+/// # Errors
+///
+/// [`BundleError::Io`] naming an output that conflicts or cannot be checked,
+/// or a runtime-source configuration error.
+pub fn validate_output_paths(
+    opts: &BuildOptions,
+    stub: &Path,
+    extra: &[PathBuf],
+) -> Result<(), BundleError> {
+    let paths: Vec<PathBuf> = opts
+        .targets
+        .iter()
+        .flat_map(|target| {
+            std::iter::once(opts.artifact_path(*target)).chain(opts.manifest_copy_path(*target))
+        })
+        .chain(extra.iter().cloned())
+        .collect();
+    crate::output::validate_distinct(&paths).map_err(|source| BundleError::Io {
+        what: "the build output paths conflict".to_owned(),
+        source,
+    })?;
+    let manifest = opts.root.join(crate::gleam::MANIFEST_NAME);
+    let lock = opts
+        .root
+        .join(crate::config::DEFAULT_OUTPUT)
+        .join(".build-lock");
+    let shipment = opts.root.join(crate::gleam::SHIPMENT_DIR);
+    let mut input_trees = vec![shipment.clone()];
+    let mut trees = vec![shipment, lock];
+    let mut inputs = vec![
+        stub.to_path_buf(),
+        manifest,
+        opts.root.join("manifest.toml"),
+    ];
+    // Export reads these project inputs before producing the shipment. Protect
+    // their names and hard-link identities even when no shipment exists yet.
+    for directory in ["src", "test", "priv"] {
+        let tree = opts.root.join(directory);
+        trees.push(tree.clone());
+        input_trees.push(tree);
+    }
+    inputs.extend(opts.vm_args.iter().cloned());
+    inputs.extend(opts.sys_config.iter().cloned());
+    inputs.extend(opts.stub.iter().cloned());
+    if !extra.is_empty() {
+        // Auxiliary outputs participate in the same identity checks as the
+        // executable. Cross-target stubs may come from an environment-selected
+        // directory or cache rather than an explicit --stub argument.
+        let targets = build_targets(opts)?;
+        let length = check_stub(stub)?;
+        inputs.extend(
+            resolve_stubs(opts, stub, length, &targets)?
+                .into_iter()
+                .map(|stub| stub.path),
+        );
+    }
+    let mut needs_otp_cache = false;
+    for target in &opts.targets {
+        match erts_spec_for(opts, *target)? {
+            ErtsSourceSpec::Dir(path) => {
+                input_trees.push(path.clone());
+                trees.push(path);
+            }
+            ErtsSourceSpec::Tarball(path) => {
+                inputs.push(path);
+                needs_otp_cache = true;
+            }
+            ErtsSourceSpec::Catalog => needs_otp_cache = true,
+            _ => {}
+        }
+        if let Some(config) = opts.target_config.get(&target.name()) {
+            inputs.extend(config.native.values().map(|path| opts.root.join(path)));
+        }
+    }
+    if needs_otp_cache {
+        // Catalog and tarball resolution select their precise extracted root
+        // later. The entire selected OTP cache is already a known input tree,
+        // so auxiliary outputs cannot replace any of its files in the interim.
+        let cache = crate::cache_dir::resolve(
+            &crate::cache_dir::EnvSnapshot::from_env(),
+            crate::platform::HOST,
+        )?;
+        let tree = crate::catalog::cache_root(&cache.path);
+        trees.push(tree.clone());
+        input_trees.push(tree);
+        if let Some(catalog) =
+            std::env::var_os(crate::catalog::CATALOG_ENV_VAR).filter(|value| !value.is_empty())
+        {
+            inputs.push(PathBuf::from(catalog));
+        }
+    }
+    for path in &paths {
+        let check = || -> std::io::Result<bool> {
+            for tree in &trees {
+                if crate::output::within(path, tree)? {
+                    return Ok(true);
+                }
+            }
+            let build_dir = crate::output::resolve(&opts.root.join(crate::config::DEFAULT_OUTPUT))?;
+            let output = crate::output::resolve(path)?;
+            if let Ok(relative) = output.strip_prefix(build_dir)
+                && relative.components().next().is_some_and(|part| {
+                    part.as_os_str()
+                        .to_string_lossy()
+                        .starts_with(WORK_DIR_PREFIX)
+                })
+            {
+                return Ok(true);
+            }
+            for input in &inputs {
+                if crate::output::aliases(path, input)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        match check() {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(BundleError::Io {
+                    what: format!(
+                        "output {} would replace a build input or work directory",
+                        path.display()
+                    ),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "choose an output outside build inputs and work directories",
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(BundleError::Io {
+                    what: format!("cannot validate output {}", path.display()),
+                    source,
+                });
+            }
+        }
+    }
+    crate::output::validate_input_trees(&paths, &input_trees).map_err(|source| {
+        BundleError::Io {
+            what: "cannot validate output identities against the build inputs".to_owned(),
+            source,
+        }
+    })?;
+    Ok(())
 }
 
 /// Removes one build's work directory, reporting what stopped it.
@@ -632,6 +1069,10 @@ fn resolve_stubs(
     let mut resolved = Vec::with_capacity(targets.len());
     for target in targets.iter().copied() {
         if target == host && opts.stub.is_none() {
+            crate::stub::verify(self_stub, &target).map_err(|source| BundleError::Stub {
+                target,
+                source: Box::new(source),
+            })?;
             resolved.push(TargetStub {
                 target,
                 path: self_stub.to_path_buf(),
@@ -656,6 +1097,35 @@ fn resolve_stubs(
             })?
             .len();
         resolved.push(TargetStub { target, path, len });
+    }
+    for stub in &resolved {
+        for target in targets {
+            for output in
+                std::iter::once(opts.artifact_path(*target)).chain(opts.manifest_copy_path(*target))
+            {
+                if crate::output::aliases(&output, &stub.path).map_err(|source| {
+                    BundleError::Io {
+                        what: format!(
+                            "cannot check the output {} against its stub",
+                            output.display()
+                        ),
+                        source,
+                    }
+                })? {
+                    return Err(BundleError::Io {
+                        what: format!(
+                            "output {} would replace the stub {}",
+                            output.display(),
+                            stub.path.display()
+                        ),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "output is a resolved stub",
+                        ),
+                    });
+                }
+            }
+        }
     }
     Ok(resolved)
 }
@@ -839,9 +1309,8 @@ fn beam_stripper(
 /// each warning with the target that raised it, so a line naming a runtime
 /// file says which artifact is missing it.
 ///
-/// Sequential, and every target stages into the same work root: the tree one
-/// target staged is packed and measured before the next replaces it, which is
-/// what lets the whole build have one work directory and one removal site.
+/// Sequential, with a separate target directory below the invocation's work
+/// directory. A retained root always names the target whose bytes it holds.
 ///
 /// # Errors
 ///
@@ -857,7 +1326,7 @@ fn build_each_target(
     natives: &[NativeArtifact],
     work: &Path,
     diag: &Diag,
-) -> Result<BuildReport, BundleError> {
+) -> Result<BuildReport, BuildFailure> {
     let mut whole: Option<BuildReport> = None;
     let mut rows: Vec<TargetBuild> = Vec::with_capacity(stubs.len());
     // The scan's own warnings first, and unattributed: a file under `priv`
@@ -868,82 +1337,114 @@ fn build_each_target(
         .filter_map(|artifact| artifact.warning.clone())
         .collect();
     let attributed = stubs.len() > 1;
-    let sources = runtime_sources(opts, stubs)?;
+    let sources = runtime_sources(opts, stubs).map_err(|source| {
+        let mut failure = BuildFailure::before_targets(source, opts);
+        failure.warnings.clone_from(&warnings);
+        failure
+    })?;
 
-    for entry in stubs {
+    for (position, entry) in stubs.iter().enumerate() {
         let target = &entry.target;
-        let spec = erts_spec_for(opts, *target)?;
-        // Before the runtime is fetched rather than after: a catalogue entry
-        // downloaded and then found to be the wrong operating system costs the
-        // user minutes and tells them nothing they could not have been told
-        // from `gleam.toml`.
-        check_windows_erts(*target, &spec, crate::platform::HOST)?;
-        let erts = {
-            let _phase = diag.phase("erts");
-            match &sources {
-                Some(sources) => crate::erts_source::resolve_in(
-                    &spec,
-                    target,
-                    &SourceContext {
-                        catalog_paths: &sources.catalog_paths,
-                        cache_root: &sources.cache_root,
-                        net: &sources.net,
-                        host_release: sources.host_release,
-                        otp_version: &sources.otp_version,
-                        variant: opts
-                            .target_config
-                            .get(&target.name())
-                            .and_then(|config| config.otp_variant.as_deref()),
-                        diag,
-                    },
-                )?,
-                None => crate::erts_source::resolve(&spec, target)?,
+        let mut target_warnings = Vec::new();
+        let outcome = (|| -> Result<BuildReport, BundleError> {
+            let spec = erts_spec_for(opts, *target)?;
+            // Before the runtime is fetched rather than after: a catalogue entry
+            // downloaded and then found to be the wrong operating system costs the
+            // user minutes and tells them nothing they could not have been told
+            // from `gleam.toml`.
+            check_windows_erts(*target, &spec, crate::platform::HOST)?;
+            let erts = {
+                let _phase = diag.phase("erts");
+                match &sources {
+                    Some(sources) => crate::erts_source::resolve_in(
+                        &spec,
+                        target,
+                        &SourceContext {
+                            catalog_paths: &sources.catalog_paths,
+                            cache_root: &sources.cache_root,
+                            net: &sources.net,
+                            host_release: sources.host_release,
+                            otp_version: &sources.otp_version,
+                            variant: opts
+                                .target_config
+                                .get(&target.name())
+                                .and_then(|config| config.otp_variant.as_deref()),
+                            diag,
+                        },
+                    )?,
+                    None => crate::erts_source::resolve(&spec, target)?,
+                }
+            };
+            target_warnings.extend(erts.warnings.iter().cloned());
+            // Host and catalogue resolution can discover a runtime root that
+            // was not named during preflight. Protect the actual input tree.
+            let mut checked = opts.clone();
+            checked.otp_root = Some(erts.otp.root.clone());
+            validate_output_paths(&checked, &entry.path, &[])?;
+            diag.kv(
+                "erts",
+                &[
+                    ("target", &target.name()),
+                    ("source", &erts.provenance),
+                    ("linkage", erts.linkage.as_str()),
+                ],
+            );
+
+            let set = {
+                let _phase = diag.phase("closure");
+                closure::app_dependency_closure(
+                    shipment,
+                    &erts.otp.lib,
+                    std::slice::from_ref(&opts.app),
+                    &opts.otp_applications,
+                )?
+            };
+            diag.kv("closure", &[("apps", &set.len().to_string())]);
+
+            let job = TargetJob {
+                target: *target,
+                erts: &erts,
+                set: &set,
+                natives,
+            };
+            assemble_and_write(
+                opts,
+                &job,
+                &entry.path,
+                entry.len,
+                &work.join(target.name()),
+                diag,
+                &mut TargetProgress {
+                    published: &mut rows,
+                    warnings: &mut target_warnings,
+                },
+            )
+        })();
+        // Keep findings at the time they are observed, so a later failure to
+        // publish a manifest cannot discard warnings about its executable.
+        warnings.extend(target_warnings.into_iter().map(|warning| {
+            if attributed {
+                format!("{}: {warning}", target.name())
+            } else {
+                warning
+            }
+        }));
+        let report = match outcome {
+            Ok(report) => report,
+            Err(source) => {
+                return Err(BuildFailure {
+                    source: Box::new(source),
+                    completed: rows,
+                    failed_target: Some(*target),
+                    unattempted: stubs[position + 1..]
+                        .iter()
+                        .map(|entry| entry.target)
+                        .collect(),
+                    staging: None,
+                    warnings,
+                });
             }
         };
-        diag.kv(
-            "erts",
-            &[
-                ("target", &target.name()),
-                ("source", &erts.provenance),
-                ("linkage", erts.linkage.as_str()),
-            ],
-        );
-
-        let set = {
-            let _phase = diag.phase("closure");
-            closure::app_dependency_closure(
-                shipment,
-                &erts.otp.lib,
-                std::slice::from_ref(&opts.app),
-                &opts.otp_applications,
-            )?
-        };
-        diag.kv("closure", &[("apps", &set.len().to_string())]);
-
-        let job = TargetJob {
-            target: *target,
-            erts: &erts,
-            set: &set,
-            natives,
-        };
-        let mut report = assemble_and_write(opts, &job, &entry.path, entry.len, work, diag)?;
-        // The runtime's own warnings are this target's warnings. They go in
-        // ahead of the ones the assembly raised, because a runtime a user was
-        // warned about is what every later line is about, and they take the
-        // same target attribution as everything else below.
-        report.warnings.splice(0..0, erts.warnings.iter().cloned());
-        rows.extend(report.targets.iter().cloned());
-        warnings.extend(
-            std::mem::take(&mut report.warnings)
-                .into_iter()
-                .map(|warning| {
-                    if attributed {
-                        format!("{}: {warning}", target.name())
-                    } else {
-                        warning
-                    }
-                }),
-        );
         if whole.is_none() {
             whole = Some(report);
         }
@@ -955,8 +1456,14 @@ fn build_each_target(
             report.warnings = warnings;
             Ok(report)
         }
-        None => Err(BundleError::NoTargets),
+        None => Err(BuildFailure::before_targets(BundleError::NoTargets, opts)),
     }
+}
+
+/// Evidence accumulated while a target is being assembled, including failures.
+struct TargetProgress<'a> {
+    published: &'a mut Vec<TargetBuild>,
+    warnings: &'a mut Vec<String>,
 }
 
 /// One target's inputs, as [`build_each_target`] resolved them.
@@ -987,6 +1494,7 @@ fn assemble_and_write(
     stub_len: u64,
     work: &Path,
     diag: &Diag,
+    progress: &mut TargetProgress<'_>,
 ) -> Result<BuildReport, BundleError> {
     let TargetJob {
         target,
@@ -1014,7 +1522,9 @@ fn assemble_and_write(
     // Before stripping and before the tree is measured: the two files are part
     // of the artifact, so they belong in the size report and in the listing the
     // payload is packed from.
-    let mut warnings = stage_runtime_files(opts, &mut staged, diag)?;
+    progress
+        .warnings
+        .extend(stage_runtime_files(opts, &mut staged, diag)?);
 
     // What this artifact carries, which is the closure and not the whole
     // shipment: an object in an application nothing depends on never travels,
@@ -1061,11 +1571,15 @@ fn assemble_and_write(
             ],
         );
         native::apply(&done.replacements, staged.root())?;
-        warnings.extend(done.warnings);
+        progress.warnings.extend(done.warnings);
         done.replacements
     };
 
-    let stripper = beam_stripper(erts)?;
+    let stripper = if opts.strip.beams {
+        beam_stripper(erts)?
+    } else {
+        None
+    };
     let strip_report = {
         let _phase = diag.phase("strip");
         crate::strip::strip(staged.root(), stripper.as_ref().unwrap_or(otp), &opts.strip)?
@@ -1083,14 +1597,30 @@ fn assemble_and_write(
         set,
         native_manifest_rows(natives, &replaced, staged.root())?,
     )?;
-    let (payload_len, sha256) = {
+    let (payload_len, sha256, total_len) = {
         let _phase = diag.phase("pack");
         write_artifact(opts, target, &out, stub, stub_len, staged.root(), &manifest)?
     };
 
+    let mut artifact = TargetBuild {
+        target,
+        out: out.clone(),
+        manifest_copy: None,
+        stub_len,
+        payload_len,
+        total_len,
+        sha256: sha256.clone(),
+        otp: erts.provenance_block(),
+    };
+    progress.published.push(artifact.clone());
+
     let manifest_copy = opts.manifest_copy_path(target);
     if let Some(copy) = &manifest_copy {
         write_manifest_copy(copy, &manifest)?;
+        artifact.manifest_copy = manifest_copy;
+        if let Some(last) = progress.published.last_mut() {
+            last.manifest_copy.clone_from(&artifact.manifest_copy);
+        }
     }
 
     let explain = opts.explain.then(|| BuildExplain {
@@ -1103,27 +1633,16 @@ fn assemble_and_write(
         out: out.clone(),
         stub_len,
         payload_len,
-        total_len: stub_len
-            .saturating_add(payload_len)
-            .saturating_add(TRAILER_LEN),
+        total_len,
         sha256: sha256.clone(),
         strip: strip_report,
         size_report,
         manifest,
-        targets: vec![TargetBuild {
-            target,
-            out,
-            manifest_copy,
-            stub_len,
-            payload_len,
-            total_len: stub_len
-                .saturating_add(payload_len)
-                .saturating_add(TRAILER_LEN),
-            sha256,
-            otp: erts.provenance_block(),
-        }],
+        targets: vec![artifact],
         staging: None,
-        warnings,
+        // build_each_target folds the progress warnings on both success and
+        // failure, with consistent target attribution.
+        warnings: Vec::new(),
         explain,
     })
 }
@@ -1209,7 +1728,7 @@ fn write_manifest_copy(path: &Path, manifest: &Manifest) -> Result<(), BundleErr
             reason: error.to_string(),
         })?;
     text.push('\n');
-    std::fs::write(path, text).map_err(|error| BundleError::ManifestCopy {
+    crate::output::atomic_write(path, text.as_bytes()).map_err(|error| BundleError::ManifestCopy {
         path: path.to_path_buf(),
         reason: error.to_string(),
     })
@@ -1498,7 +2017,7 @@ fn write_artifact(
     stub_len: u64,
     staging: &Path,
     manifest: &Manifest,
-) -> Result<(u64, String), BundleError> {
+) -> Result<(u64, String, u64), BundleError> {
     if target.os == Os::Macos {
         return write_macos_artifact(opts, out, stub, staging, manifest);
     }
@@ -1529,6 +2048,12 @@ fn write_artifact(
                 path: stub.to_path_buf(),
                 expected: stub_len,
                 actual: copied,
+            });
+        }
+
+        if crate::fault::point("output-write") == Some("fail") {
+            return Err(BundleError::Fault {
+                point: "output-write",
             });
         }
 
@@ -1566,12 +2091,31 @@ fn write_artifact(
             })?;
     }
 
+    temp.as_file()
+        .sync_all()
+        .map_err(|source| BundleError::Io {
+            what: "cannot sync the completed artifact".to_owned(),
+            source,
+        })?;
+    let total_len = temp
+        .as_file()
+        .metadata()
+        .map_err(|source| BundleError::Io {
+            what: "cannot measure the completed artifact".to_owned(),
+            source,
+        })?
+        .len();
+    if crate::fault::point("output-persist") == Some("fail") {
+        return Err(BundleError::Fault {
+            point: "output-persist",
+        });
+    }
     temp.persist(out).map_err(|error| BundleError::Io {
         what: format!("cannot write the artifact to {}", out.display()),
         source: error.error,
     })?;
 
-    Ok((packed.len, hex::encode(packed.sha256)))
+    Ok((packed.len, hex::encode(packed.sha256), total_len))
 }
 
 /// [`write_artifact`]'s darwin arm: the payload is appended inside the stub's
@@ -1581,11 +2125,8 @@ fn write_artifact(
 /// for why a Mach-O cannot be built the plain ELF/PE way, and why the payload
 /// cannot live in a new section either.
 ///
-/// Unlike [`write_artifact`] above, this does not go through a temporary
-/// file and an atomic rename — [`crate::sign_macos::inject_and_sign`] writes
-/// `out` directly, so this function creates `out`'s parent directory and
-/// makes the result executable itself, the same two things the ELF/PE arm
-/// gets from `NamedTempFile` and its own `set_permissions` call. There is no
+/// Like [`write_artifact`], the signed bytes and executable permissions are
+/// completed in a temporary file before the final name is replaced. There is no
 /// macOS toolchain on this host to build a darwin stub with, so a build
 /// reaching this function through `ginary build --target macos-*` end to end
 /// has no coverage here; what is checked on this machine is this function
@@ -1602,7 +2143,7 @@ fn write_macos_artifact(
     stub: &Path,
     staging: &Path,
     manifest: &Manifest,
-) -> Result<(u64, String), BundleError> {
+) -> Result<(u64, String, u64), BundleError> {
     let stub_bytes = std::fs::read(stub).map_err(|source| BundleError::Io {
         what: format!("cannot read the stub at {}", stub.display()),
         source,
@@ -1634,37 +2175,129 @@ fn write_macos_artifact(
         source,
     })?;
 
+    let temporary = tempfile::NamedTempFile::new_in(dir).map_err(|source| BundleError::Io {
+        what: format!("cannot create a temporary artifact in {}", dir.display()),
+        source,
+    })?;
+
+    for (point, active) in [
+        ("output-write", crate::fault::point("output-write")),
+        ("artifact-sign", crate::fault::point("artifact-sign")),
+    ] {
+        if active == Some("fail") {
+            std::fs::write(temporary.path(), &stub_bytes[..stub_bytes.len().min(64)]).map_err(
+                |source| BundleError::Io {
+                    what: "cannot write the partial test artifact".to_owned(),
+                    source,
+                },
+            )?;
+            return Err(BundleError::Fault { point });
+        }
+    }
+
     crate::sign_macos::inject_and_sign(
         &stub_bytes,
         &payload_with_trailer,
-        out,
+        temporary.path(),
         &crate::sign_macos::MacSignCfg {
             codesign: crate::sign_macos::CodeSign::Adhoc,
         },
     )
     .map_err(BundleError::MacSign)?;
 
+    if crate::fault::point("artifact-sign") == Some("corrupt") {
+        let mut signed = std::fs::read(temporary.path()).map_err(|source| BundleError::Io {
+            what: "cannot read the signed test artifact".to_owned(),
+            source,
+        })?;
+        if let Some(last) = signed.last_mut() {
+            *last ^= 1;
+        }
+        std::fs::write(temporary.path(), signed).map_err(|source| BundleError::Io {
+            what: "cannot alter the signed test artifact".to_owned(),
+            source,
+        })?;
+    }
+
+    // Verify the finished file through the same reader consumers use. Signing
+    // rewrites layout and headers, so validating only the packed input cannot
+    // establish that the completed executable still exposes that payload.
+    let info = crate::inspect::open(temporary.path()).map_err(|error| BundleError::Io {
+        what: "cannot inspect the completed macOS artifact".to_owned(),
+        source: std::io::Error::other(error),
+    })?;
+    let verification = crate::inspect::verify(&info).map_err(|error| BundleError::Io {
+        what: "cannot verify the completed macOS artifact payload".to_owned(),
+        source: std::io::Error::other(error),
+    })?;
+    if !verification.ok() {
+        return Err(BundleError::Io {
+            what: "the completed macOS artifact payload failed verification".to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "expected {}, found {}",
+                    verification.expected, verification.actual
+                ),
+            ),
+        });
+    }
+    let signed = std::fs::read(temporary.path()).map_err(|source| BundleError::Io {
+        what: "cannot read the completed macOS artifact signature".to_owned(),
+        source,
+    })?;
+    crate::sign_macos::verify_ad_hoc(&signed).map_err(BundleError::MacSign)?;
+
     // Mirrors `write_artifact`'s ELF/PE arm above, which chmods its temp
-    // file before publishing it: `inject_and_sign` writes `out` with
+    // file before publishing it: `inject_and_sign` writes the temporary with
     // `std::fs::write`, which gives it the platform default (not
     // executable), so the artifact is unusable until this runs.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(out, std::fs::Permissions::from_mode(ARTIFACT_MODE)).map_err(
-            |source| BundleError::Io {
-                what: "cannot make the artifact executable".to_owned(),
-                source,
-            },
-        )?;
+        std::fs::set_permissions(
+            temporary.path(),
+            std::fs::Permissions::from_mode(ARTIFACT_MODE),
+        )
+        .map_err(|source| BundleError::Io {
+            what: "cannot make the artifact executable".to_owned(),
+            source,
+        })?;
     }
 
-    Ok((packed.len, hex::encode(packed.sha256)))
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|source| BundleError::Io {
+            what: "cannot sync the completed macOS artifact".to_owned(),
+            source,
+        })?;
+    let total_len = temporary
+        .as_file()
+        .metadata()
+        .map_err(|source| BundleError::Io {
+            what: "cannot measure the completed macOS artifact".to_owned(),
+            source,
+        })?
+        .len();
+    if crate::fault::point("output-persist") == Some("fail") {
+        return Err(BundleError::Fault {
+            point: "output-persist",
+        });
+    }
+    temporary.persist(out).map_err(|error| BundleError::Io {
+        what: format!("cannot write the artifact to {}", out.display()),
+        source: error.error,
+    })?;
+    Ok((packed.len, hex::encode(packed.sha256), total_len))
 }
 
 /// Why a build did not produce an artifact.
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
+    /// A failure after the build published artifacts or retained staging.
+    #[error(transparent)]
+    Incomplete(Box<BuildFailure>),
     /// One target's stub could not be found or could not be proved.
     ///
     /// Boxed because [`crate::stub::StubError`] carries a search list and this
@@ -1700,10 +2333,8 @@ pub enum BundleError {
     /// The runtime for one target could not be resolved.
     #[error("cannot resolve the runtime to bundle")]
     Erts(#[from] crate::erts_source::ErtsError),
-    /// A Windows build named a runtime source that cannot hold a Windows tree.
-    #[error(
-        "cannot bundle a runtime for {target} from `{spec}`: {WINDOWS_ERTS_FROM_CATALOG}, or from a `dir:` source holding one"
-    )]
+    /// A Windows build named a runtime source this host cannot resolve for it.
+    #[error("cannot bundle a runtime for {target} from `{spec}`: {WINDOWS_ERTS_FROM_CATALOG}")]
     WindowsErtsUnavailable {
         /// The target that was being built for.
         target: Target,
@@ -2318,6 +2949,26 @@ mod tests {
             out.is_file(),
             "the artifact must exist at {}",
             out.display()
+        );
+    }
+
+    #[test]
+    fn publishing_a_macos_artifact_does_not_truncate_a_hardlink_peer() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let staging = dir.path().join("staging");
+        macos_staging_tree(&staging);
+        let opts = options(dir.path(), "");
+        let previous = dir.path().join("previous");
+        let out = dir.path().join("next");
+        std::fs::write(&previous, b"previous executable").expect("previous artifact");
+        std::fs::hard_link(&previous, &out).expect("artifact alias");
+
+        write_macos_artifact(&opts, &out, &macos_stub_path(), &staging, &macos_manifest())
+            .expect("new artifact");
+
+        assert!(
+            std::fs::read(previous).expect("previous artifact survives") == b"previous executable",
+            "a published artifact replaces its own directory entry, not another file's bytes"
         );
     }
 

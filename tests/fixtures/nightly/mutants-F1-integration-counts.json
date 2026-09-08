@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "source": "F1 integrated with origin/main E23 (2e19b9d), 2026-09-09, Windows x86_64",
+  "command": "cargo mutants --list --json --diff --file src/<module>.rs --features fault-injection",
+  "tool_version": "27.1.0",
+  "executed_mutants": 0,
+  "total_selected": 960,
+  "modules": {
+    "appfile": 207,
+    "cache": 282,
+    "closure": 98,
+    "launch": 104,
+    "payload": 121,
+    "trailer": 27,
+    "verify": 121
+  },
+  "source_sha256": {
+    "appfile": "0e9dae2434c6c35d4a5f0fdb081393e2aba2e2f2dcd95213cd998262178c8aab",
+    "cache": "c1014cf60401177a4034d8329b4e7536301279f2548cbfe053255682371f844e",
+    "closure": "21a939faf9b51b58fe0157112427f6ac72b723376de8ee06272aaef9ef2b076e",
+    "launch": "5117efc43e6db0afb54d5342fcfdd69a8d0e4920433d7cd47af74c6fca46bf2b",
+    "payload": "96555f485423c3ec26bb25e23ca5f64451a7ee62f9b100913b1b7297f4c66984",
+    "trailer": "36aac6a8f65c5a87e4548eea0badcc94d518b7219517ba3bf5827033d78b234e",
+    "verify": "a531ab293e3cacf2e60648c06963e3489df86fc1228bbf38965903d4281e010d"
+  },
+  "discovery_sha256": {
+    "appfile": "44dc5e9cbcf5539bb34ca133edce2d4b11ef888793f8913831b07c9844e20d7d",
+    "cache": "818478c023dadd94fbb4c4b6d7e2e29f730a81a9690f2dc23626d798b7e62744",
+    "closure": "b58b46fbf7f50681a960a553fc3c4d0ac49831adcff948a2200139939e3a699e",
+    "launch": "c47f4401e309592c339705620bfc293e4397fa22ecfd3740ba4e2142adc5f5b1",
+    "payload": "85b185d3e39fad0fab80c3b99915d06dacc094da1a88ea44af85d8356b4a5935",
+    "trailer": "3cdb665995986cfe01f0f501c6f62a488de4e99500254a15dbba52b04bcc03ba",
+    "verify": "32e48f5edde2bbece155ef5fb34388bd1b5ec4de2d2d106d7de556e0d50db319"
+  },
+  "evidence": ".cache/assurance/F1/integration-mutation-recount/summary.json",
+  "scope": "Discovery only for the seven selected modules; no mutation execution or baseline is claimed. Each source hash was unchanged across its discovery command. Historical F1 enumeration and execution records remain unchanged."
+}

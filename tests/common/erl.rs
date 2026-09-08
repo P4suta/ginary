@@ -51,6 +51,85 @@ use crate::common::bounded::run_bounded;
 /// helper must report rather than a hang the whole suite waits out.
 pub const RUN_BUDGET: Duration = Duration::from_secs(60);
 
+/// Compiles a real module with the same runtime that will strip it.
+///
+/// The committed parser fixtures were compiled by OTP 29. Their compact atom
+/// table is valid BEAM, but OTP 27's `beam_lib` cannot read that newer format.
+/// Execution tests therefore compile their input locally; parser tests retain
+/// the original compiler-produced fixtures unchanged. `directory` is a fresh
+/// directory owned by the caller, outside the tree stripping will rewrite.
+#[cfg(feature = "cli")]
+pub fn compile_strip_fixture(otp: &ginary::otp::OtpInfo, directory: &Path) -> PathBuf {
+    std::fs::create_dir(directory).expect("a fresh compiler fixture directory");
+    let source = directory.join("ginary_strip_fixture.erl");
+    std::fs::write(
+        &source,
+        "-module(ginary_strip_fixture).\n\
+         -moduledoc \"A real module used to verify debug and documentation removal.\".\n\
+         -export([greeting/0]).\n\
+         -doc \"The executable code must survive stripping.\".\n\
+         greeting() -> \"hello from the host compiler\".\n",
+    )
+    .expect("the Erlang source fixture");
+    let erl = otp
+        .root
+        .join("bin")
+        .join(ginary::platform::erl_program(ginary::platform::HOST));
+    let mut command = Command::new(&erl);
+    command
+        .current_dir(directory)
+        .env_remove("ERL_FLAGS")
+        .env_remove("ERL_AFLAGS")
+        .env_remove("ERL_ZFLAGS")
+        .env_remove("ERL_LIBS")
+        .args([
+            "+S",
+            "1:1",
+            "+SDio",
+            "1",
+            "+SDcpu",
+            "1",
+            "-noshell",
+            "-noinput",
+            "-env",
+            "ERL_CRASH_DUMP",
+            ginary::platform::null_device(ginary::platform::HOST),
+            "-eval",
+            "[Source]=init:get_plain_arguments(), \
+             case compile:file(Source,[debug_info,return_errors,return_warnings]) of \
+             {ok,_,_} -> halt(0); \
+             Error -> io:format(standard_error,\"~p~n\",[Error]), halt(1) end.",
+            "-extra",
+            "ginary_strip_fixture.erl",
+        ]);
+    let output = run_bounded(
+        &mut command,
+        RUN_BUDGET,
+        "compile a host-compatible BEAM fixture",
+    );
+    assert!(
+        output.status.success(),
+        "{} failed to compile the fixture: {}\n{}",
+        erl.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let module = directory.join("ginary_strip_fixture.beam");
+    let bytes = std::fs::read(&module).expect("the compiler produced a BEAM file");
+    for chunk in [
+        ginary::beam::CODE_CHUNK,
+        ginary::beam::DEBUG_INFO_CHUNK,
+        ginary::beam::DOCS_CHUNK,
+    ] {
+        assert!(
+            ginary::beam::has_chunk(&bytes, &chunk),
+            "the real compiler fixture must contain {} before stripping",
+            String::from_utf8_lossy(&chunk)
+        );
+    }
+    module
+}
+
 /// The directory [`run_staged`] runs the application in.
 ///
 /// A fresh empty directory under `home`, so a test can assert on what the run

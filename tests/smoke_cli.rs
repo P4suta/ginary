@@ -91,7 +91,9 @@ fn doctor_json_has_the_documented_schema() {
     let value: Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("`doctor --json` prints JSON");
 
-    assert_eq!(value["format_version"], Value::from(1));
+    assert_eq!(value["format_version"], Value::from(2));
+    assert!(value["tool_probes"].is_array());
+    assert!(value["findings"].is_array());
     assert_eq!(value["rustc_required"], Value::from(false));
     assert!(value["host_target"].is_string(), "host_target: {value:?}");
     assert!(

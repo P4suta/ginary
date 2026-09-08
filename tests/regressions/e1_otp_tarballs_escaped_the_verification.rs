@@ -75,9 +75,9 @@ fn the_checksum_manifest_covers_the_otp_tarballs_and_catalog() {
          unchecksummed:\n{command}"
     );
     assert!(
-        command.contains("find") && command.contains("sha256sum"),
+        command.contains("otp merge") && command.contains("sha256sum --check"),
         "the SHA256SUMS command must checksum every asset in the directory \
-         (a `find ... | sha256sum` glob-all form), so a new asset kind cannot \
+         through the checked distribution inventory, so a new asset kind cannot \
          slip past the manifest:\n{command}"
     );
 }
@@ -99,12 +99,12 @@ fn the_attestation_covers_the_otp_tarballs_and_catalog() {
 
 #[test]
 fn the_redownload_verification_is_not_narrowed_to_ginary_only() {
-    let job = publish_job();
-    let step = step_containing(&job, "Re-download the uploaded assets");
+    let step = read("scripts/ci/publish-distribution.sh");
     assert!(
         !step.contains("ginary-*"),
         "the re-download and the attestation-verify loop must not restrict to \
          `ginary-*`, which drops the OTP runtime tarballs and `catalog.json` \
          from `sha256sum --check` and `gh attestation verify`:\n{step}"
     );
+    assert!(step.contains("gh release download") && step.contains("done < SHA256SUMS"));
 }
