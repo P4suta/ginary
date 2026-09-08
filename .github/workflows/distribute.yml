@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 name: Distribute
 
-# Build and verify an existing tag. Hosted release mutation requires publish=true.
+# Run from the existing tag being built. Hosted release mutation requires publish=true.
 # The default run produces only reviewable workflow artifacts.
 on:
   workflow_dispatch:
@@ -46,17 +46,36 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require the requested tag's execution context
+        id: execution-context
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+            echo "Distribution must run from the requested tag: select that tag as the workflow ref and tag input." >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - id: revision
+        name: Verify the tag still identifies the event commit
+        shell: bash
+        run: |
+          head_commit=$(git rev-parse HEAD)
+          tag_commit=$(git rev-parse --verify "$GITHUB_REF^{commit}")
+          if [[ "$head_commit" != "$GITHUB_SHA" || "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "The checkout or tag differs from the workflow event commit; start a new run from the intended tag." >&2
+            exit 1
+          fi
+          echo "commit=$head_commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
       - run: scripts/ci/version-consistency.sh "$RELEASE_TAG"
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-      - id: revision
-        run: |
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
   # The full binary and the launcher-only stub for the four Linux targets, via
   # cross, each with the catalog OTP tarball its runtime comes from.
@@ -85,7 +104,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.version-check.outputs.commit }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -153,7 +172,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.version-check.outputs.commit }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -206,7 +225,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.version-check.outputs.commit }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -252,7 +271,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.version-check.outputs.commit }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable

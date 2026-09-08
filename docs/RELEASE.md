@@ -205,8 +205,23 @@ release is visible only to maintainers, and its assets do not exist until distri
 
 `distribute.yml` has `workflow_dispatch` and `workflow_call` inputs: a required existing `tag`
 and `publish`, which defaults to `false`. A published-release event never starts distribution.
-The tag is resolved once, and every builder checks out that same commit with its commit time as
-`SOURCE_DATE_EPOCH`.
+The workflow must itself run from that same tag. Before checkout it rejects a branch execution
+context or a different tag, so code selected by a tag input cannot execute with the default
+branch's cache privileges. Every builder checks out the immutable event commit. Before any
+repository script runs, the version job checks that the fetched tag still identifies that
+commit and records its commit time as `SOURCE_DATE_EPOCH`.
+
+After separate authorization to run a hosted rehearsal against an existing version tag:
+
+```console
+$ gh workflow run distribute.yml --ref v0.1.0 -f tag=v0.1.0 -f publish=false
+```
+
+Selecting `main` as the workflow ref while supplying a tag input fails before checkout. A
+reusable-workflow caller must also run from the same tag: `workflow_call` inherits the caller's
+event ref and commit. For manual dispatch, the workflow file comes from the selected tag,
+so older tags retain their older workflow behavior; changes on main do not retroactively
+update them.
 
 The seven native/cross builders produce a full binary, a stub and an OTP runtime for each target.
 Linux repacks the verified upstream archive; Windows and macOS copy and validate the OTP root

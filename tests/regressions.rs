@@ -540,6 +540,8 @@ mod f1_cache_maintenance_discarded_live_work;
 #[cfg(feature = "cli")]
 #[path = "regressions/f1_diagnosis_lost_failure_evidence.rs"]
 mod f1_diagnosis_lost_failure_evidence;
+#[path = "regressions/f1_distribution_executed_a_tag_in_the_default_branch_context.rs"]
+mod f1_distribution_executed_a_tag_in_the_default_branch_context;
 #[path = "regressions/f1_foreign_payload_paths_used_the_hosts_separators.rs"]
 mod f1_foreign_payload_paths_used_the_hosts_separators;
 #[path = "regressions/f1_formal_state_evidence_was_hidden.rs"]
