@@ -137,6 +137,24 @@ description = "Build the API documentation with rustdoc warnings denied"
 env = { RUSTDOCFLAGS = "-Dwarnings" }
 run = "cargo doc --no-deps"
 
+[tasks."doc:stub"]
+description = "Build the launcher-only stub's documentation, with warnings denied"
+# The third flavor again, this time for rustdoc. `doc` builds default features
+# only, so a `missing_docs`, a bare URL or an invalid HTML tag in code the `cli`
+# feature gates *out* was checked by nothing at all — E23 found it, out of
+# subject, and recorded it under "what this leaves".
+#
+# `-A rustdoc::broken_intra_doc_links` and only that one. The crate-level
+# documentation is a module history that links to every module by name, and
+# roughly seventy of those modules do not exist in this build: `[`cli`]`,
+# `[`bundle`]`, `[`otp`]` and the rest are `cli`-gated, so the links cannot
+# resolve here and their failing to is not a defect. Nothing is lost by
+# allowing them, because the stub build's items are a subset of the full
+# build's: every intra-doc link in code that compiles here also compiles under
+# `doc`, which denies the same lint.
+env = { RUSTDOCFLAGS = "-Dwarnings -Arustdoc::broken_intra_doc_links" }
+run = "cargo doc --no-deps --no-default-features"
+
 [tasks.build]
 description = "Build the release binary"
 run = "cargo build --release"
@@ -149,6 +167,47 @@ description = "Clean-room artifact smoke test in Docker"
 # the CI job sets it. `GINARY_BIN` points the script at a release binary, which
 # is what the artifact size in `docs/dev/log/A4.md` was measured with.
 run = "scripts/smoke.sh"
+
+[tasks."smoke:macos"]
+description = "Package, run and check the signature of a native macOS artifact"
+# The macOS half of `smoke`. `scripts/ci/macos-smoke.sh` is the committed script
+# the `macos` CI job runs, and this task runs that same file rather than an
+# inline copy of it, the way `smoke` runs `scripts/smoke.sh`: a rehearsal that
+# drifts from the job it rehearses is worse than no rehearsal.
+#
+# The script reads `GITHUB_WORKSPACE` and `GINARY_SMOKE_TARGET` because a runner
+# sets the first; here they are the project root and this host's own target.
+# `mise run stubs:build` fills `target/stubs` and `mise run build` provides the
+# command line tool the script drives — neither is guessed, and a missing one is
+# a sentence rather than a confusing failure inside the script.
+#
+# Evidence lands in `target/assurance/<target>/`: the trace, the cache, both
+# `codesign` reports, the `otool -l` columns of stub and artifact, and
+# `run.json`.
+run = """
+set -eu
+root="${MISE_PROJECT_ROOT:-$PWD}"
+if [ "$(uname -s)" != Darwin ]; then
+  echo "smoke:macos: this task needs a Mac; this host is $(uname -s)" >&2
+  exit 1
+fi
+version=$(sed -n 's/^version = "\\(.*\\)"$/\\1/p' "$root/Cargo.toml" | head -1)
+target="macos-$(uname -m | sed 's/^arm64$/aarch64/')"
+stub="$root/target/stubs/ginary-stub-$version-$target"
+if [ ! -f "$stub" ]; then
+  echo "smoke:macos: no stub at $stub; run 'mise run stubs:build' first" >&2
+  exit 1
+fi
+if [ ! -x "$root/target/release/ginary" ]; then
+  echo "smoke:macos: no release binary; run 'mise run build' first" >&2
+  exit 1
+fi
+cd "$root"
+GITHUB_WORKSPACE="$root" \
+GINARY_STUB_DIR="$root/target/stubs" \
+GINARY_SMOKE_TARGET="$target" \
+  bash scripts/ci/macos-smoke.sh
+"""
 
 [tasks.package]
 description = "Package the hello_ffi fixture and print the size report"
@@ -258,11 +317,14 @@ description = "Cross-build the launcher-only stubs into target/stubs and print t
 # so the host stub is built without a docker daemon and the other four need
 # one.
 #
-# Five targets, not seven: there is no macOS toolchain here and none that can
-# be installed in a Linux container, so `macos-x86_64` and `macos-aarch64`
-# stubs come from the CI release build on a macOS runner and from nowhere else.
-# A `ginary build --target macos-*` on this machine finds no stub and says so,
-# which is the honest answer.
+# Five targets through `cross`, and on a Mac the two darwin ones as well.
+# There is no macOS cross toolchain, and none that can be installed in a Linux
+# container, so on Linux those two stubs come from the CI release build on a
+# macOS runner and from nowhere else — a `ginary build --target macos-*` there
+# finds no stub and says so, which is the honest answer. On a macOS host they
+# are not cross builds at all: the host one is `cargo build` and the other
+# architecture is Apple's own `--target`, which needs `rustup target add`. A
+# missing rustup target is reported and skipped rather than silently absent.
 #
 # A target that fails to build is reported and the task carries on to the next
 # one, then exits non-zero: a stub directory that is missing one target is
@@ -275,6 +337,7 @@ out="$root/target/stubs"
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
 mkdir -p "$out"
 failed=""
+skipped=""
 # `cross` mounts the project at a path of its own choosing inside the
 # container, so a host `--manifest-path` names a file that is not there. The
 # working directory is what it maps, and it is the only way to tell it which
@@ -306,18 +369,51 @@ build() {
   fi
 }
 
+# The darwin half, on the only host that can build it. `cargo` rather than
+# `cross`: there is no container image for an Apple toolchain, and there does
+# not need to be one here — this *is* the toolchain.
+build_darwin() {
+  name="$1"; triple="$2"
+  echo "stubs:build: $name ($triple)"
+  if ! rustup target list --installed | grep -qx "$triple"; then
+    echo "stubs:build: SKIPPED $name: rustup target $triple is not installed;" >&2
+    echo "stubs:build:   run \`rustup target add $triple\` to build it" >&2
+    skipped="$skipped $name"
+    return
+  fi
+  if cargo build --release --target "$triple" --no-default-features \
+       --target-dir target/darwin \
+     && cp "$root/target/darwin/$triple/release/ginary" "$out/ginary-stub-$version-$name"; then
+    :
+  else
+    echo "stubs:build: FAILED $name ($triple)" >&2
+    failed="$failed $name"
+  fi
+}
+
 build linux-x86_64-gnu    x86_64-unknown-linux-gnu
 build linux-x86_64-musl   x86_64-unknown-linux-musl
 build linux-aarch64-gnu   aarch64-unknown-linux-gnu
 build linux-aarch64-musl  aarch64-unknown-linux-musl
 build windows-x86_64      x86_64-pc-windows-gnu .exe
+if [ "$(uname -s)" = Darwin ]; then
+  build_darwin macos-x86_64  x86_64-apple-darwin
+  build_darwin macos-aarch64 aarch64-apple-darwin
+fi
 
 echo
 echo "stubs in $out (ginary $version):"
 ls -l "$out" | awk 'NR>1 { printf "  %-48s %10d bytes\n", $9, $5 }'
 echo
-echo "macos-x86_64 and macos-aarch64: no macOS toolchain here; those stubs come"
-echo "from the CI release build and from nowhere else."
+if [ "$(uname -s)" = Darwin ]; then
+  echo "macos-x86_64 and macos-aarch64: built natively above, or skipped with a reason."
+else
+  echo "macos-x86_64 and macos-aarch64: no macOS toolchain here; those stubs come"
+  echo "from a macOS host or the CI release build and from nowhere else."
+fi
+if [ -n "$skipped" ]; then
+  echo "stubs:build: these targets were skipped, with a reason above:$skipped" >&2
+fi
 
 if [ -n "$failed" ]; then
   echo "stubs:build: these targets did not build:$failed" >&2
@@ -432,7 +528,7 @@ echo "clean:cache: kept target/stubs (mise run stubs:build) and dist/otp (mise r
 '''
 
 [tasks.check]
-description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc and deny"
+description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc, doc:stub and deny"
 run = [
   "mise run lint",
   "mise run lint:plain",
@@ -440,5 +536,6 @@ run = [
   "mise run test",
   "mise run test:stub",
   "mise run doc",
+  "mise run doc:stub",
   "mise run deny",
 ]

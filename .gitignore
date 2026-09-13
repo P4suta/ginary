@@ -2,6 +2,11 @@
 /tools/mutation-plan/target/
 /.cache/
 /build/
+# `mise run mutants` writes its working copy, its logs and its outcome
+# lists into the project root. `fuzz/.gitignore` already covers the
+# equivalent for the fuzz targets.
+/mutants.out/
+/mutants.out.old/
 # The repack pipeline writes 40 MB tarballs and one small catalog into dist/otp.
 # The catalog is the reproducible record of what the pipeline produced and is
 # committed; the tarballs it names, and everything else under dist/, are not.
