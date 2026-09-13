@@ -185,8 +185,11 @@ impl<'ast> Visit<'ast> for Collector {
         (visit_const_param, ConstParam),
         (visit_type_param, TypeParam),
         (visit_lifetime_param, LifetimeParam),
-        (visit_bare_fn_arg, BareFnArg),
-        (visit_bare_variadic, BareVariadic),
+        // syn 3 renamed both, because a bare `fn(..)` type is a function
+        // *pointer*: `BareFnArg` is `NamedArg` and `BareVariadic` is
+        // `FnPtrVariadic`. Same nodes, same `attrs`, same spans.
+        (visit_named_arg, NamedArg),
+        (visit_fn_ptr_variadic, FnPtrVariadic),
         (visit_receiver, Receiver),
         (visit_variadic, Variadic),
         (visit_field_pat, FieldPat),
@@ -367,10 +370,23 @@ impl<'ast> Visit<'ast> for Collector {
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         self.scope(node.span(), &node.attrs);
         self.site(node.span(), "MatchArm");
-        if let Some((_, guard)) = &node.guard {
-            self.site(guard.span(), "MatchArmGuard");
-        }
         visit::visit_arm(self, node);
+    }
+
+    /// The guard of a match arm, which syn 3 moved out of [`syn::Arm`].
+    ///
+    /// Until syn 3 an arm carried `guard: Option<(Token![if], Box<Expr>)>` and
+    /// [`Collector::visit_arm`] read it there. A guard is now a *pattern* —
+    /// `Pat::Guard(PatGuard)` — so the site is recorded from the node that owns
+    /// it. The span is the same expression's, which is what matters: it is the
+    /// span `cargo mutants` reports a `replace match guard … with true` mutant
+    /// at, and a plan whose sites moved would stop matching the campaign it
+    /// plans. `docs/dev/log/F1-macos-native.md` records the plans for all seven
+    /// campaign modules coming out byte-identical across the two versions.
+    fn visit_pat_guard(&mut self, node: &'ast syn::PatGuard) {
+        self.scope(node.span(), &node.attrs);
+        self.site(node.guard.span(), "MatchArmGuard");
+        visit::visit_pat_guard(self, node);
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
