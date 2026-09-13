@@ -522,9 +522,13 @@ mod e23_a_test_expected_the_operating_systems_words_in_english;
 #[path = "regressions/e23_the_deferred_list_carried_an_item_it_said_was_not_deferred.rs"]
 mod e23_the_deferred_list_carried_an_item_it_said_was_not_deferred;
 #[cfg(feature = "cli")]
+#[path = "regressions/e23_the_documents_said_the_launches_had_never_happened.rs"]
+mod e23_the_documents_said_the_launches_had_never_happened;
 #[path = "regressions/e23_the_help_text_denied_the_targets_the_tool_supports.rs"]
 mod e23_the_help_text_denied_the_targets_the_tool_supports;
 #[cfg(feature = "cli")]
+#[path = "regressions/e23_the_release_asked_repack_for_a_target_it_cannot_build.rs"]
+mod e23_the_release_asked_repack_for_a_target_it_cannot_build;
 #[path = "regressions/e23_the_windows_allowlist_named_no_api_set_but_the_crt_one.rs"]
 mod e23_the_windows_allowlist_named_no_api_set_but_the_crt_one;
 #[path = "regressions/e23_the_windows_job_proved_erlang_rather_than_the_launcher.rs"]
