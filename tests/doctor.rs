@@ -26,8 +26,8 @@ use std::time::{Duration, SystemTime};
 use assert_cmd::Command;
 use ginary::config::TargetConfig;
 use ginary::doctor::{
-    self, CACHE_DIR_HINT, CacheProbe, ConfigStatus, CryptoReport, NativeObject, ProjectReport,
-    TargetProbe,
+    self, CACHE_DIR_HINT, CACHE_DIR_WRITE_HINT, CacheProbe, ConfigStatus, CryptoReport,
+    NativeObject, ProjectReport, TargetProbe,
 };
 use ginary::erts_source::{ErtsError, ErtsSourceSpec, ResolvedErts};
 use ginary::native::{self, NativeKind, Verdict};
@@ -103,6 +103,7 @@ fn a_directory_that_cannot_be_written_to_renders_the_hint() {
     let probe = CacheProbe {
         writable: false,
         executable: false,
+        timed_out: false,
         detail: Some("Read-only file system (os error 30)".to_owned()),
     };
 
@@ -113,7 +114,13 @@ fn a_directory_that_cannot_be_written_to_renders_the_hint() {
         text.contains("Read-only file system (os error 30)"),
         "what the operating system said travels verbatim:\n{text}"
     );
-    assert!(text.contains(CACHE_DIR_HINT), "{text}");
+    // The *write* hint, not the `noexec` one. Nothing was written, so the
+    // mount's exec flag was never tested and naming it sends the reader to
+    // `mount(8)` for a problem in the directory's permissions — which is the
+    // argument the line above this one already makes. See
+    // `tests/regressions/f1_a_probe_that_timed_out_was_reported_as_a_noexec_mount.rs`.
+    assert!(text.contains(CACHE_DIR_WRITE_HINT), "{text}");
+    assert!(!text.contains("noexec"), "{text}");
 }
 
 #[test]
@@ -121,6 +128,7 @@ fn a_directory_that_cannot_be_executed_out_of_says_noexec() {
     let probe = CacheProbe {
         writable: true,
         executable: false,
+        timed_out: false,
         detail: Some("Permission denied (os error 13)".to_owned()),
     };
 
@@ -139,6 +147,7 @@ fn a_working_cache_directory_renders_no_hint() {
     let probe = CacheProbe {
         writable: true,
         executable: true,
+        timed_out: false,
         detail: None,
     };
 
@@ -265,18 +274,25 @@ fn a_real_elf_under_priv_is_listed_with_what_it_is() {
     let project = TempProject::named("notify");
     let shipment = project.empty_shipment();
     write(&shipment, "notify/priv/lib/nif.so", &test_binary());
-    let host = ginary::elf::inspect_bytes(&test_binary()).expect("the test binary is ELF");
+    let fixture = ginary::elf::inspect_bytes(&test_binary()).expect("the test binary is ELF");
 
     let report = doctor::project_context(project.root(), SystemTime::now()).expect("a project");
 
+    // The fixture is a committed `x86_64` Linux object whatever host reads it,
+    // so whether it matches is a fact about this machine rather than a
+    // constant: the CPU has to agree *and* this host's own objects have to be
+    // ELF. See
+    // `tests/regressions/f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one.rs`.
+    let matches_host = platform::object_format(HOST) == platform::ObjectFormat::Elf
+        && fixture.machine == Target::host().arch.as_str();
     assert_eq!(
         report.native,
         vec![NativeObject {
             path: "notify/priv/lib/nif.so".to_owned(),
-            machine: host.machine.clone(),
-            kind: native::kind_of_elf(host.kind, host.is_pie),
-            needed: host.needed.clone(),
-            matches_host: true,
+            machine: fixture.machine.clone(),
+            kind: native::kind_of_elf(fixture.kind, fixture.is_pie),
+            needed: fixture.needed.clone(),
+            matches_host,
             verdicts: BTreeMap::new(),
         }]
     );
@@ -617,6 +633,10 @@ fn doctor_json_carries_the_new_members() {
 
     assert_eq!(value["cache_probe"]["writable"], true);
     assert_eq!(value["cache_probe"]["executable"], true);
+    // F1 added it, and a probe that answered `executable: true` cannot have
+    // run out of time — so this is the member *and* the invariant between the
+    // two of them.
+    assert_eq!(value["cache_probe"]["timed_out"], false);
     assert_eq!(value["project"]["name"], "notify");
     assert!(
         value["project"]["native"].is_array(),
