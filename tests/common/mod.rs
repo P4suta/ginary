@@ -37,6 +37,7 @@ pub mod oserror;
 pub mod payload;
 pub mod portability;
 pub mod project;
+pub mod readiness;
 pub mod release;
 pub mod repack;
 pub mod repo;

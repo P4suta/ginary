@@ -2,12 +2,13 @@
 # v1 readiness
 
 This is the fail-closed checklist that decides whether ginary is v1. It enumerates every plan
-phase, A through E, with the acceptance evidence each one produced, marks each item done or
+phase, A through F, with the acceptance evidence each one produced, marks each item done or
 deferred, and names the commit that closed it. An item is **done** only when a test, a script or
-a committed artifact in this repository proves it. An item that needs a runner this machine is
-not — a Mac, a Windows host, a published remote — is **CI-gated**: the workflow is authored and
-committed, and it runs when the repository has a remote. A CI-gated item is never marked done and
-never hand-waved; it says which workflow carries it and in which commit.
+a committed artifact in this repository proves it — or, for work no machine here can run, when a
+hosted run this document names by number did. An item that still needs a runner nobody has
+pointed at it is **CI-gated**: the workflow is authored and committed, and it closes the day a
+run of it can be read. A CI-gated item is never marked done and never hand-waved; it says which
+workflow carries it and in which commit.
 
 The rule is fail-closed: an item with no evidence is not v1-ready, and a deferred item is honest
 about being deferred rather than quietly counted as done.
@@ -21,8 +22,9 @@ arm64, and Windows on x86_64 — together with the tools to read, verify and cro
 artifact: a version-locked stub per target, a local-first OTP catalog, native-code reconciliation
 for the NIFs and port programs a shipment carries, `ginary verify` and `ginary sbom`, and a
 launcher whose cache protocol is modelled in TLA+. The Linux half runs end to end on this
-machine today; the macOS and Windows launches, the catalog publishing and the release provenance
-are authored as CI jobs and run when the repository is published.
+machine today, and the macOS and Windows launches have each been run on a hosted runner of their
+own; the catalog publishing and the release provenance are authored as CI jobs and run when a
+maintainer cuts a release.
 
 ## The evidence, by phase
 
@@ -61,19 +63,26 @@ configuration names four invariants `I1`–`I4`, and `mise run formal` runs TLC 
 deadlock checking on. TLC found two violations during B, both in the model rather than the code,
 and both were corrected; the model now checks clean. `tests/formal.rs` holds the model, its
 configuration and `docs/dev/formal.md` against the tree so none rots. **Line coverage is gated at
-90%** by `scripts/ci/coverage-gate.sh` in the `coverage` CI job; the 80% branch floor is
-documented as nightly-only, because it needs a `-Z coverage-options=branch` build (see
-`docs/dev/testing.md`). As of E2 the tree measures **90.26% line coverage**, over the 90% floor
-(done — E2). The E1 figure of 85.17% was in part a measurement artifact: the launcher path runs
-in a spawned artifact subprocess, and the hermetic `env_clear()` those spawns use dropped
-`LLVM_PROFILE_FILE`, so the subprocess wrote no profile and its real execution of `launcher`,
-`launch`, `cache` and `selfexe` was invisible. Re-injecting only that one variable after the
-clear (nothing else — the hermetic `PATH`/`ERL_*` scrub is unchanged) lifted the measured total
-to 89.61% with no new assertions, and genuine unit tests for `stubid`, `error`, `catalog`,
-`selfexe` and `cli` dispatch carried it to 90.26%. The remaining uncovered mass is the OTP
-repack pipeline (real upstream tarballs and network), macOS-only signing paths, and
-failure-injection error arms, none of which is reachable by a deterministic in-process test on
-this platform; `docs/dev/log/E2.md` details the before/after measurement per module.
+90% and branch coverage at 80%**, both by `scripts/ci/coverage-gate.sh` and both required on a
+pull request: the `coverage` job runs twice, as `Coverage (lines)` and `Coverage (branches)`, and
+only the second needs the nightly compiler's `-Z coverage-options=branch` (see
+`docs/dev/testing.md`). The 80% branch floor was documented here as nightly-only until F1; it is
+a standing job, and the toolchain it needs is not the schedule it runs on. The latest hosted
+measurement is run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949):
+**90.75% lines** (18,152 / 20,002) and **83.80% branches** (2,457 / 2,932), each over its floor.
+The two line denominators belong to their own instrumentation runs and are not merged.
+
+The floor was reached in E2, and the history is worth keeping because it is a measurement lesson.
+The E1 figure of 85.17% was in part a measurement artifact: the launcher path runs in a spawned
+artifact subprocess, and the hermetic `env_clear()` those spawns use dropped `LLVM_PROFILE_FILE`, so
+the subprocess wrote no profile and its real execution of `launcher`, `launch`, `cache` and
+`selfexe` was invisible. Re-injecting only that one variable after the clear (nothing else — the
+hermetic `PATH`/`ERL_*` scrub is unchanged) lifted the measured total to 89.61% with no new
+assertions, and genuine unit tests for `stubid`, `error`, `catalog`, `selfexe` and `cli` dispatch
+carried it to 90.26%. The remaining uncovered mass is the OTP repack pipeline (real upstream
+tarballs and network), macOS-only signing paths, and failure-injection error arms, none of which is
+reachable by a deterministic in-process test on this platform; `docs/dev/log/E2.md` details the
+before/after measurement per module.
 
 ### Phase C — cross-target builds
 
@@ -101,23 +110,33 @@ application confirms the shape at scale: the **`notify` shipment packages to 12.
 | Windows artifact **launch**, the launcher's half | `tests/launcher.rs` on a Windows host, `tests/regressions/e23_*` | done — E23 |
 | Windows artifact **launch** with a real `erl.exe` | `ci.yml` `windows` job, run [34023412195](https://github.com/P4suta/ginary/actions/runs/34023412195) | done — E23, on `windows-2022` |
 | Mach-O section payload, ad-hoc signing | `tests/macho.rs`, `tests/payload_locate.rs`, `tests/sign_macos.rs` | done (packaging) — `5b35ecf` (D3) |
-| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job | CI-gated — authored in E1, runs on `macos-15-intel`/`macos-14` |
+| macOS artifact **launch**, `codesign --verify` | `ci.yml` `macos` job, run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) | done — F1, on `macos-15-intel` and `macos-14` |
 
 macOS packaging is proved structurally on Linux — the cfg split, the Mach-O reader, the section
-injection and ad-hoc signing all have tests that run there. What only a runner can confirm is the
-**actual launch**: no Mach-O has ever been executed or had `codesign --verify --strict` run
-against ginary's own output. That stays CI-gated in the `macos` job, which closes the D3 "awaits a
-Mac runner" gap when the repository has a remote.
+injection and ad-hoc signing all have tests that run there. What only a runner could confirm was the
+**actual launch**, and until F1 no Mach-O ginary produced had ever been executed or had `codesign
+--verify --strict` run against it. **It has now.** Run
+[34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) ran the `macos` job on both
+images: each built its own darwin stub natively, packaged the `hello_ffi` fixture against the
+runner's own ERTS, ran the artifact and checked its arguments and exit status, and `codesign`
+reported the artifact valid and satisfying its Designated Requirement *before and after* the launch
+— the second check being the one that proves extracting a payload did not rewrite the file it came
+out of. That closes the D3 "awaits a Mac runner" gap.
 
-**Windows is no longer in that position.** E23 was the first milestone worked on a Windows host,
-and the launcher's own suite runs there now: `tests/launcher.rs` was `#![cfg(unix)]` in its
-entirety until then, because the fixture's `erlexec` was a `#!/bin/sh` script and Windows starts
-no such thing. It stages a real program instead, and 59 of the file's claims — the cache, the
+What the `macos` job does not claim is the rest of the suite. It is a build, launch and signature
+qualification on two images; the full test configurations, the coverage measurements and the
+mutation campaign run elsewhere, and the [Phase F](#phase-f--product-completeness) table says
+where.
+
+**Windows reached the same place one milestone earlier.** E23 was the first milestone worked on a
+Windows host, and the launcher's own suite runs there now: `tests/launcher.rs` was `#![cfg(unix)]`
+in its entirety until then, because the fixture's `erlexec` was a `#!/bin/sh` script and Windows
+starts no such thing. It stages a real program instead, and 59 of the file's claims — the cache, the
 argument vector, the environment difference, the five numbered exit codes, the `GINARY_CMD`
-commands, the trace, the lock, pruning and uninstalling — run natively and pass, with five
-gated `#[cfg(unix)]` for reasons each one states. `a_killed_launcher_takes_its_runtime_with_it`
-is the first test of the job object that `docs/adr/0015-windows-launcher-stays-resident.md`
-argues the crate's only `#[allow(unsafe_code)]` for.
+commands, the trace, the lock, pruning and uninstalling — run natively and pass, with five gated
+`#[cfg(unix)]` for reasons each one states. `a_killed_launcher_takes_its_runtime_with_it` is the
+first test of the job object that `docs/adr/0015-windows-launcher-stays-resident.md` argues the
+crate's only `#[allow(unsafe_code)]` for.
 
 Two halves remain, and both are named rather than absorbed:
 
@@ -138,7 +157,7 @@ Two halves remain, and both are named rather than absorbed:
 |---|---|---|
 | CI job matrix, `required` fan-in | `tests/ci_matrix.rs`, `.github/workflows/ci.yml` | done — E1 |
 | Nightly: mutants, fuzz, full smoke matrix | `.github/workflows/nightly.yml` | done — E1 |
-| Coverage gate at 90% lines | `tests/coverage_gate.rs`, `scripts/ci/coverage-gate.sh` | done — E1 |
+| Coverage gate: 90% lines, 80% branches | `tests/coverage_gate.rs`, `scripts/ci/coverage-gate.sh` | done — E1, both required since F1 |
 | Version-consistency check | `tests/version_consistency.rs`, `scripts/ci/version-consistency.sh` | done — E1 |
 | Documentation-completeness scan | `tests/docs.rs` | done — E1 |
 | release-please + distribute workflows | `tests/release_workflow.rs`, `.github/workflows/{release,distribute}.yml` | authored — E1 |
@@ -147,16 +166,54 @@ Two halves remain, and both are named rather than absorbed:
 Every workflow is `actionlint`-clean and every third-party `uses:` is pinned to a full commit
 SHA with a version comment; the SHA-pin table is in `docs/dev/log/E1.md`. The Linux-runnable jobs
 were exercised locally and their transcripts recorded in that log. The **release and provenance**
-half is authored and never run: no tag, no publish, no attestation is produced until the
-repository has a remote and a maintainer cuts a release per `docs/RELEASE.md`.
+half is authored and never run: no tag, no publish, no attestation is produced until a
+maintainer cuts a release per `docs/RELEASE.md`.
+
+### Phase F — product completeness
+
+| item | evidence | status |
+|---|---|---|
+| Atomic artifact, manifest and SBOM publication | `tests/regressions/f1_build_outputs_were_not_isolated.rs`, `tests/assurance_paths.rs` | done — `d82107f` (F1) |
+| Multi-target builds keep their partial results | `tests/regressions/f1_multi_target_cli_lost_results.rs` | done — `d82107f` (F1) |
+| Cache maintenance never discards live work | `tests/regressions/f1_cache_maintenance_discarded_live_work.rs` | done — `d82107f` (F1) |
+| `selftest` uses the launcher's environment and lock | `tests/regressions/f1_selftest_did_not_use_the_launchers_environment_or_lock.rs` | done — `d82107f` (F1) |
+| Verification reports `passed`/`failed`/`not_run`/`incomplete` | `tests/regressions/f1_verify_accepted_inconsistent_destinations.rs`, `tests/diagnostic_acceptance.rs` | done — `d82107f` (F1) |
+| Target paths survive a foreign host's parser | `tests/regressions/f1_foreign_payload_paths_used_the_hosts_separators.rs` | done — `d82107f` (F1) |
+| Bounded process evidence, trace v2 | `tests/regressions/f1_process_timeouts_lost_their_output.rs`, `tests/regressions/f1_trace_could_not_be_shared_or_correlated.rs` | done — `d82107f` (F1) |
+| An independent verifier for the signed Mach-O | `tests/regressions/f1_macos_signature_verification_was_only_a_test_helper.rs` | done — `d82107f` (F1) |
+| `distribute.yml` runs the event SHA, never a moved tag | `tests/regressions/f1_distribution_executed_a_tag_in_the_default_branch_context.rs` | done — `d82107f` (F1) |
+| Native Windows build, launch and exit codes | `ci.yml` `windows` job, run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) | done — F1 |
+| Native macOS build, launch and signature | `ci.yml` `macos` job, run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) | done — F1 |
+| Every mutation assigned to a runner that can run it | `tools/mutation-plan`, `scripts/ci/mutation.py`, `nightly.yml` | planned — F1; **the campaign itself is red, below** |
+
+F1 is the milestone that stopped treating a packaged artifact as the end of the pipeline and
+started treating the *user's* directory as part of it: an export that fails half-way leaves the
+old bytes, a build of four targets reports the three that finished and the one that did not,
+and a cache sweep that cannot attribute an entry keeps it and says why. Its subsystem records
+are `docs/dev/log/F1*.md`, and the hosted qualification is `docs/dev/log/F1-integration.md`.
+
+Run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) is the run all three
+rows above cite. All 19 jobs passed, including `Required CI`, both coverage measurements, the
+Linux plain, stub and fault suites, cross-Linux smoke, MSRV 1.88 and the formal model — which
+generated 31,939 states, found 7,860 distinct ones and reached depth 29.
 
 ## The mutation and fuzz status
 
 - **Mutation testing** runs in `.github/workflows/nightly.yml`, sharded over the highest-value
   modules (`trailer`, `payload`, `cache`, `closure`, `appfile`, `launch`, `verify`); a surviving
-  mutant fails its shard. `mise run mutants` runs it locally. A one-module smoke of the command is
-  recorded in `docs/dev/log/E1.md`.
-- **Fuzzing** runs in the nightly workflow too, 30 seconds per target over the four libFuzzer
+  mutant fails its shard. F1 replaced one flat list with a plan that assigns each candidate to a
+  runner whose `cfg` can actually compile it — 95 native jobs — and `mise run mutants` runs it
+  locally.
+
+  **The campaign is red and has been since 2026-09-06.** Run
+  [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271) reconciles to
+  `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95 shards
+  failing. The three failures are different things and are not counted as one: `missed` is
+  101 mutants no test kills, which is a test-suite gap; `timeout` is 30 almost entirely on the
+  Windows shards, which is a per-mutant budget that image does not meet; and `not_run` is 15
+  from two shards that did not finish. Nothing else in the nightly workflow is failing — fuzz,
+  the formal model and the cross-Linux smoke matrix are green in the same run.
+- **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
   the committed corpus. `mise run fuzz` runs it locally.
 
@@ -202,8 +259,6 @@ What is listed here is what has **not** happened. An item leaves this list the d
 the repository proves it, and takes its evidence to the table above; a bullet that has to explain
 it is no longer deferred is a bullet in the wrong section.
 
-- **macOS launch** — `ci.yml` `macos` job, `macos-15-intel` and `macos-14` runners. Builds the darwin
-  stub natively, packages and runs a `hello_ffi` artifact, and runs `codesign --verify --strict`.
 - **A console control event reaching the Windows launcher** — nothing, yet. Declined in E23 with
   a reason: delivering one needs `GenerateConsoleCtrlEvent`, and a new `#[allow(unsafe_code)]`
   needs an ADR of its own. This is the one mechanism of
@@ -211,8 +266,15 @@ it is no longer deferred is a bullet in the wrong section.
   run.
 - **Catalog publishing and release provenance** — `distribute.yml`. Builds every target's binary,
   stub and OTP tarball, produces `attest-build-provenance` attestations, and verifies the
-  re-downloaded assets before flipping the release out of draft. Runs when the repository has a
-  remote and a maintainer cuts a release.
+  re-downloaded assets before flipping the release out of draft. Runs when a maintainer cuts a
+  release. Its consequence for the catalog is visible today: `dist/otp/catalog.json` carries the
+  three Linux entries this machine repacked, and the other four targets of `target::ALL` have no
+  published runtime, so a cross build for them finds none and says so.
+- **A green mutation campaign** — `nightly.yml`. The plan covers every candidate and the shards
+  run; what has not happened is a reconciliation with no survivor, no timeout and no unrun
+  mutation. The numbers, and what each of the three failures is, are under
+  [the mutation and fuzz status](#the-mutation-and-fuzz-status).
 
-Nothing above is tagged, pushed or published now. The workflows are correct by inspection and
-`actionlint`-clean; they wait on a remote that does not exist yet.
+Nothing above is tagged, pushed or published now. The release and distribution workflows are
+`actionlint`-clean and have never been run: they wait on a maintainer cutting a release, not on
+a remote, which exists.
