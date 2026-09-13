@@ -139,19 +139,45 @@ fn an_unknown_key_in_the_tools_table_names_the_key_and_the_file() {
         rendered.contains(MANIFEST),
         "the message must name the file: {rendered}"
     );
+    // The fixture puts `outpu` on line 10, and the reader says so. Pinned
+    // because it is the reader's to give: `deny_unknown_fields` reports the
+    // field and the TOML crate turns that into a position, and F1 took the
+    // dependency across a major (0.9 to 1.1) that the E4 freshness gate had
+    // deferred precisely so that someone would read these claims against the
+    // new behaviour. A future major that drops the position fails here.
+    assert!(
+        message.contains("line 10"),
+        "the message must say where the key is: {message}"
+    );
+    assert!(
+        message.contains("`output`"),
+        "and what the user probably meant, out of the keys the table accepts: {message}"
+    );
 }
 
 #[test]
-fn a_manifest_that_is_not_toml_names_the_file() {
+fn a_manifest_that_is_not_toml_names_the_file_and_where_it_stops_parsing() {
     let error = refuse("malformed.toml");
 
-    assert!(
-        matches!(error, ConfigError::Parse { .. }),
-        "expected ConfigError::Parse, got {error:?}"
-    );
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected ConfigError::Parse, got {error:?}");
+    };
     assert!(
         error.to_string().contains(MANIFEST),
         "the message must name the file: {error}"
+    );
+    // `[tools.ginary` is unclosed on line 6 of the fixture, and the reader
+    // names the line, the column and what it wanted. The same claim as the
+    // unknown-key case above and for the same reason: a position is the
+    // difference between an error a user can act on and one they cannot, and
+    // it comes from the dependency rather than from ginary.
+    assert!(
+        message.contains("line 6") && message.contains("column"),
+        "the message must say where parsing stopped: {message}"
+    );
+    assert!(
+        message.contains("unclosed table"),
+        "and what was wrong there: {message}"
     );
 }
 
