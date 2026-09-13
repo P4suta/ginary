@@ -307,12 +307,91 @@ pub fn inspect(path: &Path) -> Result<MachoFacts, MachoError> {
 /// is its own function rather than a search through [`MachoFacts::sections`]
 /// at every call site.
 pub fn section(bytes: &[u8], segment: &str, section: &str) -> Option<(u64, u64)> {
-    let facts = read(bytes).ok()?;
-    facts
-        .sections
-        .into_iter()
-        .find(|(seg, sect, _, _)| seg == segment && sect == section)
-        .map(|(_, _, offset, size)| (offset, size))
+    // The same hand walk, and for the same reason, as [`code_signature`]: a
+    // section header is part of an `LC_SEGMENT_64` load command and sits at the
+    // front of the file, so `bytes` may be only the head of a large artifact.
+    //
+    // This went through [`read`] until F1, and `read` goes through `object`,
+    // which validates more than the load commands — it resolves `LC_SYMTAB`,
+    // whose `symoff` points into `__LINKEDIT` at the *end* of the file. For any
+    // Mach-O larger than `crate::payload`'s head cap the parse therefore failed
+    // and this answered [`None`], which a caller cannot tell from "there is no
+    // such section". That made every command of a 32 MB debug build of ginary
+    // exit 122 on macOS; see
+    // `tests/regressions/f1_reading_a_macho_head_needed_the_whole_file.rs`.
+    //
+    // `MH_MAGIC_64` only, exactly as [`code_signature`] restricts itself, and
+    // for the same reason: the offsets below are the 64-bit little-endian
+    // layout and no other. A differently shaped Mach-O reports no section, and
+    // the callers that need a whole file read it through [`read`].
+    let magic = magic_of(bytes)?;
+    if magic != MH_MAGIC_64 {
+        return None;
+    }
+    let read_u32_le = |at: usize| -> Option<u32> {
+        let four = bytes.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+    };
+    let read_u64_le = |at: usize| -> Option<u64> {
+        let eight = bytes.get(at..at.checked_add(8)?)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(eight);
+        Some(u64::from_le_bytes(buf))
+    };
+    let ncmds = read_u32_le(16)?;
+    let mut offset = 32usize;
+    for _ in 0..ncmds {
+        let cmd = read_u32_le(offset)?;
+        let cmdsize = read_u32_le(offset.checked_add(4)?)? as usize;
+        if cmdsize < 8 {
+            return None;
+        }
+        // `LC_SEGMENT_64`; `object::macho`'s own constant is a
+        // `LoadCommandType`, not the raw `u32` this hand walk reads.
+        const LC_SEGMENT_64: u32 = 0x19;
+        if cmd == LC_SEGMENT_64 {
+            let nsects = read_u32_le(offset.checked_add(64)?)?;
+            for index in 0..nsects {
+                // `section_64` is 80 bytes and the first one begins where the
+                // 72-byte segment command ends.
+                let at = offset
+                    .checked_add(72)?
+                    .checked_add((index as usize).checked_mul(80)?)?;
+                let sectname = name_at(bytes, at)?;
+                let segname = name_at(bytes, at.checked_add(16)?)?;
+                if segname == segment && sectname == section {
+                    let size = read_u64_le(at.checked_add(40)?)?;
+                    let file_offset = read_u32_le(at.checked_add(48)?)?;
+                    return Some((u64::from(file_offset), size));
+                }
+            }
+        }
+        offset = offset.checked_add(cmdsize)?;
+    }
+    None
+}
+
+/// The 16-byte, NUL-padded name at `at`, as the `str` it spells.
+///
+/// A Mach-O name field is padded with NUL and is *not* NUL-terminated when it
+/// uses all sixteen bytes, so the trim is by value rather than by looking for a
+/// terminator. A name with bytes that are not UTF-8 is [`None`]: this module
+/// compares names against the ASCII ones ginary writes, and a lossy conversion
+/// would let a name that is not `__payload` compare equal to it.
+fn name_at(bytes: &[u8], at: usize) -> Option<&str> {
+    let field = bytes.get(at..at.checked_add(16)?)?;
+    let end = field.iter().position(|byte| *byte == 0).unwrap_or(16);
+    std::str::from_utf8(&field[..end]).ok()
+}
+
+/// Whether `bytes` begins with a *fat* (universal) Mach-O magic.
+///
+/// Read off the first four bytes and nothing else, so a caller holding only
+/// the head of a file can ask. A fat file is ambiguous rather than broken —
+/// see [`MachoFacts::is_fat`] — and every caller that needs one architecture
+/// refuses it itself.
+pub fn is_fat(bytes: &[u8]) -> bool {
+    magic_of(bytes).is_some_and(|magic| FAT_MAGICS.contains(&magic))
 }
 
 /// The `dataoff` and `datasize` of a thin Mach-O's `LC_CODE_SIGNATURE`, or
