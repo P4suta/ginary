@@ -335,3 +335,43 @@ fn a_signed_macho_whose_dataoff_points_past_eof_is_not_a_read_error() {
         .expect("an out-of-range signature dataoff is not a read error; it falls through");
     assert_eq!(found, None, "no ginary payload, so locate finds none");
 }
+
+#[test]
+fn a_tail_that_is_exactly_a_trailer_declares_an_empty_payload() {
+    // Written to put the other side of `section_size < TRAILER_LEN` under a
+    // test, and it does not, for a reason worth recording: a section of exactly
+    // `TRAILER_LEN` sits at the end of the file, so its bytes *are* the file's
+    // last sixty-four, and `Trailer::read_from` finds them before `locate` ever
+    // looks for a section. Every size that reaches the section bound is below
+    // it, where `<` and `<=` agree, so that mutant is equivalent and no fixture
+    // can kill it.
+    //
+    // What is left is still a claim worth holding: a trailer that declares no
+    // payload is `EmptyPayload`, and not a complaint about a length.
+    let built = with_payload_section(CPU_TYPE_ARM64, b"", DIGEST);
+    assert_eq!(
+        built.section_size, TRAILER_LEN,
+        "the fixture is the bound itself"
+    );
+    let (file, _dir) = file_of(&built.bytes);
+
+    let error = locate(&file).expect_err("a payload of no bytes is not a payload");
+
+    // `EmptyPayload` and not `Section`: the trailer was read, and what is wrong
+    // is the length it declares rather than the room there was to read it.
+    assert!(
+        matches!(error, TrailerError::EmptyPayload),
+        "expected EmptyPayload, got {error:?}"
+    );
+
+    // And one byte less is refused, which is the other side of the same edge.
+    let built = with_section(CPU_TYPE_ARM64, "__GINARY", "__payload", &[0u8; 63], false);
+    let (file, _dir) = file_of(&built.bytes);
+    assert!(
+        matches!(
+            locate(&file).expect_err("63 bytes cannot hold a 64-byte trailer"),
+            TrailerError::Section { .. }
+        ),
+        "one byte under the bound is under the bound"
+    );
+}

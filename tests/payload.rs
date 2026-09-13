@@ -912,3 +912,191 @@ fn entry_bytes(archive: &[u8], name: &str) -> Option<Vec<u8>> {
     }
     None
 }
+
+#[test]
+fn every_entry_type_the_reader_names_is_named_the_same_way() {
+    // Three tests above name three of these shapes one at a time, and the
+    // campaign left the other seven arms of `check_entry_type` alive: an arm
+    // that no archive reaches is an arm that can be deleted without a test
+    // noticing, and then the shape it refused reads as `other`.
+    //
+    // `UNSUPPORTED_ENTRY_KINDS` is the table both readers are held to, because
+    // `verify::entry_kind`'s own header says the two commands "name the same
+    // shapes the same way" and a word that drifts in one and not the other is
+    // what a shared table makes fail.
+    for (typeflag, word) in common::payload::UNSUPPORTED_ENTRY_KINDS {
+        let archive = front().push(RawEntry::special(
+            "lib/hello/priv/odd",
+            typeflag,
+            "ginary.json",
+        ));
+        let (payload, len, sha) = payload_of(&archive);
+        let destination = Destination::new();
+
+        let error = unpack(payload.as_slice(), len, &sha, &destination.dest)
+            .expect_err("neither a regular file nor a directory");
+
+        match error {
+            PayloadError::UnsupportedEntry { kind, .. } => assert_eq!(
+                kind, word,
+                "the type flag `{}` is `{word}`",
+                typeflag as char
+            ),
+            other => panic!(
+                "expected UnsupportedEntry for `{}`, got {other:?}",
+                typeflag as char
+            ),
+        }
+        destination.assert_nothing_escaped();
+    }
+}
+
+#[test]
+fn the_four_type_flags_the_reader_disposes_of_never_reach_ginary() {
+    // The other half of the table above, and the reason four arms of
+    // `check_entry_type` cannot be killed by any test: `tar::Archive` acts on
+    // these itself. Three describe the *next* entry and are applied to it, and
+    // `S` it refuses unless the header is GNU — so what comes back is a reader
+    // error or a renamed regular file, never an `UnsupportedEntry`.
+    //
+    // Asserting that is worth more than asserting nothing: if the reader ever
+    // stops consuming one, this fails and the arm it feeds becomes reachable.
+    for typeflag in common::payload::READER_CONSUMED_ENTRY_KINDS {
+        let archive = front().push(RawEntry::special(
+            "lib/hello/priv/odd",
+            typeflag,
+            "ginary.json",
+        ));
+        let (payload, len, sha) = payload_of(&archive);
+        let destination = Destination::new();
+
+        let outcome = unpack(payload.as_slice(), len, &sha, &destination.dest);
+
+        if let Err(PayloadError::UnsupportedEntry { kind, .. }) = outcome {
+            panic!(
+                "`{}` reached ginary as `{kind}`, so the arm that names it is reachable after all",
+                typeflag as char
+            );
+        }
+        destination.assert_nothing_escaped();
+    }
+}
+
+// ------------------------------- the decision surface of a Windows name --
+//
+// `destined_path_for` refuses a Windows destination on seven independent
+// grounds, chained with `||` and `&&`, and the campaign left two of those
+// connectives alive. A table over *one ground at a time* is what makes each
+// connective observable: for every refusal there is a name that trips that
+// ground and no other, and beside it a near miss that trips none — so an `||`
+// read as `&&` accepts something it must refuse, and an `&&` read as `||`
+// refuses something it must accept.
+
+/// A Windows destination and whether the reader may write it.
+///
+/// `None` is a refusal. Each refused name trips exactly one of the rules, and
+/// each accepted name is the nearest thing to it that trips none.
+const WINDOWS_NAMES: [(&str, Option<&str>); 25] = [
+    // Trailing dot and trailing space: the two characters Win32 strips, so a
+    // name carrying one is not the name that would be created.
+    ("lib/trailing.", None),
+    ("lib/trailing ", None),
+    ("lib/trailing.txt", Some("lib/trailing.txt")),
+    // The seven characters a Win32 path may not contain. `:` is here as a
+    // *component* character; a drive prefix is refused earlier, by the
+    // component walk.
+    ("lib/a:b", None),
+    ("lib/a<b", None),
+    ("lib/a>b", None),
+    ("lib/a\"b", None),
+    ("lib/a|b", None),
+    ("lib/a?b", None),
+    ("lib/a*b", None),
+    ("lib/a-b", Some("lib/a-b")),
+    // A control character, which is neither of the two sets above.
+    ("lib/a\u{1}b", None),
+    // The four reserved device names, and a name that merely begins like one.
+    ("lib/CON.txt", None),
+    ("lib/PRN", None),
+    ("lib/AUX", None),
+    ("lib/NUL", None),
+    ("lib/CONSOLE", Some("lib/console")),
+    // `COM<n>` and `LPT<n>` for n in 1..=9, and the three near misses: a stem
+    // that is four characters and not a digit at the end, a digit that is
+    // zero, and a stem that is five characters long.
+    ("lib/COM1", None),
+    ("lib/COM9", None),
+    ("lib/LPT1", None),
+    ("lib/LPT9", None),
+    ("lib/COMA", Some("lib/coma")),
+    ("lib/COM0", Some("lib/com0")),
+    ("lib/COM10", Some("lib/com10")),
+    ("lib/XXX1", Some("lib/xxx1")),
+];
+
+#[test]
+fn a_windows_destination_is_refused_on_one_ground_at_a_time() {
+    for (name, expected) in WINDOWS_NAMES {
+        assert_eq!(
+            ginary::payload::destined_path_for(
+                std::path::Path::new(name),
+                ginary::target::Os::Windows
+            ),
+            expected.map(str::to_owned),
+            "`{name}` under Windows rules"
+        );
+    }
+}
+
+#[test]
+fn the_windows_rules_are_windows_only() {
+    // The branch that decides whether any of the above applies. Every name the
+    // table refuses is a perfectly ordinary unix file name, and a unix
+    // destination is not case-folded either — `CON.txt` and `con.txt` are two
+    // files there and one file on Windows.
+    for os in [ginary::target::Os::Linux, ginary::target::Os::Macos] {
+        for (name, _) in WINDOWS_NAMES {
+            if name.contains('\u{1}') {
+                // A control character is a legal unix file name, but writing
+                // one into this table's `expected` column would say more about
+                // the table than about the rule.
+                continue;
+            }
+            assert_eq!(
+                ginary::payload::destined_path_for(std::path::Path::new(name), os),
+                Some(name.to_owned()),
+                "`{name}` is an ordinary name under {os}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_front_entry_is_given_the_mode_its_header_carried() {
+    // The two front entries are written by `create_file` rather than by the
+    // tar crate, so the mode comes from one call that a test has to reach for.
+    // `0o755` and not `0o600`: a file `create_new` makes never has the execute
+    // bit, whatever the umask, so this distinguishes "the mode was applied"
+    // from "the default happened to match" on every machine.
+    let index = serde_json::to_vec(&Index { files: Vec::new() }).expect("serialise an index");
+    let archive = RawTar::new()
+        .push(RawEntry::file_with_mode(
+            MANIFEST_NAME,
+            0o755,
+            &sample_manifest_json(),
+        ))
+        .push(RawEntry::file_with_mode(INDEX_NAME, 0o755, &index));
+    let (payload, len, sha) = payload_of(&archive);
+    let destination = Destination::new();
+
+    unpack(payload.as_slice(), len, &sha, &destination.dest).expect("the front entries unpack");
+
+    for name in [MANIFEST_NAME, INDEX_NAME] {
+        assert_eq!(
+            mode_of(&destination.dest.join(name)) & 0o7777,
+            0o755,
+            "{name} did not get the mode its header carried"
+        );
+    }
+}

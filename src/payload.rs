@@ -1332,6 +1332,55 @@ mod tests {
         }
     }
 
+    /// Two paths whose components differ in where the separator falls are two
+    /// paths.
+    ///
+    /// `HostDestinations::insert` walks a path component by component and
+    /// builds the prefix of each level, so that a target name and the host
+    /// name it would land on can be compared level by level.
+    ///
+    /// This does **not** kill `delete ! in HostDestinations::insert`, and the
+    /// reason is worth writing down rather than leaving as a gap. Removing the
+    /// `!` puts the separator before the first component instead of between
+    /// the later ones, so `lib/ab` and `liba/b` both spell `/libab` — but the
+    /// host prefix and the target prefix are built from the *same* component
+    /// list by the same loop, so whatever garbles one garbles the other
+    /// identically, and the comparison that decides is between them. Two
+    /// prefixes that collide under garbling carry target prefixes that collide
+    /// with them, so the answer never changes: the mutant is equivalent. What
+    /// this test does hold is the claim a reader cares about, which is that
+    /// the two paths do not collide.
+    #[test]
+    fn a_separator_between_components_keeps_two_paths_apart() {
+        let mut seen = HostDestinations::default();
+        seen.insert(
+            std::path::Path::new("lib/ab/c.txt"),
+            crate::target::Os::Linux,
+            false,
+        )
+        .expect("the first path");
+        seen.insert(
+            std::path::Path::new("liba/b/c.txt"),
+            crate::target::Os::Linux,
+            false,
+        )
+        .expect("a path that shares no directory with the first");
+    }
+
+    /// The two bounds this module fixes, as numbers rather than as arithmetic.
+    ///
+    /// Both are written `n * 1024 * 1024` and both carry a sentence about what
+    /// the number is chosen against — "two orders of magnitude of headroom"
+    /// over an index, and "far more than any real one occupies" over a Mach-O's
+    /// load commands. An arithmetic slip in either leaves those sentences
+    /// standing over a different number, and every test that derives its
+    /// fixture from the constant stays green while it happens.
+    #[test]
+    fn the_two_bounds_are_the_sizes_their_prose_argues_for() {
+        assert_eq!(MAX_FRONT_ENTRY_BYTES, 8_388_608, "eight mebibytes");
+        assert_eq!(MACHO_HEAD_CAP, 16_777_216, "sixteen mebibytes");
+    }
+
     /// `PayloadError::PathEscape` cannot be produced by any archive: every
     /// path that would make `unpack_in` answer `false` has already been
     /// refused as [`PayloadError::UnsafePath`] by the time the entry is

@@ -54,6 +54,57 @@ pub const TYPE_DIRECTORY: u8 = b'5';
 pub const TYPE_CONTIGUOUS: u8 = b'7';
 /// The GNU type flag whose body is the next entry's long path name.
 pub const TYPE_GNU_LONG_NAME: u8 = b'L';
+/// The tar type flag for a block device.
+pub const TYPE_BLOCK_DEVICE: u8 = b'4';
+/// The GNU type flag whose body is the next entry's long link target.
+pub const TYPE_GNU_LONG_LINK: u8 = b'K';
+/// The GNU type flag for a sparse file.
+pub const TYPE_GNU_SPARSE: u8 = b'S';
+/// The pax type flag for a header that applies to every following entry.
+pub const TYPE_PAX_GLOBAL: u8 = b'g';
+/// The pax type flag for a header that applies to the next entry.
+pub const TYPE_PAX: u8 = b'x';
+
+/// Every entry type a reader hands ginary, with the word ginary names it by.
+///
+/// One table, because `payload::check_entry_type` and `verify::entry_kind`
+/// answer the same question for the two commands and their headers say they
+/// share a vocabulary: "the two commands name the same shapes the same way".
+/// A word that drifts in one and not the other is what a shared table makes
+/// fail.
+///
+/// Seven of the eleven type flags, and [`READER_CONSUMED_ENTRY_KINDS`] is the
+/// other four with the reason.
+pub const UNSUPPORTED_ENTRY_KINDS: [(u8, &str); 7] = [
+    (TYPE_CONTIGUOUS, "contiguous file"),
+    (TYPE_SYMLINK, "symlink"),
+    (TYPE_HARDLINK, "hardlink"),
+    (TYPE_CHAR_DEVICE, "character device"),
+    (TYPE_BLOCK_DEVICE, "block device"),
+    (TYPE_FIFO, "fifo"),
+    (TYPE_PAX_GLOBAL, "pax"),
+];
+
+/// The type flags `tar::Archive` acts on itself, so ginary never sees them.
+///
+/// Three of them describe the *next* entry — a long name, a long link target,
+/// a pax header — and the reader applies them to it rather than yielding them;
+/// a fourth, `S`, it refuses outright unless the header is GNU. So the arms
+/// `check_entry_type` and `entry_kind` carry for `GNULongName`,
+/// `GNULongLink`, `GNUSparse` and `XHeader` cannot be reached through that
+/// reader, and deleting any of them changes no answer.
+///
+/// They are kept because the arms are defence against a reader that stops
+/// consuming them, and the tests hold *this* fact instead: the reader, not
+/// ginary, is what disposes of these four. If that ever changes, the test
+/// fails and the arms become reachable — which is the moment they start
+/// earning their place.
+pub const READER_CONSUMED_ENTRY_KINDS: [u8; 4] = [
+    TYPE_GNU_LONG_NAME,
+    TYPE_GNU_LONG_LINK,
+    TYPE_GNU_SPARSE,
+    TYPE_PAX,
+];
 
 /// One tar entry, described by its bytes rather than by a file on disk.
 #[derive(Clone, Debug)]

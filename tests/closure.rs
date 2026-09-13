@@ -883,3 +883,29 @@ fn the_real_notify_shipment_closes_over_the_host_otp() {
     eprintln!("{}", explain(&set));
     eprintln!("skipped optional applications: {:?}", set.skipped_optional);
 }
+
+#[test]
+fn a_closure_is_never_empty_and_a_default_app_set_always_is() {
+    // `AppSet::is_empty` has no test, so a function that answered the same
+    // thing every time passed. Its own documentation states both halves: a
+    // default set is empty, and one `app_dependency_closure` returned never is,
+    // because `kernel` and `stdlib` are seeds unconditionally — either they
+    // resolved or the call failed.
+    assert!(
+        AppSet::default().is_empty(),
+        "a set nothing has been put in holds nothing"
+    );
+
+    let trees = six_app_scenario();
+    let closed = trees.closed(&["notify"], &[]);
+    assert!(
+        !closed.is_empty(),
+        "a closure carries at least its unconditional seeds: {:?}",
+        closed.names()
+    );
+    assert_eq!(
+        closed.is_empty(),
+        closed.names().is_empty(),
+        "and the two ways of asking agree"
+    );
+}
