@@ -171,6 +171,46 @@ items `assemble.rs` keeps outside its own `cli` gate, so the whole launcher cont
 argument vector, the environment difference, the cache, the lock, the five numbered exit codes —
 is asserted against the stub build as well as the full one.
 
+## The suite on macOS costs what Gatekeeper charges
+
+The suite runs natively on macOS, and the first thing to know about it there is not a `cfg` or a
+gate: it is that **macOS assesses a newly written executable the first time it is exec'd**, and
+this suite writes a great many of them. `syspolicyd` does the assessment, the result is cached
+against the file, and so the second exec of the same file is free. Measured on an
+`aarch64-apple-darwin` host that was also running another project's mutation campaign:
+
+```text
+first exec 33.815s   second exec 0.024s
+first exec 59.921s   second exec 0.024s
+```
+
+Three orders of magnitude, on the first exec only, with `syspolicyd` at 80–90% of a core.
+
+Three parts of the suite walk straight into it. `process::test_support::script` writes a fresh
+executable and execs it before returning the path;
+`scripts_written_and_run_in_parallel_are_never_text_file_busy` does that two hundred times on
+purpose, because writing and exec'ing in parallel is the subject of the test; and every
+end-to-end test builds a fresh artifact and runs it. On an idle Mac none of this is noticeable.
+On a busy one the first run of the suite can look like a hang — a test binary at 0% CPU with
+`/bin/sh` children twenty seconds old — and it is not one.
+
+What to do about it, in order:
+
+- Run the suite once and let it finish; the assessments are cached, so the second run of the same
+  tree is fast. A target at a time (`cargo test --test cache`) keeps the wait legible.
+- Do not run it beside another workload that executes thousands of fresh binaries. Two mutation
+  campaigns at once is the case that produced the numbers above.
+- Read a timing failure here as a *measurement*, not a defect. The end-to-end tests bound their
+  children through `ginary::process`, and `DRAIN_GRACE` gives a reaped child's pipe 500 ms to
+  reach EOF; an artifact whose first exec took twenty seconds can blow that with every byte
+  captured and a zero exit status, which reports as `incomplete process observation`. The bound is
+  deliberate and is not to be raised to make a run green — `docs/dev/log/F1-macos-native.md`
+  records that decision and the measurements behind it.
+
+Nothing here is macOS-specific to *ginary*: a packaged application a user downloads is assessed
+the same way, once. It is specific to a test suite whose job is to produce new executables and
+start them.
+
 ## The suite has a Windows-native flavor
 
 Both flavors above run on Windows, and since E23 `tests/launcher.rs` runs there too: it carried a
@@ -1677,28 +1717,32 @@ division — module, `--shard i/n`, `--timeout` — and `measured_mutants` parse
 `tests/fixtures/nightly/mutants-measured.json`, the
 measured record the budget is argued from. A gate that cannot finish inside its own
 `timeout-minutes` is not a gate, and holding the configured side against the measured one is how
-that is checked here rather than in a `cancelled` job nobody reads. Still to come:
+that is checked here rather than in a `cancelled` job nobody reads.
 
-- **`Artifact`** — run `ginary build` once per test binary behind a `OnceLock`, then run the
-  artifact under a scrubbed environment and return the exit status, stdout, stderr, the cache
-  directory and the trace as structured data. `FixtureProject` and `run_staged` are the halves
-  of it that A1c needed and therefore already exist.
-
-One more fixture:
+The `Artifact` helper this section used to list as "still to come" is
+`tests/common/built.rs`: `FixtureProject` copies the project, `BuiltProject::build` runs this
+test run's own `ginary` in it, and `BuiltProject::run` executes the artifact under a scrubbed
+environment — `env_clear()`, an empty `PATH`, and `HOME` and `XDG_CACHE_HOME` inside the test's
+own tree — with both children bounded. Still to come:
 
 - **`hello_crypto`** — `gleam_stdlib`, `gleam_erlang`, `gleam_crypto` and `argv`, with a
   committed `manifest.toml`, to exercise the `crypto.so` NIF path. CI warms the hex cache.
 
 Planned test categories:
 
-- **Determinism** — build the same input twice and compare bytes; `SOURCE_DATE_EPOCH` is
-  honoured.
-- **Concurrency** — start N real processes on a cold cache at once, then assert exactly one
-  extracted directory, no leftover temporary trees, and every process exiting 0.
-- **Trace assertions** — end-to-end tests read the JSON Lines trace and assert on phase order,
-  on `cache hit` for the second run, and on per-phase time bounds.
-- **Property tests** — `proptest` over the trailer encoding, the `.app` parser and tar path
-  validation. The BEAM and ELF readers already have theirs; see the never-panic policy above.
+- **Determinism** — done. `tests/e2e_hello.rs` builds the same input twice under a pinned
+  `SOURCE_DATE_EPOCH` and compares the bytes, and `tests/otp_repack.rs` makes the same claim
+  about a repack.
+- **Concurrency** — done. `tests/cache_concurrency.rs` starts real processes on a cold cache and
+  asserts one extracted directory, no leftover temporary trees, and every process exiting 0.
+- **Trace assertions** — partly. The end-to-end tests read the JSON Lines trace and assert on
+  phase order and on `cache hit` for the second run. The *per-phase time bounds* are not
+  asserted anywhere, and will not be until the launcher has a latency budget to assert against;
+  that is the milestone `docs/dev/log/E23.md` names under "the launcher's cost is still
+  unmeasured".
+- **Property tests** — done. `proptest` covers the trailer encoding, the `.app` parser, the
+  closure, the payload's tar path validation, and the BEAM, ELF and Mach-O readers; see the
+  never-panic policy above.
 - **Fuzzing** — four targets exist; see the fuzzing section above. `elf_inspect` is the one from
   the plan's list that does not, because `object` is doing the parsing there and fuzzing it would
   measure that crate rather than this one.
