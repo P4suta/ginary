@@ -2209,6 +2209,189 @@ mod tests {
     use super::*;
     use crate::target::Os;
 
+    /// What `remove_anything` answers for each shape it can be handed.
+    ///
+    /// Its contract is "answering whether it is gone", not "whether this call
+    /// removed it" — a path that was never there is gone, and that is the arm
+    /// the `|| !path.exists()` exists for. Three mutants lived in one
+    /// expression because no test asked about a path that is absent or about a
+    /// file being handed to the directory arm.
+    #[test]
+    fn removing_anything_answers_whether_it_is_gone() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"bytes").expect("a file to remove");
+        assert!(remove_anything(&file), "a file is removed");
+        assert!(!file.exists());
+
+        let tree = dir.path().join("a-tree");
+        std::fs::create_dir_all(tree.join("nested")).expect("a tree to remove");
+        std::fs::write(tree.join("nested/file"), b"bytes").expect("something in it");
+        assert!(remove_anything(&tree), "a directory is removed whole");
+        assert!(!tree.exists());
+
+        assert!(
+            remove_anything(&dir.path().join("never-there")),
+            "a path that was never there is gone, which is what the caller asked"
+        );
+    }
+
+    /// A missing directory is empty and an unreadable one is an error.
+    ///
+    /// `files_under` reports what a `prune` or a `clean` would remove, and the
+    /// two failures a `read_dir` can hand it mean opposite things: a directory
+    /// that is not there has nothing in it, and a directory this process may
+    /// not list has an unknown number of things in it. Answering "empty" for
+    /// the second would let maintenance report a size of zero for a tree it
+    /// could not see.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_directory_is_empty_and_an_unreadable_one_is_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        assert_eq!(
+            files_under(&dir.path().join("never-there")).expect("a missing directory is empty"),
+            Vec::<PathBuf>::new()
+        );
+
+        let tree = dir.path().join("tree");
+        let closed = tree.join("closed");
+        std::fs::create_dir_all(&closed).expect("a directory to close");
+        std::fs::write(closed.join("hidden"), b"bytes").expect("something inside it");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
+            .expect("close the directory");
+        let unreadable = std::fs::read_dir(&closed).is_err();
+
+        let outcome = files_under(&tree);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the mode so the temporary directory can be cleaned up");
+
+        if !unreadable {
+            eprintln!("skipping: this user can read a directory with mode 000");
+            return;
+        }
+        let error = outcome.expect_err("a directory that cannot be listed is not an empty one");
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "the directory is there; what failed is reading it"
+        );
+    }
+
+    /// The three questions this module asks an `io::Error`, one answer each.
+    ///
+    /// `is_errno` is the whole of `is_occupied` and `is_refusal`, and the three
+    /// had no test between them: a function that answered `true` for every
+    /// error and one that answered it for the right ones agree on every path a
+    /// test happens to take, because the errors these classify arrive from a
+    /// kernel a test cannot choose. Naming the codes is what makes them
+    /// decidable, and `Errno` is what makes naming them portable — a bare 39 in
+    /// a condition is a number nobody can check.
+    #[cfg(unix)]
+    #[test]
+    fn each_errno_question_admits_its_own_codes_and_no_others() {
+        let of = |errno: Errno| std::io::Error::from_raw_os_error(errno.raw_os_error());
+
+        // `is_occupied`: the destination of a rename is already an entry.
+        for errno in [Errno::EXIST, Errno::NOTEMPTY, Errno::ISDIR] {
+            assert!(is_occupied(&of(errno)), "{errno:?} means occupied");
+        }
+        for errno in [Errno::ACCESS, Errno::ROFS, Errno::NOENT, Errno::NOSPC] {
+            assert!(!is_occupied(&of(errno)), "{errno:?} does not mean occupied");
+        }
+
+        // `is_refusal`: the filesystem said no, rather than something this
+        // module has no answer for.
+        for errno in [Errno::ACCESS, Errno::ROFS] {
+            assert!(is_refusal(&of(errno)), "{errno:?} is a refusal");
+        }
+        for errno in [Errno::EXIST, Errno::NOTEMPTY, Errno::ISDIR, Errno::NOSPC] {
+            assert!(!is_refusal(&of(errno)), "{errno:?} is not a refusal");
+        }
+
+        // And an error with no `raw_os_error` at all belongs to neither, which
+        // is the arm a `true` would swallow.
+        let synthetic = std::io::Error::other("a failure this module did not get from a syscall");
+        assert!(!is_occupied(&synthetic));
+        assert!(!is_refusal(&synthetic));
+    }
+
+    /// Which names carry an owner's process id, and which only look as if they
+    /// do.
+    ///
+    /// `residue_owner` is the first thing `sweep` and `clean_app` ask of a
+    /// name, and every later decision rests on it: a name it answers for is a
+    /// tree maintenance may remove once its owner is gone, and a name it
+    /// declines is somebody else's. The answer is four rules deep — a leading
+    /// dot, a cache key, one of three prefixes, and digits — and the extraction
+    /// id after a `tmp-` owner is a fifth. Each line below trips one rule and
+    /// no other.
+    #[test]
+    fn a_residue_name_carries_an_owner_and_a_name_that_only_looks_like_one_does_not() {
+        const KEY: &str = "0123456789abcdef";
+        const ID: &str = "abc123def456"; // EXTRACTION_ID_LEN alphanumerics
+
+        assert_eq!(
+            residue_owner(&format!(".{KEY}.{TMP_PREFIX}1234")),
+            Some(1234)
+        );
+        assert_eq!(residue_owner(&format!(".{KEY}.{CORRUPT_PREFIX}7")), Some(7));
+        assert_eq!(residue_owner(&format!(".{KEY}.{TRASH_PREFIX}42")), Some(42));
+        assert_eq!(
+            residue_owner(&format!(".{KEY}.{TMP_PREFIX}99-{ID}")),
+            Some(99),
+            "an extraction id after the owner is part of a `tmp-` name"
+        );
+
+        for name in [
+            // No leading dot: a published entry, not residue.
+            format!("{KEY}.{TMP_PREFIX}1234"),
+            // No second dot: nothing separates the key from the tail.
+            format!(".{KEY}{TMP_PREFIX}1234"),
+            // Not a cache key.
+            format!(".notakey.{TMP_PREFIX}1234"),
+            // A prefix this module does not write.
+            format!(".{KEY}.backup-1234"),
+            // No digits at all, and digits with something else in them.
+            format!(".{KEY}.{TMP_PREFIX}"),
+            format!(".{KEY}.{TMP_PREFIX}12a4"),
+            // A leading sign. `u32::from_str` accepts `+12` and this module
+            // does not: the digits are checked before they are parsed, and
+            // that check is the only thing standing between two spellings of
+            // one process id — `.tmp-12` and `.tmp-+12` would be two residues
+            // of one owner, and the second is a name nothing here ever wrote.
+            format!(".{KEY}.{TMP_PREFIX}+12"),
+            // An extraction id that is the wrong length, and one that is not
+            // alphanumeric: both mean this is not a name extraction wrote.
+            format!(".{KEY}.{TMP_PREFIX}99-{}", &ID[..ID.len() - 1]),
+            format!(".{KEY}.{TMP_PREFIX}99-abc123def45_"),
+            // A `-` after a prefix that never carries an extraction id.
+            format!(".{KEY}.{CORRUPT_PREFIX}99-{ID}"),
+        ] {
+            assert_eq!(residue_owner(&name), None, "{name} carries no owner");
+        }
+    }
+
+    /// What a cache key is, at both edges of both rules.
+    #[test]
+    fn a_cache_key_is_sixteen_lowercase_hexadecimal_digits() {
+        assert!(is_cache_key("0123456789abcdef"));
+        assert!(is_cache_key("ffffffffffffffff"));
+        assert!(is_cache_key("0000000000000000"));
+        for name in [
+            "0123456789abcde",   // fifteen
+            "0123456789abcdef0", // seventeen
+            "0123456789ABCDEF",  // upper case is another digest's spelling
+            "0123456789abcdeg",  // `g` is not hexadecimal
+            "0123456789abcde-",
+            "",
+        ] {
+            assert!(!is_cache_key(name), "`{name}` is not a cache key");
+        }
+    }
+
     #[test]
     fn flush_open_options_asks_for_write_only_where_the_barrier_needs_it() {
         // The wiring, not just the rule: `open_for_flush` consults the
