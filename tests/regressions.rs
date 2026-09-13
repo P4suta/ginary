@@ -554,6 +554,8 @@ mod f1_macos_signature_verification_was_only_a_test_helper;
 mod f1_multi_target_cli_lost_results;
 #[path = "regressions/f1_process_timeouts_lost_their_output.rs"]
 mod f1_process_timeouts_lost_their_output;
+#[path = "regressions/f1_reading_a_macho_head_needed_the_whole_file.rs"]
+mod f1_reading_a_macho_head_needed_the_whole_file;
 #[path = "regressions/f1_selftest_did_not_use_the_launchers_environment_or_lock.rs"]
 mod f1_selftest_did_not_use_the_launchers_environment_or_lock;
 #[path = "regressions/f1_trace_could_not_be_shared_or_correlated.rs"]
