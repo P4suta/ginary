@@ -285,3 +285,34 @@ have left — and against a hand-built `CPU_TYPE_X86_64` stub, so the claim does
 file. No arm64 binary is restamped as an x86_64 one: the branch is selected by the *absence of the
 command*, not by the architecture, and a fixture that claimed a `cputype` it does not have would
 be evidence of nothing. `docs/dev/log/E10.md` records the run and the fix.
+
+## 2026-09-13 — a Mac ran it, and the open question is closed
+
+Every section above ends on the same unanswered question: whether what the writer produces
+*maps, runs, and passes `codesign --verify --strict`* on a real Mac. E10 left it open on
+purpose — "both branches are tested on Linux" is a statement about arithmetic, not about a
+kernel — and the Consequences said a Mac was the only thing that could answer it.
+
+Run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) answered it. The
+`macos` job of `.github/workflows/ci.yml` ran on `macos-15-intel` and `macos-14`: each built the
+darwin stub natively, packaged the `hello_ffi` fixture against the runner's own ERTS, and ran
+`scripts/ci/macos-smoke.sh`, which checks the signature *before* the launch, runs the artifact,
+checks its arguments and exit status, and checks the signature *again afterwards*. Both images
+passed all of it. The second signature check is the one worth naming: it is what proves that
+extracting a payload into the cache did not rewrite the file the payload came out of.
+
+Two things are still not claimed, and are not claimed here either:
+
+- **Gatekeeper.** An ad-hoc signature satisfies the kernel's load-time requirement and not
+  Gatekeeper's quarantine gate, exactly as the Decision says. Nothing in that run downloaded the
+  artifact, so nothing in it tested quarantine.
+- **The inner Mach-O scan.** The last Consequences bullet scoped out giving `ginary verify`'s
+  native-object scan the `cputype`/target awareness for an inner Mach-O that it has for an inner
+  ELF. That is still follow-on work and still scoped out.
+
+F1 did close a neighbouring gap on the same host: `doctor`'s native table answered
+`matches_host` from the CPU alone, so an `aarch64` Linux shared object read on an `aarch64` Mac
+was reported as matching a machine that cannot load it. The column now asks the object format
+as well; see
+`tests/regressions/f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one.rs`. That
+is `doctor`, not `verify`, and it does not make the bullet above any less open.
