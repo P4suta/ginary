@@ -75,11 +75,19 @@ thiserror = "2.0.18"
 # believes is in force, and the error has to name it. `default-features` keeps
 # the writer out — nothing in ginary writes TOML.
 #
-# Held at 0.9 deliberately. 1.0.0 is out and the pre-push freshness gate offers
-# it every run; taking it is a major of the reader every `gleam.toml` goes
-# through, and it wants a change of its own that re-reads the config tests
-# against the new behaviour rather than a line in an unrelated milestone. See
-# docs/dev/log/E4.md.
+# E4 held this at 0.9 and said why: 1.0.0 is a major of the reader every
+# `gleam.toml` goes through, and it wanted a change of its own that re-read the
+# config tests against the new behaviour rather than a line in an unrelated
+# milestone. The bump arrived as Dependabot `6ffb2be`, which moved this line
+# and `Cargo.lock` and nothing else, so the comment went on describing a
+# deferral that had already been taken.
+#
+# The re-read is done. `tests/config.rs` now pins what the 1.x reader gives a
+# user: an unknown key names its own line and the keys the table does accept,
+# and a manifest that does not parse names the line, the column and what was
+# expected there. Those positions come from the dependency and not from ginary,
+# so they are asserted rather than assumed. See docs/dev/log/E4.md for the
+# deferral and docs/dev/log/F1-macos-native.md for the re-read.
 toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"], optional = true }
 # The payload's compression. `default-features = false` keeps the multi-threaded
 # encoder and the `zstdmt` C sources out: packing is single-threaded on purpose,
