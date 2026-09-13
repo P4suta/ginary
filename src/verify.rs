@@ -893,7 +893,7 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         if kind != tar::EntryType::Regular {
             issues.push(Issue::UnsupportedEntry {
                 path: name.clone(),
-                kind: entry_kind(kind).to_owned(),
+                kind: crate::payload::entry_kind(kind).to_owned(),
             });
             continue;
         }
@@ -1066,28 +1066,6 @@ fn octal(mode: u32) -> String {
 /// after them is a file of the application, and every rule below is about
 /// *position* rather than about a name.
 const FRONT_ENTRIES: usize = 2;
-
-/// What an entry that is neither a file nor a directory is called.
-///
-/// The vocabulary [`crate::payload::PayloadError::UnsupportedEntry`] uses, so
-/// the two commands name the same shapes the same way.
-fn entry_kind(kind: tar::EntryType) -> &'static str {
-    use tar::EntryType;
-
-    match kind {
-        EntryType::Continuous => "contiguous file",
-        EntryType::Symlink => "symlink",
-        EntryType::Link => "hardlink",
-        EntryType::Char => "character device",
-        EntryType::Block => "block device",
-        EntryType::Fifo => "fifo",
-        EntryType::GNULongName => "gnu long name",
-        EntryType::GNULongLink => "gnu long link name",
-        EntryType::GNUSparse => "gnu sparse",
-        EntryType::XGlobalHeader | EntryType::XHeader => "pax",
-        _ => "other",
-    }
-}
 
 /// The width the report's labels are padded to.
 ///
@@ -1507,6 +1485,69 @@ mod tests {
             hex::encode(sha2::Sha256::digest(&bytes)),
             "the entry is still hashed against the index"
         );
+    }
+
+    /// The three numbers `read_entry` decides on, at the edge of each.
+    ///
+    /// Both of its bounds are `>` against `bound` and the magic read is `<`
+    /// against [`OBJECT_MAGIC_BYTES`], and the campaign left all three alive:
+    /// the tests above each pick one side of one edge, and one side of an edge
+    /// says nothing about where the edge is. `bound` is injectable precisely so
+    /// this can be written, and the two sides of each edge here have different
+    /// outcomes.
+    #[test]
+    fn each_bound_is_the_largest_value_it_admits_and_not_the_first_it_refuses() {
+        // The header's claim, checked before a byte of content is read. A
+        // claim of exactly `bound` is the largest this verifier will hold.
+        let bytes = elf_bytes(64);
+        let scan = read_entry(&mut bytes.as_slice(), 64, 64).expect("the entry streams");
+        assert!(
+            matches!(scan.object, Some(Ok(_))),
+            "a header claiming exactly the bound is held: {:?}",
+            scan.object
+        );
+        let scan = read_entry(&mut bytes.as_slice(), 65, 64).expect("the entry streams");
+        let Some(Err(message)) = scan.object else {
+            panic!("one byte over the bound is refused, got {:?}", scan.object)
+        };
+        assert!(message.contains("reads at most"), "{message}");
+
+        // The second bound, over the bytes that actually arrive. The header is
+        // honest here, so only the streamed length decides.
+        let exact = elf_bytes(64);
+        let scan = read_entry(&mut exact.as_slice(), 64, 64).expect("the entry streams");
+        assert!(
+            matches!(&scan.object, Some(Ok(held)) if held.len() == 64),
+            "an entry of exactly the bound is held whole: {:?}",
+            scan.object
+        );
+        let over = elf_bytes(65);
+        let scan = read_entry(&mut over.as_slice(), 65, 64).expect("the entry streams");
+        assert!(
+            matches!(scan.object, Some(Err(_))),
+            "one byte over is refused: {:?}",
+            scan.object
+        );
+
+        // The magic read takes `OBJECT_MAGIC_BYTES`, and `replace < with <=`
+        // there is an equivalent mutant rather than a gap. Reading a fifth byte
+        // changes nothing that is decided: `object_format_of` answers the same
+        // for four bytes and five, the extra byte comes out of the same entry
+        // so every partial sum against `bound` is one larger and the *total* is
+        // unchanged, and both the length and the digest are over the same bytes
+        // either way. An entry shorter than five bytes simply reads zero and
+        // breaks. What is asserted instead is the property that would break if
+        // the magic read ever took bytes that were not the entry's.
+        let scan = read_entry(&mut exact.as_slice(), 64, 64).expect("the entry streams");
+        let Some(Ok(held)) = scan.object else {
+            panic!("expected the entry to be held, got {:?}", scan.object)
+        };
+        assert_eq!(
+            held, exact,
+            "every byte of the entry is the entry's, and the magic read took no more than it \
+             needed"
+        );
+        assert_eq!(scan.len, 64, "and the length counts each byte once");
     }
 
     #[test]
