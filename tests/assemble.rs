@@ -738,7 +738,13 @@ fn a_symlink_pointing_out_of_the_application_directory_is_refused() {
 
     match &error {
         AssembleError::UnsafeSymlink { path, .. } => {
-            assert_eq!(path, &notify.join("priv/escape.txt"));
+            assert_eq!(
+                path,
+                &crate::common::hostpath::resolved(&notify.join("priv/escape.txt")),
+                "the walk starts from the canonical application root, so the path it \
+                 reports is canonical too — and on a host whose temporary directory is \
+                 behind a symlink that is not the path this test joined"
+            );
         }
         other => panic!("expected UnsafeSymlink, got {other:?}"),
     }
@@ -758,7 +764,13 @@ fn a_dangling_symlink_is_refused() {
 
     match &error {
         AssembleError::UnsafeSymlink { path, .. } => {
-            assert_eq!(path, &notify.join("priv/dangling.txt"));
+            assert_eq!(
+                path,
+                &crate::common::hostpath::resolved(&notify.join("priv/dangling.txt")),
+                "the walk starts from the canonical application root, so the path it \
+                 reports is canonical too — and on a host whose temporary directory is \
+                 behind a symlink that is not the path this test joined"
+            );
         }
         other => panic!("expected UnsafeSymlink, got {other:?}"),
     }

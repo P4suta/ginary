@@ -348,7 +348,10 @@ fn a_symlink_out_of_the_runtime_root_is_refused() {
         error,
         RepackError::UnsafeSymlink {
             path: link,
-            target: outside,
+            // The target is what `canonicalize` resolved the link to, and on a
+            // host whose temporary directory is behind a symlink that is not
+            // the path this test wrote the file at.
+            target: crate::common::hostpath::resolved(&outside),
         }
     );
 }

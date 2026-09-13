@@ -36,15 +36,23 @@ use crate::common::stubfile::{self, Marker};
 
 /// A stub for `target` that passes every gate in `stub::verify`.
 ///
-/// This test run's own `ginary`, with `e_machine` rewritten to the other
-/// architecture and the identity marker rewritten to match. The interpreter
-/// stays this machine's glibc loader, which is what makes the file a *dynamic
-/// gnu* binary for the foreign machine rather than a static one — exactly the
-/// target the sub-table below names. Fabricated rather than cross-built so
-/// that the guard is asserted on every machine, with or without `cross`.
+/// The committed dynamic-gnu ELF fixture, with `e_machine` rewritten to the
+/// other architecture and a ginary identity marker appended. It keeps the
+/// fixture's own interpreter and `DT_NEEDED` entries, which is what makes the
+/// file a *dynamic gnu* binary for the foreign machine rather than a static
+/// one — exactly the target the sub-table below names. Fabricated rather than
+/// cross-built so that the guard is asserted on every machine, with or without
+/// `cross`.
+///
+/// It used to be *this test run's own `ginary`*, which is an ELF only where
+/// the host is Linux: on macOS `patch_elf_machine` wrote the foreign machine
+/// into the middle of a Mach-O header and `stub::verify` refused the result
+/// with `cannot use a stub for linux-aarch64-gnu` — the guard this file is
+/// about was never reached. That is the defect `common::repack::test_binary`
+/// carries in its own documentation, in a second place; see
+/// `docs/dev/log/E9.md`.
 fn fabricated_stub(dir: &Path, target: &Target) -> PathBuf {
-    let bytes = std::fs::read(stubfile::ginary_bin()).expect("the ginary binary is readable");
-    let mut bytes = patch_elf_machine(&bytes, foreign_machine());
+    let mut bytes = patch_elf_machine(&crate::common::repack::test_binary(), foreign_machine());
     let marker = Marker::for_target(target).bytes();
     match stubfile::offsets(&bytes).as_slice() {
         [] => bytes.extend_from_slice(&marker),

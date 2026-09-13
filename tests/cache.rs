@@ -21,7 +21,7 @@ use common::artifact::{APP, SyntheticArtifact};
 use common::cachefs::{DAY, HeldLock, plant_entry};
 use common::hostpath::same_path;
 use common::payload::SharedSink;
-use common::tools::require_tools;
+use common::tools::require_flock;
 
 use ginary::cache::{
     self, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin, PRUNE_DAYS_VAR, PruneOptions,
@@ -672,7 +672,7 @@ fn an_age_of_zero_prunes_nothing_at_all() {
 
 #[test]
 fn a_locked_sibling_is_kept_however_old_it_is() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -699,7 +699,7 @@ fn a_locked_sibling_is_kept_however_old_it_is() {
 
 #[test]
 fn all_ignores_the_age_and_still_honours_the_lock() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");

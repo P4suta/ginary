@@ -201,6 +201,86 @@ pub fn require_elf_stripper() -> Option<Toolchain> {
     require_tools(&["strip"])
 }
 
+/// Whether this host's filesystem will hold a file name that is not UTF-8.
+///
+/// Asked by *doing it*, in a directory of the caller's making, because this is
+/// a property of the filesystem rather than of the operating system: Linux and
+/// its usual filesystems take any byte but `/` and NUL in a name, and macOS
+/// refuses one that is not UTF-8 outright —
+///
+/// ```text
+/// ---- a1c_a_non_utf8_file_name_was_dropped::a_priv_file_whose_name_is_not_utf8_fails_the_staging ----
+/// the latin-1 file: Os { code: 92, kind: Uncategorized, message: "Illegal byte sequence" }
+/// ```
+///
+/// — so the two tests that plant `caf\xe9.dat` failed on the first macOS host
+/// to run the suite, in the *setup* rather than in the claim. The claim is
+/// about what `ginary::assemble` does with such a name, and a machine that
+/// cannot create one cannot make it.
+///
+/// No escalation under [`REQUIRE_VAR`], for [`require_elf_stripper`]'s reason:
+/// nobody can install being a filesystem that stores arbitrary bytes. The
+/// answer is a printed skip, and the other half of the same rule — that a name
+/// ginary cannot represent is an error and not a silent omission — is asserted
+/// on every host by the `to_str()` arms those tests drive with a name that is
+/// valid UTF-8.
+#[cfg(unix)]
+pub fn filesystem_holds_non_utf8_names(dir: &Path) -> bool {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let probe = dir.join(OsStr::from_bytes(b"ginary-probe-\xe9"));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(error) => {
+            eprintln!("skipping: this filesystem will not hold a name that is not UTF-8: {error}");
+            false
+        }
+    }
+}
+
+/// util-linux `flock(1)`, or a reported skip on a host that has no such
+/// program.
+///
+/// The lock tests prove that [`ginary::cache_lock`] and the *kernel* agree,
+/// and a lock proved with the code that takes it proves nothing, so they take
+/// the other side of the exclusion with a program nobody here wrote. On Linux
+/// that program is util-linux `flock(1)`, which every runner and every
+/// developer machine has.
+///
+/// macOS has none — `flock(1)` is util-linux, not POSIX — and [`REQUIRE_VAR`]
+/// turned the missing program into a panic, so eleven tests failed on the
+/// first macOS host ever to run this suite, for a tool that host can never
+/// have:
+///
+/// ```text
+/// ---- a_locked_sibling_is_kept_however_old_it_is stdout ----
+/// thread '…' panicked at tests/common/tools.rs:88:17:
+/// `flock` is not on PATH and GINARY_REQUIRE_TOOLCHAIN=1 forbids skipping
+/// ```
+///
+/// That is the defect `docs/dev/log/F1-host-tool-gates.md` fixed for `strip`,
+/// in a second place, and it takes the same answer [`require_elf_stripper`]
+/// takes: the escalation belongs to the platform that can satisfy it, and
+/// everywhere else the honest report is a printed skip. The claim is not
+/// weakened — it is unproved on that host and says so — and the other half of
+/// the same contract, that a shared lock survives `execve`, *is* proved on
+/// macOS by `tests/launcher.rs` against a real launcher.
+///
+/// # Panics
+///
+/// If `flock` is missing on Linux and [`REQUIRE_VAR`] is `1`.
+pub fn require_flock() -> Option<Toolchain> {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping: util-linux flock(1) is not a program this host has");
+        return None;
+    }
+    require_tools(&["flock"])
+}
+
 /// The POSIX shell [`require_posix_shell`] probes for.
 ///
 /// The same string as [`ginary::native::HOOK_SHELL`], spelled here because

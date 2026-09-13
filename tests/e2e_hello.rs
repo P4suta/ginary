@@ -214,7 +214,10 @@ fn the_json_report_describes_the_file_that_is_actually_on_disk() {
         .expect("the report names the file it wrote");
     assert_eq!(
         std::path::Path::new(out),
-        project.artifact(),
+        // The build canonicalises the project root and reports paths under it,
+        // so on a host whose temporary directory is behind a symlink the file
+        // it names is not the path this test joined.
+        crate::common::hostpath::resolved(&project.artifact()),
         "the report has to name the artifact the build actually wrote"
     );
 
@@ -445,15 +448,23 @@ fn a_flipped_payload_byte_fails_verify_and_still_prints_the_manifest() {
     };
     let project = build_fixture();
     let artifact = project.artifact();
-    // A byte near the end of the compressed payload, sixteen bytes before the
-    // trailer: the front of the payload, where the manifest is, must still be
-    // readable, so `inspect` without `--verify` still answers.
-    let len = std::fs::metadata(&artifact).expect("stat").len();
-    let damaged = crate::common::built::corrupt_copy(
-        &artifact,
-        "damaged",
-        len - ginary::trailer::TRAILER_LEN - 16,
-    );
+    // A byte near the end of the compressed payload: the front of the payload,
+    // where the manifest is, must still be readable, so `inspect` without
+    // `--verify` still answers.
+    //
+    // Asked of `payload::locate` rather than measured back from the end of the
+    // file. On Linux and Windows the payload ends where the trailer begins, so
+    // `len - TRAILER_LEN - 16` is inside it; a macOS artifact carries its
+    // payload inside `__LINKEDIT` with the ad-hoc *signature* after it, and
+    // the same arithmetic damaged the signature and left the payload whole —
+    // `inspect --verify` then found nothing wrong and exited 0.
+    let file = std::fs::File::open(&artifact).expect("the artifact opens");
+    let found = ginary::payload::locate(&file)
+        .expect("the artifact's payload is locatable")
+        .expect("a built artifact carries a payload");
+    drop(file);
+    let damaged =
+        crate::common::built::corrupt_copy(&artifact, "damaged", found.offset + found.len - 16);
 
     let verified = project.ginary(&["inspect".as_ref(), "--verify".as_ref(), damaged.as_os_str()]);
     assert_eq!(

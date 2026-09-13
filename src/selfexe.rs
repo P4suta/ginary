@@ -179,10 +179,19 @@ mod tests {
             file.read_exact(&mut magic).is_ok(),
             "the running executable must be readable"
         );
+        // `cfg(unix)` is true on macOS, whose executables are Mach-O, so an
+        // ELF magic here was the fourteenth of the thirteen tests
+        // `crate::platform::object_format` was written for — it only ever ran
+        // on Linux, and failed on the first macOS host to run the suite with
+        // `left: [207, 250, 237, 254]`. What `open_self` promises is that the
+        // bytes are the running executable's, and the host's own object format
+        // is how that is checked without naming one platform's.
+        let expected = crate::platform::object_format(crate::platform::HOST);
         assert_eq!(
-            magic,
-            [0x7f, b'E', b'L', b'F'],
-            "the running executable must begin with the ELF magic"
+            crate::platform::object_format_of(&magic),
+            Some(expected),
+            "the running executable must begin with this host's own object magic ({})",
+            expected.as_str()
         );
         assert!(
             path.is_absolute(),

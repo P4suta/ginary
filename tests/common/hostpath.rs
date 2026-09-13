@@ -28,7 +28,7 @@
 //! `ginary::winpath` uses for the `\\?\` prefix; see
 //! `tests/regressions/e7_the_xdg_rule_used_the_hosts_idea_of_an_absolute_path.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ginary::target::Os;
 
@@ -229,6 +229,54 @@ pub fn nested_json_escaped(text: &str, depth: usize) -> String {
 /// `ginary::winpath::plain_path`'s whole purpose and is the identity on unix.
 pub fn same_path(left: &Path, right: &Path) -> bool {
     ginary::winpath::plain_path(left) == ginary::winpath::plain_path(right)
+}
+
+/// `path` with every directory above its last component resolved.
+///
+/// The rule three tests were missing, and that only a host whose temporary
+/// directory is behind a symbolic link can show. On macOS `TMPDIR` is under
+/// `/var/folders/...` and `/var` is a link to `/private/var`, so a path a test
+/// *built* reads `/var/folders/…` while the same path reported by code that
+/// canonicalised its root reads `/private/var/folders/…`. One file, two
+/// spellings, and an `assert_eq!` that calls them different:
+///
+/// ```text
+/// ---- a_dangling_symlink_is_refused stdout ----
+///   left: "/private/var/folders/…/shipment/notify/priv/dangling.txt"
+///  right: "/var/folders/…/shipment/notify/priv/dangling.txt"
+/// ```
+///
+/// `ginary::assemble` canonicalises the application root once and walks from
+/// there, so every path it reports is canonical and every path a test joins
+/// onto `TempDir::path` is not. Resolving the expectation is the fix, and
+/// resolving it *above the last component* rather than whole is the point: the
+/// leaf may be a dangling symlink, which is exactly what two of these tests
+/// plant, and [`std::fs::canonicalize`] cannot answer for one.
+///
+/// A path no ancestor of which resolves — a relative name, a spelling recorded
+/// on another platform — comes back unchanged, so this narrows a comparison and
+/// never invents one.
+pub fn resolved(path: &Path) -> PathBuf {
+    // The last component is never resolved, only carried. Resolving it would
+    // follow the very link two of these tests plant — `priv/escape.txt` points
+    // at `outside.txt`, and a whole-path `canonicalize` answers `outside.txt`,
+    // which is where the link goes rather than where the link is.
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        ancestor = parent;
+        if let Ok(real) = std::fs::canonicalize(ancestor) {
+            let mut out = real;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+    }
 }
 
 /// Whether `left` and `right` are two spellings of one path, as `os` spells

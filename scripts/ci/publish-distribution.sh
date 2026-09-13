@@ -19,8 +19,12 @@ trap 'rm -f -- "$verify"/*; rmdir -- "$verify"' EXIT
 gh release download "$tag" --dir "$verify"
 cmp "$assets/SHA256SUMS" "$verify/SHA256SUMS"
 cmp "$assets/inventory.json" "$verify/inventory.json"
-diff <(cd "$assets" && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
-     <(cd "$verify" && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+# `-printf` is GNU find's and no other's, so the rehearsal that runs this
+# script could not run off Linux: `find: -printf: unknown primary or operator`.
+# The `./` prefix `find .` prints is removed with `sed` instead, which every
+# POSIX host has and which produces exactly the same list.
+diff <(cd "$assets" && find . -maxdepth 1 -type f | sed 's|^\./||' | LC_ALL=C sort) \
+     <(cd "$verify" && find . -maxdepth 1 -type f | sed 's|^\./||' | LC_ALL=C sort)
 (
   cd "$verify"
   sha256sum --check SHA256SUMS
