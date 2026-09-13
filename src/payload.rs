@@ -151,10 +151,15 @@ pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
         return Ok(None);
     }
 
-    let facts = crate::macho::read(&head).map_err(|source| TrailerError::Section {
-        message: source.to_string(),
-    })?;
-    if facts.is_fat {
+    // Fat or thin is the first four bytes, and this reads them there rather
+    // than through `macho::read`, which parses the whole object. The head is
+    // capped, so a Mach-O larger than the cap has no `__LINKEDIT` in it and
+    // `object` refuses to resolve the `LC_SYMTAB` it finds — which turned a
+    // payload-less binary into exit 122 for every command it has. Everything
+    // below reads load commands, and load commands are in the head by
+    // construction; see
+    // `tests/regressions/f1_reading_a_macho_head_needed_the_whole_file.rs`.
+    if crate::macho::is_fat(&head) {
         return Err(TrailerError::Fat);
     }
 

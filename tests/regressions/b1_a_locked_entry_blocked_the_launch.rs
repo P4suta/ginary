@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::common::artifact::{STUB_EXIT, SyntheticArtifact};
 use crate::common::cachefs::{HeldLock, lock_path};
-use crate::common::tools::require_tools;
+use crate::common::tools::require_flock;
 
 /// How long a launch may take while somebody else holds the entry.
 ///
@@ -33,7 +33,7 @@ const LAUNCH_BUDGET: Duration = Duration::from_secs(20);
 
 #[test]
 fn a_foreign_exclusive_lock_does_not_stop_the_application_starting() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("a temporary directory");

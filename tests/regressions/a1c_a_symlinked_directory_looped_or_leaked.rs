@@ -136,7 +136,12 @@ fn a_symlink_out_of_the_ebin_into_the_sources_is_refused() {
 
     match &error {
         AssembleError::UnsafeSymlink { path, .. } => {
-            assert_eq!(path, &trees.app().join("ebin/sources"));
+            assert_eq!(
+                path,
+                &crate::common::hostpath::resolved(&trees.app().join("ebin/sources")),
+                "the walk starts from the canonical application root, so the path it \
+                 reports is canonical too"
+            );
         }
         other => panic!("expected UnsafeSymlink, got {other:?}"),
     }

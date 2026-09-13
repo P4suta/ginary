@@ -35,13 +35,11 @@
 //! wrong section, so that is the rule, stated over every entry rather than over
 //! the one that went wrong.
 
+use crate::common::readiness::{deferred_entries, deferred_section};
 use crate::common::repo::read;
 
 /// The document whose deferred section this file reads.
 const SWEEP: &str = "docs/dev/v1-readiness.md";
-
-/// The heading the deferred items live under.
-const HEADING: &str = "## The deferred items, restated plainly";
 
 /// The ways a bullet admits it does not belong in that section.
 ///
@@ -59,57 +57,24 @@ const NOT_DEFERRED: [&str; 4] = [
 ];
 
 /// The lines of the deferred section, between its heading and the next one.
-fn deferred_section() -> String {
-    let sweep = read(SWEEP);
-    let section = sweep.split(HEADING).nth(1).unwrap_or_else(|| {
-        panic!("{SWEEP} has no `{HEADING}` section, so this rule has no subject")
-    });
-    section.split("\n## ").next().unwrap_or(section).to_owned()
+///
+/// The parsing moved to [`crate::common::readiness`] in F1, so that
+/// `f1_the_deferred_list_outlived_its_own_evidence.rs` reads exactly the
+/// bullets this rule reads. The calibration below stayed here, with the rule
+/// it calibrates.
+fn section() -> String {
+    deferred_section(&read(SWEEP))
 }
 
 /// The bullets of the deferred section, each flattened to one line.
-///
-/// Flattened because the document hard-wraps at about 100 columns, so a phrase
-/// this rule looks for is routinely split across two lines and a scan that read
-/// the lines as they fall would miss it — which is how a rule about prose
-/// quietly stops matching.
-///
-/// A continuation line is an *indented* one, which is what markdown requires of
-/// text belonging to a bullet. The distinction is not pedantry: the list is
-/// followed by a closing paragraph at the left margin, and a reader that took
-/// every non-empty line would append that paragraph to the last entry and then
-/// answer questions about the list using prose that is not in it.
-fn deferred_entries() -> Vec<String> {
-    let mut entries: Vec<String> = Vec::new();
-    for line in deferred_section().lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- ") {
-            entries.push(rest.to_owned());
-            continue;
-        }
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some(last) = entries.last_mut() else {
-            // Prose before the first bullet: the paragraph introducing the
-            // list, which is not in it. The rule below reads entries, and this
-            // introduction has to be able to state the rule it governs.
-            continue;
-        };
-        if !line.starts_with([' ', '\t']) {
-            // Unindented and not a bullet: the list has ended.
-            break;
-        }
-        last.push(' ');
-        last.push_str(trimmed);
-    }
-    entries
+fn entries() -> Vec<String> {
+    deferred_entries(&read(SWEEP))
 }
 
 #[test]
 fn the_rule_this_file_applies_reads_a_bullet_that_spans_two_lines() {
-    let section = deferred_section();
-    let entries = deferred_entries();
+    let section = section();
+    let entries = entries();
     assert!(
         entries.len() >= 2,
         "the deferred section has {} entries; this rule has lost its subject",
@@ -165,7 +130,7 @@ fn the_rule_this_file_applies_reads_a_bullet_that_spans_two_lines() {
 #[test]
 fn no_entry_of_the_deferred_list_says_it_is_not_deferred() {
     let mut offenders: Vec<String> = Vec::new();
-    for entry in deferred_entries() {
+    for entry in entries() {
         let lowered = entry.to_ascii_lowercase();
         for phrase in NOT_DEFERRED {
             if lowered.contains(phrase) {

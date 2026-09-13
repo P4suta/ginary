@@ -397,14 +397,26 @@ fn a_build_for_a_target_whose_stub_is_not_there_is_refused() {
 
 #[test]
 fn a_macos_build_with_no_darwin_stub_gets_the_honest_stub_search_error() {
-    // There is no macOS toolchain on this host, so there is never a stub to
-    // find for a darwin target without `--stub` or `GINARY_STUB_DIR`. This is
-    // the one honest end state a darwin build reaches here: the same
-    // `BundleError::Stub` refusal every other unstubbed cross target gets,
-    // naming every path `stub::locate` tried — see `docs/dev/log/D3.md` for
-    // what only a macOS CI runner can carry this further.
+    // A darwin target that is not this host's, so there is never a stub to
+    // find for it without `--stub` or `GINARY_STUB_DIR`. This is the one
+    // honest end state such a build reaches: the same `BundleError::Stub`
+    // refusal every other unstubbed cross target gets, naming every path
+    // `stub::locate` tried — see `docs/dev/log/D3.md` for what only a macOS
+    // runner can carry further.
+    //
+    // *Not* this host's, because on an `aarch64` Mac `macos-aarch64` is the
+    // host target and `stub::locate` answers it with the running binary; the
+    // build then reached the export and failed with `MissingShipment`, which
+    // is a different sentence about a different thing. The two darwin targets
+    // are asked about symmetrically, so whichever Mac runs this, the one under
+    // test is a cross target.
     let project = TempProject::named("hello");
-    let macos: Target = "macos-aarch64".parse().expect("a target name");
+    let host = Target::host();
+    let macos: Target = if host.name() == "macos-aarch64" {
+        "macos-x86_64".parse().expect("a target name")
+    } else {
+        "macos-aarch64".parse().expect("a target name")
+    };
     let options = build_options_for(&project, &[macos]);
 
     let error = bundle::build_with_stub(&options, &ginary_bin(), &Diag::disabled())

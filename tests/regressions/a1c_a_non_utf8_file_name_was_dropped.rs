@@ -22,6 +22,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
+use crate::common::tools::filesystem_holds_non_utf8_names;
 use ginary::assemble::{self, AssembleError, StageOptions};
 use ginary::closure::app_dependency_closure;
 
@@ -77,6 +78,9 @@ fn latin1_path(dir: &Path) -> PathBuf {
 #[test]
 fn a_priv_file_whose_name_is_not_utf8_fails_the_staging() {
     let trees = Trees::new();
+    if !filesystem_holds_non_utf8_names(&trees.shipment) {
+        return;
+    }
     let path = latin1_path(&trees.shipment.join("notify/priv"));
     std::fs::write(&path, b"a file the application reads\n").expect("the latin-1 file");
 
@@ -98,6 +102,9 @@ fn a_priv_file_whose_name_is_not_utf8_fails_the_staging() {
 #[test]
 fn a_program_in_the_runtime_bin_whose_name_is_not_utf8_fails_the_staging() {
     let trees = Trees::new();
+    if !filesystem_holds_non_utf8_names(&trees.otp) {
+        return;
+    }
     let bin = trees.otp.join(format!(
         "erts-{}/bin",
         crate::common::fake_otp::DEFAULT_ERTS_VSN

@@ -514,9 +514,33 @@ impl OtpReport {
     }
 }
 
-/// The hint a cache directory that cannot be used earns.
+/// The hint a cache directory that cannot be *executed out of* earns.
+///
+/// One of three, because "this directory will not do" has three causes and
+/// they take three different actions. This is the `noexec` one: something was
+/// written and the kernel refused to start it.
 pub const CACHE_DIR_HINT: &str = "set GINARY_CACHE_DIR to a directory this user can write to on a filesystem that is not \
      mounted `noexec`";
+
+/// The hint a cache directory nothing could be *written* to earns.
+///
+/// Naming `noexec` here would send a reader to the mount table for a problem
+/// in the directory's permissions: nothing was written, so the mount's exec
+/// flag was never tested and nothing is known about it.
+pub const CACHE_DIR_WRITE_HINT: &str = "set GINARY_CACHE_DIR to a directory this user can write to";
+
+/// The hint a cache probe that outlived [`PROBE_TIMEOUT`] earns.
+///
+/// Not a directory problem at all. Under `noexec` the exec fails at once; a
+/// child that started and did not return says the machine is busy. The most
+/// common reason for it is worth naming, because a reader who has just been
+/// told their cache is fine needs to know what to do instead: on some systems
+/// a newly written executable is assessed the first time it is run, and the
+/// probe writes a new one every time.
+pub const CACHE_PROBE_TIMEOUT_HINT: &str = "the probe started and did not return in time, so this says the machine is busy rather than \
+     anything about the directory; some systems assess a newly written program on its first run, \
+     and the probe writes a new one each time. Run `ginary doctor` again when the machine is \
+     idle.";
 
 /// What a cache directory turned out to allow.
 ///
@@ -531,6 +555,14 @@ pub struct CacheProbe {
     pub writable: bool,
     /// Whether a file created there could then be executed.
     pub executable: bool,
+    /// Whether the probe program started and outlived [`PROBE_TIMEOUT`].
+    ///
+    /// Its own answer, and not a shade of `executable: false`. Under a
+    /// `noexec` mount the exec fails *at once*; a child that started and did
+    /// not return says the machine is busy, and the two earn different
+    /// sentences and different hints. See
+    /// `tests/regressions/f1_a_probe_that_timed_out_was_reported_as_a_noexec_mount.rs`.
+    pub timed_out: bool,
     /// What the operating system said, when either half failed.
     pub detail: Option<String>,
 }
@@ -547,20 +579,34 @@ impl CacheProbe {
         let mut text = format!("cache writable: {}\n", yes_no(self.writable));
         text.push_str(&format!(
             "cache executable: {}\n",
-            match (self.writable, self.executable) {
-                (_, true) => "yes",
-                (true, false) => "no (mounted noexec?)",
+            match (self.writable, self.executable, self.timed_out) {
+                (_, true, _) => "yes",
+                // It started. Whatever kept it from finishing, the mount let
+                // the kernel run it, which is the one thing `noexec` would
+                // have prevented.
+                (true, false, true) => "no (the probe did not finish in time)",
+                (true, false, false) => "no (mounted noexec?)",
                 // Nothing could be written, so nothing was run: saying
                 // `noexec` here would send a reader to the mount table for a
                 // problem that is in the directory's permissions.
-                (false, false) => "no (nothing could be written to run)",
+                (false, false, _) => "no (nothing could be written to run)",
             }
         ));
         if let Some(detail) = &self.detail {
             text.push_str(&format!("cache detail: {detail}\n"));
         }
-        if !self.writable || !self.executable {
-            text.push_str(&format!("hint: {CACHE_DIR_HINT}\n"));
+        // The same three cases the line above distinguishes, so that the hint
+        // and the sentence over it cannot disagree — which they did: a
+        // read-only directory printed "nothing could be written to run" and
+        // was then told to find a filesystem that is not mounted `noexec`.
+        let hint = match (self.writable, self.executable, self.timed_out) {
+            (_, true, _) => None,
+            (false, _, _) => Some(CACHE_DIR_WRITE_HINT),
+            (true, false, true) => Some(CACHE_PROBE_TIMEOUT_HINT),
+            (true, false, false) => Some(CACHE_DIR_HINT),
+        };
+        if let Some(hint) = hint {
+            text.push_str(&format!("hint: {hint}\n"));
         }
         text
     }
@@ -640,6 +686,7 @@ fn probe_cache_dir_with(dir: &Path, run: impl FnOnce(&Path) -> std::io::Result<(
     let refused = |detail: std::io::Error| CacheProbe {
         writable: false,
         executable: false,
+        timed_out: false,
         detail: Some(detail.to_string()),
     };
 
@@ -692,6 +739,10 @@ fn cache_probe_result(
     cleanup: std::io::Result<()>,
 ) -> CacheProbe {
     let executable = writable && outcome.is_ok();
+    let timed_out = outcome
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
     let mut detail = outcome.err().map(|error| error.to_string());
     if let Err(error) = cleanup {
         let cleanup = format!("probe cleanup failed: {error}");
@@ -703,6 +754,7 @@ fn cache_probe_result(
     CacheProbe {
         writable,
         executable,
+        timed_out,
         detail,
     }
 }
@@ -740,7 +792,18 @@ fn run_probe(path: &Path) -> std::io::Result<()> {
             Ok(child) => {
                 let report = crate::process::wait_child(child, PROBE_TIMEOUT, 0);
                 if let Some(error) = report.error {
-                    return Err(std::io::Error::other(error));
+                    // A timeout is carried as a *kind* and not only as a
+                    // sentence, because `CacheProbe::render` decides between
+                    // three different hints on it and reading the difference
+                    // out of a message is a rule that stops matching the first
+                    // time somebody rewords one.
+                    let kind = match &error {
+                        crate::process::ProcessError::Timeout { .. } => {
+                            std::io::ErrorKind::TimedOut
+                        }
+                        _ => std::io::ErrorKind::Other,
+                    };
+                    return Err(std::io::Error::new(kind, error));
                 }
                 if let Some(cleanup) = report.cleanup {
                     if let Some(error) = cleanup.error {
@@ -1013,7 +1076,13 @@ pub struct NativeObject {
     pub kind: crate::native::NativeKind,
     /// Its `DT_NEEDED` entries.
     pub needed: Vec<String>,
-    /// Whether its machine is the one this host runs.
+    /// Whether this host can run it: its machine is this host's *and* this
+    /// host's own objects are ELF.
+    ///
+    /// Both halves, because this table lists ELF only and an ELF is not
+    /// loadable on a machine whose own objects are Mach-O or PE however well
+    /// the CPU matches. `false` on every macOS and Windows host, therefore,
+    /// for every object in it.
     pub matches_host: bool,
     /// What a build for each configured target would decide about it.
     ///
@@ -1478,6 +1547,14 @@ fn shipment_report(shipment: &Path, now: SystemTime) -> Option<ShipmentReport> {
 /// and `ginary verify` names it on the artifact that carries it.
 fn native_objects(shipment: &Path) -> (Vec<NativeObject>, Vec<String>) {
     let host = Target::host().arch.as_str();
+    // The other half of `matches_host`. This walk lists ELF and nothing else,
+    // so an object it found is one this host can run only if this host's own
+    // objects are ELF too: an `aarch64` Linux shared object on an `aarch64`
+    // macOS machine agrees about the CPU and cannot be loaded there by any
+    // means. See
+    // `tests/regressions/f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one.rs`.
+    let host_runs_elf =
+        crate::platform::object_format(crate::platform::HOST) == crate::platform::ObjectFormat::Elf;
     let mut found = Vec::new();
     let mut notes = Vec::new();
     let mut file_notes = Vec::new();
@@ -1525,7 +1602,7 @@ fn native_objects(shipment: &Path) -> (Vec<NativeObject>, Vec<String>) {
             // beside this one is reached from the same answer.
             kind: crate::native::kind_of_elf(info.kind, info.is_pie),
             needed: info.needed,
-            matches_host: info.machine == host,
+            matches_host: host_runs_elf && info.machine == host,
             // Filled in by `fill_verdicts`, which needs the configuration this
             // walk is not given.
             verdicts: BTreeMap::new(),

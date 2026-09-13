@@ -439,11 +439,16 @@ fn build_sbom_writes_the_document_beside_the_artifact_and_names_it_last() {
 
     let output = project.build_with(&["--sbom"], &[]);
     let stdout = String::from_utf8(output.stdout.clone()).expect("utf-8");
-    let expected = project
-        .artifact()
-        .parent()
-        .expect("the artifact has a directory")
-        .join(format!("{FIXTURE}.spdx.json"));
+    // Resolved, because the build canonicalises the project root and reports
+    // paths under it: on a host whose temporary directory is behind a symlink
+    // the document it names is not the path this test joined.
+    let expected = crate::common::hostpath::resolved(
+        &project
+            .artifact()
+            .parent()
+            .expect("the artifact has a directory")
+            .join(format!("{FIXTURE}.spdx.json")),
+    );
 
     assert!(
         output.status.success(),

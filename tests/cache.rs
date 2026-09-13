@@ -21,7 +21,7 @@ use common::artifact::{APP, SyntheticArtifact};
 use common::cachefs::{DAY, HeldLock, plant_entry};
 use common::hostpath::same_path;
 use common::payload::SharedSink;
-use common::tools::require_tools;
+use common::tools::require_flock;
 
 use ginary::cache::{
     self, CacheDirs, DEFAULT_PRUNE_DAYS, Env, KeptReason, Origin, PRUNE_DAYS_VAR, PruneOptions,
@@ -672,7 +672,7 @@ fn an_age_of_zero_prunes_nothing_at_all() {
 
 #[test]
 fn a_locked_sibling_is_kept_however_old_it_is() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -699,7 +699,7 @@ fn a_locked_sibling_is_kept_however_old_it_is() {
 
 #[test]
 fn all_ignores_the_age_and_still_honours_the_lock() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1142,4 +1142,279 @@ fn a_fallback_root_this_process_owns_is_created_private() {
         &mut again,
     )
     .expect("the root this process created must be trusted");
+}
+
+// ----------------------------------- the bound on a completeness marker --
+//
+// `maintenance_owns` decides whether a key-shaped directory is this
+// application's before anything removes it, and it reads the marker under two
+// bounds: `symlink_metadata` refuses one that is not a plain file, and
+// `MAX_FRONT_ENTRY_BYTES` refuses one too large to be a manifest. Both bounds
+// are *off-by-one sensitive* and neither edge was asserted, so the nightly
+// mutation campaign left eight survivors across four lines of one function:
+// `>` traded for `>=` and for `==`, `+ 1` traded for `- 1` and for `* 1`, and
+// two `||` traded for `&&`. Each test below is one edge of one bound, written
+// so that the two sides of the edge have *different outcomes* — an entry that
+// is removed or an entry that is kept and reported `Unowned` — because an edge
+// whose two sides look the same proves nothing about where it is.
+
+/// A manifest for `app`, padded with trailing spaces to exactly `bytes`.
+///
+/// The padding is after the closing brace, so every prefix of the file down to
+/// the JSON itself still parses. That is deliberate: a reader that took fewer
+/// bytes than it should would otherwise fail for the wrong reason — a truncated
+/// object — and a test that cannot tell "read too little" from "read garbage"
+/// is not measuring the bound.
+fn manifest_padded_to(app: &str, bytes: usize) -> Vec<u8> {
+    let mut manifest = common::artifact::canonical_manifest();
+    manifest.app = app.to_owned();
+    let mut out = serde_json::to_vec(&manifest).expect("manifest JSON");
+    assert!(
+        out.len() < bytes,
+        "the manifest is {} bytes and cannot be padded down to {bytes}",
+        out.len()
+    );
+    out.resize(bytes, b' ');
+    out
+}
+
+/// An application directory holding one key-shaped entry whose marker is
+/// `marker`, and the entry's path.
+fn app_with_marker(dir: &Path, marker: &[u8]) -> (PathBuf, PathBuf) {
+    let app = dir.join(APP);
+    let entry = app.join("0123456789abcdef");
+    std::fs::create_dir_all(&entry).expect("the entry directory");
+    std::fs::write(entry.join("ginary.json"), marker).expect("the marker");
+    (app, entry)
+}
+
+#[test]
+fn a_marker_exactly_at_the_front_entry_bound_is_this_applications() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bound = usize::try_from(ginary::payload::MAX_FRONT_ENTRY_BYTES).expect("a usize bound");
+    let (app, entry) = app_with_marker(dir.path(), &manifest_padded_to(APP, bound));
+
+    let report = cache::uninstall(&app);
+
+    assert_eq!(
+        report.removed,
+        vec![entry.clone()],
+        "`MAX_FRONT_ENTRY_BYTES` is the largest marker there is, not the first one too large: a \
+         manifest of exactly that many bytes is one this application wrote, and refusing it \
+         leaves an entry nothing can ever reclaim. kept: {:?}",
+        report.kept
+    );
+    assert!(!entry.exists(), "the entry it reported removed is gone");
+}
+
+#[test]
+fn a_marker_one_byte_over_the_bound_is_refused_however_well_its_first_bytes_parse() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let over = usize::try_from(ginary::payload::MAX_FRONT_ENTRY_BYTES).expect("a usize bound") + 1;
+    let (app, entry) = app_with_marker(dir.path(), &manifest_padded_to(APP, over));
+
+    let report = cache::uninstall(&app);
+
+    assert_eq!(
+        report.kept,
+        vec![(entry.clone(), KeptReason::Unowned)],
+        "one byte over the bound is over the bound. The padding means the first
+         `MAX_FRONT_ENTRY_BYTES` of this file are a complete, valid manifest, so a reader that
+         stopped one byte early would accept it and delete the entry — which is exactly what a
+         bound that is read as `take(MAX)` rather than `take(MAX + 1)` does. removed: {:?}",
+        report.removed
+    );
+    assert!(entry.is_dir(), "the entry it kept is still there");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_marker_that_is_a_symlink_is_not_read_through() {
+    // A symlink is not a plain file, and `symlink_metadata` is what says so.
+    // The link points at a manifest that is valid in every other way, so a
+    // check that followed it — or that lost the `is_symlink` term — would call
+    // the entry this application's and delete it. Planting the target *outside*
+    // the application directory is the point: it is a file the cache does not
+    // own, reached by a name inside a directory it does.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = dir.path().join("elsewhere.json");
+    std::fs::write(&real, manifest_padded_to(APP, 1024)).expect("the real manifest");
+    let app = dir.path().join(APP);
+    let entry = app.join("0123456789abcdef");
+    std::fs::create_dir_all(&entry).expect("the entry directory");
+    std::os::unix::fs::symlink(&real, entry.join("ginary.json")).expect("the symlinked marker");
+
+    let report = cache::uninstall(&app);
+
+    assert_eq!(
+        report.kept,
+        vec![(entry.clone(), KeptReason::Unowned)],
+        "a marker that is a link is not a marker this application wrote. removed: {:?}",
+        report.removed
+    );
+    assert!(entry.is_dir(), "the entry it kept is still there");
+    assert!(
+        real.is_file(),
+        "and the file the link pointed at is untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_entry_whose_marker_cannot_be_stated_is_not_this_applications() {
+    // The third arm of the same match: a marker that is *absent* means "not
+    // finished yet", which a residue name is allowed to be, and a marker that
+    // cannot be looked at at all means nothing at all — so it is not ours.
+    // Directory mode `0o000` is how a real filesystem says so; running as root
+    // defeats it, so the test checks the condition it needs before asserting on
+    // it rather than passing for the wrong reason.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    let entry = app.join(format!(".0123456789abcdef.tmp-{}", 4_000_000_000_u32));
+    std::fs::create_dir_all(&entry).expect("the residue directory");
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o000))
+        .expect("an unreadable residue");
+    let unreadable = std::fs::symlink_metadata(entry.join("ginary.json"))
+        .err()
+        .is_some_and(|error| error.kind() != std::io::ErrorKind::NotFound);
+    if !unreadable {
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the mode");
+        eprintln!("skipping: this user can read a directory with mode 000");
+        return;
+    }
+
+    let report = cache::uninstall(&app);
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    assert_eq!(
+        report.kept,
+        vec![(entry.clone(), KeptReason::Unowned)],
+        "an unfinished residue is allowed to have *no* marker, and this one has a marker nothing \
+         can look at — a different thing, and not a licence to delete the tree. removed: {:?}",
+        report.removed
+    );
+    assert!(entry.is_dir(), "the entry it kept is still there");
+}
+
+// ------------------------------------------------ what the sweep owns --
+//
+// `sweep` reclaims the residue of interrupted extractions, and every decision
+// it makes is a refusal to delete something: a live owner's work, a tree that
+// is not ours, a name that is not a residue at all. The campaign's survivors
+// here are the refusals that had no fixture — a well-formed residue name whose
+// *marker* disowns it, a residue that is a link to an entry that would
+// otherwise qualify, and an application directory the sweep cannot read at all.
+
+/// A residue name for `key` owned by a process id nothing will ever have.
+fn dead_residue(key: &str) -> String {
+    format!(".{key}.tmp-4000000000")
+}
+
+#[test]
+fn a_dead_owners_residue_whose_marker_disowns_it_is_kept() {
+    // The name is a residue, the owner is gone, and the tree is a directory:
+    // everything the sweep looks at agrees except the marker, which is valid
+    // JSON that is not a manifest. `owned_sweep_tree` is the term that says so,
+    // and a sweep that dropped it — or that read the two conditions as `&&`
+    // instead of `||` — would delete a directory it cannot prove it wrote.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    let residue = app.join(dead_residue("0123456789abcdef"));
+    std::fs::create_dir_all(&residue).expect("the residue directory");
+    std::fs::write(residue.join("ginary.json"), b"{}").expect("a marker that is not a manifest");
+    std::fs::write(residue.join("partial"), b"an interrupted extraction").expect("some content");
+
+    let report = cache::sweep(&app, std::process::id(), &Diag::disabled()).expect("the sweep");
+
+    assert_eq!(
+        report.removed,
+        Vec::<PathBuf>::new(),
+        "a residue name is not ownership; the marker is"
+    );
+    assert!(
+        residue.join("partial").is_file(),
+        "the tree the sweep kept is still whole"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_residue_that_is_a_link_to_an_entry_this_application_owns_is_still_a_link() {
+    // The nastiest shape the sweep can be handed: a link whose *target* would
+    // pass every ownership check, so that a reader which asked about the target
+    // instead of the name would delete somebody else's directory and leave the
+    // link behind. `owned_sweep_tree` asks `symlink_metadata` first and only
+    // then asks about the marker, and both halves have to hold.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    std::fs::create_dir_all(&app).expect("the application directory");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a directory outside the application");
+    // The manifest names *this* application, so the only thing standing
+    // between the sweep and this tree is that the residue is a link.
+    std::fs::write(elsewhere.join("ginary.json"), manifest_padded_to(APP, 1024))
+        .expect("a manifest for this application, outside it");
+    let link = app.join(dead_residue("0123456789abcdef"));
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("the residue link");
+
+    let report = cache::sweep(&app, std::process::id(), &Diag::disabled()).expect("the sweep");
+
+    assert_eq!(
+        report.removed,
+        Vec::<PathBuf>::new(),
+        "a link is not a tree the sweep extracted, whatever the marker at the end of it says"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("the link is still there")
+            .file_type()
+            .is_symlink(),
+        "and it is still a link rather than a directory"
+    );
+    assert!(
+        elsewhere.join("ginary.json").is_file(),
+        "the directory it pointed at is untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_application_directory_the_sweep_cannot_read_is_an_error_and_not_an_empty_answer() {
+    // `Ok(SweepReport::default())` means "there was nothing to sweep", and a
+    // directory this process may not look inside is not that. The launcher acts
+    // on the difference: an empty report is a clean cache and an error is a
+    // numbered exit code with a hint. Mode `0o000` is how a real filesystem
+    // says it, and running as root defeats it, so the condition is checked
+    // before it is asserted on.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    std::fs::create_dir_all(&app).expect("the application directory");
+    std::fs::write(app.join("marker"), b"something to hide").expect("some content");
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000))
+        .expect("an unreadable application directory");
+    let unreadable = std::fs::read_dir(&app).is_err();
+
+    let outcome = cache::sweep(&app, std::process::id(), &Diag::disabled());
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    if !unreadable {
+        eprintln!("skipping: this user can read a directory with mode 000");
+        return;
+    }
+    let error = outcome.expect_err(
+        "a directory the sweep cannot read is not a directory with nothing in it, and answering \
+         `Ok` for it tells a launcher its cache is clean",
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&app.display().to_string()),
+        "the error names the directory it could not read: {rendered}"
+    );
 }

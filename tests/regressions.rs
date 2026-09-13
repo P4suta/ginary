@@ -530,6 +530,9 @@ mod e23_the_windows_allowlist_named_no_api_set_but_the_crt_one;
 #[path = "regressions/e23_the_windows_job_proved_erlang_rather_than_the_launcher.rs"]
 mod e23_the_windows_job_proved_erlang_rather_than_the_launcher;
 #[cfg(feature = "cli")]
+#[path = "regressions/f1_a_probe_that_timed_out_was_reported_as_a_noexec_mount.rs"]
+mod f1_a_probe_that_timed_out_was_reported_as_a_noexec_mount;
+#[cfg(feature = "cli")]
 #[path = "regressions/f1_beam_batches_exceeded_windows_command_lines.rs"]
 mod f1_beam_batches_exceeded_windows_command_lines;
 #[cfg(feature = "cli")]
@@ -554,8 +557,15 @@ mod f1_macos_signature_verification_was_only_a_test_helper;
 mod f1_multi_target_cli_lost_results;
 #[path = "regressions/f1_process_timeouts_lost_their_output.rs"]
 mod f1_process_timeouts_lost_their_output;
+#[path = "regressions/f1_reading_a_macho_head_needed_the_whole_file.rs"]
+mod f1_reading_a_macho_head_needed_the_whole_file;
 #[path = "regressions/f1_selftest_did_not_use_the_launchers_environment_or_lock.rs"]
 mod f1_selftest_did_not_use_the_launchers_environment_or_lock;
+#[path = "regressions/f1_the_deferred_list_outlived_its_own_evidence.rs"]
+mod f1_the_deferred_list_outlived_its_own_evidence;
+#[cfg(feature = "cli")]
+#[path = "regressions/f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one.rs"]
+mod f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one;
 #[path = "regressions/f1_trace_could_not_be_shared_or_correlated.rs"]
 mod f1_trace_could_not_be_shared_or_correlated;
 #[cfg(feature = "cli")]

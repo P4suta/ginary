@@ -641,6 +641,32 @@ pub fn command_counts(bytes: &[u8]) -> (u32, u32) {
     )
 }
 
+/// The mapped content between the end of the load commands and `__LINKEDIT`.
+///
+/// The one region of a Mach-O that `sign_macos`'s writer is defined not to
+/// touch: `__TEXT`, `__DATA_CONST` and `__DATA` keep their bytes and their
+/// offsets, because E9 replaced carving a new segment — which slid everything
+/// along and segfaulted on two real Macs — with growing `__LINKEDIT` over the
+/// payload, which moves nothing. The load-command area is excluded because the
+/// writer does change fields in it: `__LINKEDIT`'s `filesize` and `vmsize`, and
+/// `LC_CODE_SIGNATURE`'s `dataoff` and `datasize`.
+///
+/// This is what "the artifact was made out of that stub" means on a platform
+/// whose payload is not appended at the end of the file. [`None`] when the
+/// bytes are not a 64-bit little-endian Mach-O with a `__LINKEDIT` segment.
+pub fn content_before_linkedit(bytes: &[u8]) -> Option<&[u8]> {
+    let (_, sizeofcmds) = command_counts(bytes);
+    let commands_end = 32usize.checked_add(usize::try_from(sizeofcmds).ok()?)?;
+    let linkedit = segment_command_offset(bytes, "__LINKEDIT")?;
+    let field = linkedit.checked_add(40)?;
+    let raw: [u8; 8] = bytes.get(field..field.checked_add(8)?)?.try_into().ok()?;
+    let fileoff = usize::try_from(u64::from_le_bytes(raw)).ok()?;
+    if commands_end > fileoff {
+        return None;
+    }
+    bytes.get(commands_end..fileoff)
+}
+
 /// The lowest file offset any section in any segment begins at, ignoring the
 /// zero offset a `__bss`-style section carries.
 pub fn first_section_offset(bytes: &[u8]) -> Option<u64> {
