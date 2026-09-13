@@ -358,6 +358,25 @@ forbids `git add -A`. `fuzz/.gitignore` already did the equivalent for the fuzz 
   `rust/log-injection`, and Scorecard's `PinnedDependencies`, `BinaryArtifacts` and repository
   ones). None was triaged here and none was dismissed.
 
+## The local suite, finally measured
+
+`GINARY_REQUIRE_TOOLCHAIN=1 cargo test --features fault-injection --no-fail-fast` on this host:
+**2,587 passed, 20 failed**, against 226 failures at the baseline. Every one of the twenty is
+accounted for and none is a claim about ginary:
+
+| how many | what | why |
+|---|---|---|
+| 18 | `did not exit within …`, `incomplete process observation`, a cache probe that timed out, and one temporary tree that never appeared in time | first-exec assessment, measured above |
+| 1 | `doctor_renders_truncated_tool_evidence…` | the same, probing a freshly built `ginary` |
+| 1 | `f1_distribution_executed_a_tag_in_the_default_branch_context` | this machine's `git` policy wrapper, not worked around |
+
+A twenty-first was a real miss and is fixed: `tests/regressions/b1_a_locked_entry_blocked_the_launch.rs`
+still asked for `flock` through `require_tools`. The sweep that introduced `require_flock` grepped
+`tests/*.rs` and not `tests/regressions/`, and no CI job could catch it — the Linux jobs that set
+`GINARY_REQUIRE_TOOLCHAIN` have `flock`, and the `macos` job runs the smoke script rather than
+the suite. Only a macOS host running the whole suite finds a gate like that, which is the point
+of this record.
+
 ## Two things that are not defects
 
 - **`syspolicyd`, and what it does to a suite that writes executables.** This one deserves its
