@@ -794,8 +794,13 @@ fn a_hook_runs_in_the_project_with_the_environment_the_contract_names() {
     );
     assert_eq!(
         env.get("PWD").map(String::as_str),
-        Some(dir.path().to_string_lossy().as_ref()),
-        "a hook runs in the project, which is what its relative paths mean"
+        Some(
+            crate::common::hostpath::resolved(dir.path())
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "a hook runs in the project, which is what its relative paths mean. The child reports the \
+         directory the kernel resolved it to, so the expectation is resolved as well"
     );
 }
 

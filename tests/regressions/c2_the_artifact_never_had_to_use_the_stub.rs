@@ -18,8 +18,21 @@
 //! that runs the build (a different size, a different flavor in its marker),
 //! and it is a valid host stub, so the build must succeed with it.
 //!
-//! **The correct behaviour.** The artifact's leading bytes are the stub file,
-//! exactly; the payload starts where the stub ends; and what comes out runs.
+//! **The correct behaviour.** The artifact is made out of the stub file, and
+//! what comes out runs.
+//!
+//! "Made out of" is spelled differently on the two payload layouts, and F1
+//! found that out the first time a Mac had a darwin stub to be given. Where the
+//! payload is appended at the end of the file — Linux and Windows — the
+//! artifact's leading bytes *are* the stub, byte for byte, and the payload
+//! starts where the stub ends. A macOS artifact carries its payload inside
+//! `__LINKEDIT` and is then ad-hoc signed, so its load commands hold a grown
+//! `__LINKEDIT` and an `LC_CODE_SIGNATURE` the stub had different values for;
+//! what is byte-for-byte identical there is everything between the end of the
+//! load commands and `__LINKEDIT` — `__TEXT`, `__DATA_CONST`, `__DATA` — which
+//! is exactly the region E9's writer is defined to move nothing in. Asserting
+//! the Linux spelling on a Mac reported "the build used some other file" about
+//! a build that used precisely the file it was given.
 //!
 //! Gated twice, on the toolchain and on `target/stubs` being populated, for
 //! the reason `docs/dev/testing.md` gives: a claim about a real cross-built
@@ -65,12 +78,25 @@ fn the_artifact_begins_with_the_stub_the_build_was_given() {
         artifact_bytes.len(),
         stub_bytes.len()
     );
-    assert!(
-        artifact_bytes[..stub_bytes.len()] == stub_bytes[..],
-        "the artifact's first {} bytes are the stub that was named, and they are not; the \
-         build used some other file",
-        stub_bytes.len()
-    );
+    match crate::common::macho::content_before_linkedit(&stub_bytes) {
+        Some(stub_content) => {
+            let artifact_content = crate::common::macho::content_before_linkedit(&artifact_bytes)
+                .expect("the artifact is a Mach-O with a __LINKEDIT, as the stub is");
+            assert!(
+                artifact_content == stub_content,
+                "the artifact's mapped content is the stub's, and it is not ({} bytes against \
+                 {}); the build used some other file",
+                artifact_content.len(),
+                stub_content.len()
+            );
+        }
+        None => assert!(
+            artifact_bytes[..stub_bytes.len()] == stub_bytes[..],
+            "the artifact's first {} bytes are the stub that was named, and they are not; the \
+             build used some other file",
+            stub_bytes.len()
+        ),
+    }
 
     // The other half of the claim: bytes that match are not enough, because a
     // stub the build copied and then wrote the payload at the wrong offset of

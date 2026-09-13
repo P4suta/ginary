@@ -46,7 +46,7 @@ use common::artifact::{
 };
 use common::cachefs::{DAY, HeldLock, is_unlocked, lock_path, plant_entry, wait_until_unlocked};
 use common::hostpath::names_the_same_directory;
-use common::tools::require_tools;
+use common::tools::{require_flock, require_tools};
 
 use ginary::cache::Env;
 use ginary::launcher::{CMD_USAGE, CMD_USAGE_EXIT};
@@ -1490,12 +1490,16 @@ fn the_shared_lock_outlives_the_launcher_and_dies_with_the_runtime() {
     // `execve`. The launcher takes the lock and then execs; nothing of ginary
     // is left running, so if the lock were process-bound it would already be
     // gone by the time this test looks.
-    let Some(tools) = require_tools(&["flock", "sleep"]) else {
+    // Two gates rather than one list: `sleep` is POSIX and every host has it,
+    // and `flock(1)` is util-linux and only Linux does — so asking for both in
+    // one `require_tools` escalated the missing one under
+    // `GINARY_REQUIRE_TOOLCHAIN` on a macOS host that could never install it.
+    let (Some(locker), Some(tools)) = (require_flock(), require_tools(&["sleep"])) else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact(&dir);
-    let flock = tools.path("flock");
+    let flock = locker.path("flock");
     let sleep_dir = tools
         .path("sleep")
         .parent()
@@ -1535,7 +1539,7 @@ fn the_shared_lock_outlives_the_launcher_and_dies_with_the_runtime() {
 
 #[test]
 fn a_finished_run_leaves_the_lock_file_and_no_lock() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1627,7 +1631,7 @@ fn an_uninstall_leaves_the_crash_dump_beside_the_entries() {
 
 #[test]
 fn a_locked_old_sibling_survives_the_next_run() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1773,7 +1777,7 @@ fn ginary_cmd_uninstall_removes_every_entry_of_this_application() {
 
 #[test]
 fn ginary_cmd_uninstall_keeps_a_locked_entry_and_still_exits_zero() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");

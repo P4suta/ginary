@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::common::fake_otp::{DUMMY_BEAM, FakeOtp, FakeShipment};
 use crate::common::hostpath::{is_absolute_for, joined};
 use crate::common::oserror::{NOT_FOUND, os_words};
-use crate::common::tools::require_tools;
+use crate::common::tools::{require_flock, require_tools};
 
 /// A `Command` for the `ginary` binary, run from the crate root so that the
 /// fixture paths it is given — and prints back — are relative and stable.
@@ -1641,7 +1641,7 @@ fn cache_prune_all_ignores_the_age() {
 
 #[test]
 fn cache_prune_all_still_keeps_an_entry_a_process_is_holding() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");

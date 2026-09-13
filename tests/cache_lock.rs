@@ -18,7 +18,7 @@ mod common;
 use std::path::Path;
 
 use common::cachefs::{HeldLock, is_unlocked, lock_path, wait_until_unlocked};
-use common::tools::require_tools;
+use common::tools::require_flock;
 
 use ginary::cache_lock::{self, LOCK_NAME, SharedLock};
 
@@ -52,7 +52,7 @@ fn taking_the_shared_lock_creates_the_dotted_file_inside_the_entry() {
 
 #[test]
 fn a_shared_lock_blocks_an_exclusive_one_until_it_is_dropped() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -140,7 +140,7 @@ fn two_exclusive_locks_on_one_entry_do_not_coexist() {
 
 #[test]
 fn a_lock_another_process_holds_is_refused_to_pruning() {
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -164,7 +164,7 @@ fn the_shared_lock_gives_up_rather_than_waiting_for_an_exclusive_one() {
     // The failure mode the launcher's design forbids: a packaged application
     // that hangs for as long as somebody else holds a housekeeping lock. The
     // shared lock is non-blocking with a budget, so this returns.
-    let Some(tools) = require_tools(&["flock"]) else {
+    let Some(tools) = require_flock() else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
