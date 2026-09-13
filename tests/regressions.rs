@@ -561,6 +561,8 @@ mod f1_process_timeouts_lost_their_output;
 mod f1_reading_a_macho_head_needed_the_whole_file;
 #[path = "regressions/f1_selftest_did_not_use_the_launchers_environment_or_lock.rs"]
 mod f1_selftest_did_not_use_the_launchers_environment_or_lock;
+#[path = "regressions/f1_the_deferred_list_outlived_its_own_evidence.rs"]
+mod f1_the_deferred_list_outlived_its_own_evidence;
 #[cfg(feature = "cli")]
 #[path = "regressions/f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one.rs"]
 mod f1_the_native_table_matched_an_elf_to_a_host_that_cannot_load_one;
