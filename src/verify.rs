@@ -893,7 +893,7 @@ pub fn verify_with(path: &Path, options: &VerifyOptions<'_>) -> Result<VerifyRep
         if kind != tar::EntryType::Regular {
             issues.push(Issue::UnsupportedEntry {
                 path: name.clone(),
-                kind: entry_kind(kind).to_owned(),
+                kind: crate::payload::entry_kind(kind).to_owned(),
             });
             continue;
         }
@@ -1066,28 +1066,6 @@ fn octal(mode: u32) -> String {
 /// after them is a file of the application, and every rule below is about
 /// *position* rather than about a name.
 const FRONT_ENTRIES: usize = 2;
-
-/// What an entry that is neither a file nor a directory is called.
-///
-/// The vocabulary [`crate::payload::PayloadError::UnsupportedEntry`] uses, so
-/// the two commands name the same shapes the same way.
-fn entry_kind(kind: tar::EntryType) -> &'static str {
-    use tar::EntryType;
-
-    match kind {
-        EntryType::Continuous => "contiguous file",
-        EntryType::Symlink => "symlink",
-        EntryType::Link => "hardlink",
-        EntryType::Char => "character device",
-        EntryType::Block => "block device",
-        EntryType::Fifo => "fifo",
-        EntryType::GNULongName => "gnu long name",
-        EntryType::GNULongLink => "gnu long link name",
-        EntryType::GNUSparse => "gnu sparse",
-        EntryType::XGlobalHeader | EntryType::XHeader => "pax",
-        _ => "other",
-    }
-}
 
 /// The width the report's labels are padded to.
 ///

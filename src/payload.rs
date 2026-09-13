@@ -810,12 +810,21 @@ fn entry_name<R: Read>(entry: &tar::Entry<'_, R>) -> String {
     String::from_utf8_lossy(&entry.path_bytes()).into_owned()
 }
 
-/// Refuses everything that is neither a regular file nor a directory.
-fn check_entry_type<R: Read>(entry: &tar::Entry<'_, R>, name: &str) -> Result<(), PayloadError> {
+/// What an entry that is neither a regular file nor a directory is called.
+///
+/// One table for the two commands. `ginary verify` used to carry its own copy
+/// and its header said the two "name the same shapes the same way", which was
+/// a promise a reader had to check by eye — and a word that drifted in one
+/// copy and not the other would have kept both tables' tests green. Sharing
+/// the function makes the promise structural.
+///
+/// Four of the arms cannot be reached through `tar::Archive`, which acts on
+/// those type flags itself; `tests/payload.rs` holds that fact rather than
+/// leaving their absence unexplained.
+pub(crate) fn entry_kind(kind: tar::EntryType) -> &'static str {
     use tar::EntryType;
 
-    let kind = match entry.header().entry_type() {
-        EntryType::Regular | EntryType::Directory => return Ok(()),
+    match kind {
         EntryType::Continuous => "contiguous file",
         EntryType::Symlink => "symlink",
         EntryType::Link => "hardlink",
@@ -827,7 +836,18 @@ fn check_entry_type<R: Read>(entry: &tar::Entry<'_, R>, name: &str) -> Result<()
         EntryType::GNUSparse => "gnu sparse",
         EntryType::XGlobalHeader | EntryType::XHeader => "pax",
         _ => "other",
-    };
+    }
+}
+
+/// Refuses everything that is neither a regular file nor a directory.
+fn check_entry_type<R: Read>(entry: &tar::Entry<'_, R>, name: &str) -> Result<(), PayloadError> {
+    use tar::EntryType;
+
+    let found = entry.header().entry_type();
+    if matches!(found, EntryType::Regular | EntryType::Directory) {
+        return Ok(());
+    }
+    let kind = entry_kind(found);
     Err(PayloadError::UnsupportedEntry {
         path: name.to_owned(),
         kind: kind.to_owned(),
@@ -1283,6 +1303,34 @@ impl<R: Read> Read for HashingReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four ways two entries can claim one destination.
+    ///
+    /// `Destinations::insert` reads `!directory || !previous`, and the only
+    /// pair that may repeat is directory-over-directory: a tar carries a
+    /// directory entry for each level, and two of them for `lib/` are one
+    /// directory. Every other repeat is two things at one path. A table over
+    /// all four makes each half of that condition decide something.
+    #[test]
+    fn only_a_directory_may_be_claimed_twice() {
+        for (first, second, conflicts) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (false, false, true),
+        ] {
+            let mut seen = Destinations::default();
+            seen.insert("lib/hello", first).expect("the first claim");
+            let outcome = seen.insert("lib/hello", second);
+            assert_eq!(
+                outcome.is_err(),
+                conflicts,
+                "a {} after a {} at one path",
+                if second { "directory" } else { "file" },
+                if first { "directory" } else { "file" }
+            );
+        }
+    }
 
     /// `PayloadError::PathEscape` cannot be produced by any archive: every
     /// path that would make `unpack_in` answer `false` has already been
