@@ -55,6 +55,16 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
       - run: cargo doc --no-deps --locked
+      # And the stub flavor's documentation, which `cargo doc` above never
+      # builds: a `missing_docs` or an invalid tag in code the `cli` feature
+      # gates out was checked by nothing. The crate-level module history links
+      # to the `cli`-only modules by name and they are absent here, so that one
+      # lint is allowed and every other rustdoc warning stays denied. See
+      # `mise.toml`'s `doc:stub` task for the argument.
+      - name: Document the launcher-only stub build
+        env:
+          RUSTDOCFLAGS: -D warnings -A rustdoc::broken_intra_doc_links
+        run: cargo doc --no-deps --no-default-features --locked
       - uses: taiki-e/install-action@742a3317eac7bd62f91cd888b4eead5e784ba833 # v2.87.1
         with:
           tool: cargo-deny@0.19.7
