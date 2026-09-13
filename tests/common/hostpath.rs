@@ -256,7 +256,30 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
 /// A path no ancestor of which resolves — a relative name, a spelling recorded
 /// on another platform — comes back unchanged, so this narrows a comparison and
 /// never invents one.
+///
+/// **Unix only, and the Windows run is what said so.** The subject is a
+/// symbolic link in an ancestor, which is what a macOS `TMPDIR` has and a
+/// Windows one does not. Canonicalising there changes three things that are
+/// nothing to do with links — the verbatim `\\?\` prefix, the 8.3 short name
+/// (`RUNNER~1` becomes `runneradmin`) and the separator — and since only *one*
+/// side of a comparison goes through here, each of those becomes a spelling
+/// production never prints:
+///
+/// ```text
+/// ---- the_json_report_describes_the_file_that_is_actually_on_disk ----
+///   left: "C:\Users\RUNNER~1\AppData\Local\Temp\...\build/ginary\hello_ffi"
+///  right: "\\?\C:\Users\runneradmin\AppData\Local\Temp\...\build\ginary\hello_ffi"
+/// ```
+///
+/// So on Windows this is the identity, which is exactly what those assertions
+/// compared against before the macOS rule existed. A Windows comparison that
+/// genuinely needs resolving wants [`names_the_same_directory`], which
+/// canonicalises *both* sides and so cancels all three differences instead of
+/// introducing them.
 pub fn resolved(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        return path.to_path_buf();
+    }
     // The last component is never resolved, only carried. Resolving it would
     // follow the very link two of these tests plant — `priv/escape.txt` points
     // at `outside.txt`, and a whole-path `canonicalize` answers `outside.txt`,
