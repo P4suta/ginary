@@ -961,3 +961,217 @@ fn parses_every_app_in_host_otp() {
         failures.join("\n")
     );
 }
+
+// ------------------------------------------------ the edges of the parser --
+//
+// Every claim below is one boundary the nightly mutation campaign found
+// unasserted in `src/appfile.rs`: an escape whose arithmetic nothing pinned, a
+// byte bound off by one, two `&&`/`||` chains over the `>>` of a binary, and a
+// float the parser is supposed to refuse. Each is written so the two sides of
+// the edge have different *outcomes*, because an edge whose sides look the same
+// says nothing about where it is.
+
+#[test]
+fn an_octal_escape_reads_all_three_of_its_digits() {
+    // `\101` is 65 is `A`, and the value is built digit by digit with
+    // `value * 8 + digit`. Any other arithmetic in that line gives a different
+    // character for the same escape, and no test named one before.
+    assert_eq!(term(r#""\101"."#), Term::Str("A".to_owned()));
+    assert_eq!(term(r#""\0"."#), Term::Str("\0".to_owned()));
+    assert_eq!(term(r#""\177"."#), Term::Str("\u{7f}".to_owned()));
+    // Two digits, so the loop stops on the `x` rather than on its own count.
+    assert_eq!(term(r#""\101x"."#), Term::Str("Ax".to_owned()));
+}
+
+#[test]
+fn a_braced_hex_escape_needs_at_least_one_digit() {
+    // `\x{}` has its closing brace and no digits. The two halves of that test
+    // are `digits == 0` and `peek() != '}'`, and either one alone is enough to
+    // refuse: reading them as `&&` accepts `\x{}` as the NUL character, which
+    // is a byte nobody wrote.
+    let error = parse_failure(r#""\x{}"."#);
+    assert!(
+        error.expected.contains(r"\x{...}"),
+        "the refusal names the escape it wanted: {error:?}"
+    );
+    // And the shape that is well formed still parses, so the refusal above is
+    // about the digits and not about braces.
+    assert_eq!(term(r#""\x{41}"."#), Term::Str("A".to_owned()));
+}
+
+#[test]
+fn a_binary_holds_the_byte_255_and_refuses_the_codepoint_after_it() {
+    // `u8::MAX` is the largest byte a binary of bytes can carry, not the first
+    // one it cannot: `ÿ` is codepoint 255 and belongs in one.
+    assert_eq!(term(r#"<<"\x{ff}">>."#), Term::Bin("\u{ff}".to_owned()));
+
+    let error = parse_failure(r#"<<"\x{100}">>."#);
+    assert!(
+        error.expected.contains("up to 255"),
+        "the refusal states the bound: {error:?}"
+    );
+    assert!(
+        error.found.contains("256"),
+        "and names the codepoint that broke it: {error:?}"
+    );
+}
+
+#[test]
+fn an_empty_binary_needs_both_of_its_closing_angles() {
+    // `<<>>` is the empty binary and `<<>` is not the beginning of one. The
+    // opening test asks for two `>`, and reading it as `||` would take a single
+    // `>` followed by anything at all as an empty binary.
+    assert_eq!(term("<<>>."), Term::Bin(String::new()));
+
+    let error = parse_failure("<<>x.");
+    assert!(
+        error.expected.contains(">>"),
+        "a lone `>` is not an empty binary: {error:?}"
+    );
+}
+
+#[test]
+fn a_binary_with_content_needs_both_of_its_closing_angles() {
+    // The closing test is the same claim written the other way round — `!=`
+    // over `||` rather than `==` over `&&` — and reading *it* as `&&` would end
+    // a binary on a single `>` and swallow whatever followed.
+    assert_eq!(term(r#"<<"ab">>."#), Term::Bin("ab".to_owned()));
+
+    let error = parse_failure(r#"<<"ab">x."#);
+    assert!(
+        error.expected.contains(">>"),
+        "a binary that does not close is not a binary: {error:?}"
+    );
+}
+
+#[test]
+fn a_float_too_large_for_sixty_four_bits_is_refused_rather_than_infinite() {
+    // `"1.0e400".parse::<f64>()` is `Ok(inf)`, not an error, so the guard that
+    // asks whether the value is finite is the whole of this refusal. Without
+    // it an `.app` file could carry a float that renders back as `inf` — a word
+    // no Erlang term reader accepts.
+    let error = parse_failure("1.0e400.");
+    assert!(
+        error.expected.contains("64-bit float"),
+        "the refusal says what the bound is: {error:?}"
+    );
+    assert!(
+        error.found.contains("1.0e400"),
+        "and quotes what it was given: {error:?}"
+    );
+    // The negative side of the same edge, and a value that is merely large.
+    assert!(parse_failure("-1.0e400.").expected.contains("64-bit float"));
+    assert_eq!(term("1.0e300."), Term::Float(1.0e300));
+}
+
+#[test]
+fn a_hundred_siblings_are_not_a_hundred_levels_of_nesting() {
+    // `depth` is incremented on the way into a sequence and decremented on the
+    // way out, and only the *decrement* makes siblings free. A counter that
+    // never came back down would refuse a flat list of a hundred empty tuples
+    // as being a hundred levels deep, which it is not: it is two.
+    //
+    // Both shapes, because a sequence has two exits and each decrements: the
+    // early one an empty `{}` takes, and the one at the end of a `{a}`.
+    let empty = std::iter::repeat_n("{}", 100).collect::<Vec<_>>().join(",");
+    let Term::List(items) = term(&format!("[{empty}].")) else {
+        panic!("a list of empty tuples parses as a list");
+    };
+    assert_eq!(items.len(), 100);
+    assert!(items.iter().all(|item| *item == Term::Tuple(Vec::new())));
+
+    let filled = std::iter::repeat_n("{a}", 100)
+        .collect::<Vec<_>>()
+        .join(",");
+    let Term::List(items) = term(&format!("[{filled}].")) else {
+        panic!("a list of one-element tuples parses as a list");
+    };
+    assert_eq!(items.len(), 100);
+    assert!(
+        items
+            .iter()
+            .all(|item| *item == Term::Tuple(vec![Term::Atom("a".to_owned())])),
+        "and each is the tuple it was written as"
+    );
+}
+
+#[test]
+fn a_hash_that_opens_no_map_is_not_described_as_one() {
+    // `#{` is a map and `#` alone is not, and the difference decides the words
+    // a reader is given. `describe_found` says "a map (`#{`)" for the first,
+    // because the reader's problem is that maps are outside this subset; for
+    // the second it quotes the character, because the reader's problem is a
+    // typo. A lookahead that always held would send the first reader after the
+    // second one's answer.
+    let map = parse_failure("#{a => b}.");
+    assert!(
+        map.found.contains("a map"),
+        "`#{{` is a construct this subset does not have: {map:?}"
+    );
+    let hash = parse_failure("#a.");
+    assert!(
+        !hash.found.contains("a map"),
+        "a `#` that opens no map is not a map: {hash:?}"
+    );
+}
+
+#[test]
+fn a_lone_angle_and_a_lone_minus_are_not_the_constructs_they_begin() {
+    // Two lookaheads in `parse_term`, and both decide *which parser runs*. A
+    // guard that always held would send `<x` to the binary parser and `-a` to
+    // the number parser, and each would refuse it in the wrong words — a
+    // reader chasing "a string or `>>`" for a stray `<` is a reader the parser
+    // sent the wrong way.
+    let angle = parse_failure("<x.");
+    assert_eq!(
+        angle.expected, "a term",
+        "a `<` that opens no binary is just not a term: {angle:?}"
+    );
+    let minus = parse_failure("-a.");
+    assert_eq!(
+        minus.expected, "a term",
+        "a `-` that opens no number is just not a term: {minus:?}"
+    );
+    // And both constructs still parse when the second character is right.
+    assert_eq!(term("<<>>."), Term::Bin(String::new()));
+    assert_eq!(term("-1."), Term::Int(-1));
+}
+
+// `render_float`'s last arm is unreachable, and this is why.
+//
+// It reads `None if text.contains('.') => text, None => format!("{text}.0")`,
+// where `text` is `format!("{value:?}")` of a *finite* `f64` that carries no
+// `e`. The campaign leaves `replace match guard text.contains('.') with true`
+// alive and no test can kill it, because the guard is always true: Rust's
+// `Debug` for a finite float either uses exponent notation — which the arms
+// above this one take — or writes a decimal point. So the fallback exists
+// against a formatter that does not behave that way, and the mutant is
+// equivalent rather than a gap.
+//
+// That is an assumption about the standard library rather than about ginary,
+// so it is pinned here instead of argued in a comment. If a future Rust writes
+// `1` for a float, this fails and the arm stops being unreachable — which is
+// the moment somebody needs to know.
+proptest! {
+    #[test]
+    fn a_finite_float_debugs_with_a_dot_or_an_exponent(value in proptest::num::f64::NORMAL) {
+        let text = format!("{value:?}");
+        prop_assert!(
+            text.contains('.') || text.contains('e') || text.contains('E'),
+            "`{text}` has neither, so `render_float`'s fallback arm is reachable after all"
+        );
+    }
+}
+
+#[test]
+fn the_floats_that_are_not_normal_debug_the_same_way() {
+    // The generator above draws normal values only; these are the rest of the
+    // finite ones, and they are the shapes most likely to lose a decimal point.
+    for value in [0.0_f64, -0.0, f64::MIN_POSITIVE, -f64::MIN_POSITIVE, 5e-324] {
+        let text = format!("{value:?}");
+        assert!(
+            text.contains('.') || text.contains('e') || text.contains('E'),
+            "`{text}` has neither"
+        );
+    }
+}
