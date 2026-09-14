@@ -27,12 +27,23 @@ def candidate(number=1):
 
 
 def phases(summary):
+    """The phase list cargo-mutants writes for each outcome.
+
+    `Timeout` has two shapes and they mean different things: a test phase that
+    ran out of time is a mutant the suite did not pass, and a build phase that
+    ran out of time measured nothing. `BuildTimeout` is this fixture's name for
+    the second; cargo-mutants calls both of them `Timeout` and tells them apart
+    by exactly this list.
+    """
     build = {"phase": "Build", "duration": 0.1, "process_status": "Success", "argv": ["cargo", "test", "--no-run"]}
     test = {"phase": "Test", "duration": 0.1, "process_status": "Success", "argv": ["cargo", "test"]}
     if summary == "CaughtMutant":
         test["process_status"] = {"Failure": 101}
     elif summary == "Unviable":
         build["process_status"] = {"Failure": 101}
+        return [build]
+    elif summary == "BuildTimeout":
+        build["process_status"] = "Timeout"
         return [build]
     elif summary == "Timeout":
         test["process_status"] = "Timeout"
@@ -45,7 +56,8 @@ class MutationFixture(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.divisions = {"schema_version": 1, "modules": {"trailer": 1},
-                          "max_mutants_per_shard": 13, "build_timeout_seconds": 120, "test_timeout_seconds": 420}
+                          "max_mutants_per_shard": 13, "build_timeout_multiplier": 2,
+                          "test_timeout_seconds": 420}
         self.original = [candidate(1), candidate(2)]
         self.canonical = [{"id": "trailer-0", "module": "trailer", "shard": "0/1", "candidates": self.original}]
         self.enriched = [dict(copy.deepcopy(item), applicability={"platforms": ["linux"], "assigned_platform": "linux"})
@@ -58,7 +70,9 @@ class MutationFixture(unittest.TestCase):
     def outcome(self, item, summary="CaughtMutant"):
         mutant = {key: copy.deepcopy(value) for key, value in item.items() if key != "diff"}
         number = item["span"]["start"]["line"]
-        return {"scenario": {"Mutant": mutant}, "summary": summary, "phase_results": phases(summary),
+        return {"scenario": {"Mutant": mutant},
+                "summary": "Timeout" if summary == "BuildTimeout" else summary,
+                "phase_results": phases(summary),
                 "log_path": f"log/mutant-{number}.log", "diff_path": f"diff/mutant-{number}.diff"}
 
     def records(self):
@@ -95,7 +109,7 @@ class MutationFixture(unittest.TestCase):
         for name in ("stdout.log", "stderr.log"):
             (execution / name).write_text("completed mutation execution\n", encoding="utf-8")
         command = ["cargo", "mutants", "--file", "src/trailer.rs", "--re", ADAPTER.exact_regex(self.job["candidates"]),
-                   "--timeout", "420", "--build-timeout", "120", "--features", "fault-injection",
+                   "--timeout", "420", "--build-timeout-multiplier", "2", "--features", "fault-injection",
                    "--output", str(directory), "--cargo-test-arg=--", "--cargo-test-arg=--show-output"]
         process = {"schema_version": 1, "command": command, "status": "successful", "exit_code": 0,
                    "timeout_seconds": 1740, "elapsed_seconds": 1,
@@ -164,7 +178,7 @@ class PlanTests(MutationFixture):
 
     def test_invalid_budgets_and_github_matrix_overflow_are_refused(self):
         for field, value in (("max_mutants_per_shard", 14), ("max_mutants_per_shard", True),
-                             ("build_timeout_seconds", 0), ("test_timeout_seconds", -1),
+                             ("build_timeout_multiplier", 0), ("test_timeout_seconds", -1),
                              ("modules", {"trailer": 0})):
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 ADAPTER.make_bundle(self.canonical, self.enriched, self.bundle["sources"], dict(self.divisions, **{field: value}))
@@ -258,7 +272,8 @@ class OutcomeTests(MutationFixture):
         records[2] = self.outcome(self.original[1], "Unviable")
         report = self.report(records)
         self.assertTrue(report["mutation_gate_passed"], report)
-        self.assertEqual(report["counts"], {"caught": 1, "unviable": 1, "missed": 0, "timeout": 0, "not_run": 0})
+        self.assertEqual(report["counts"], {"caught": 1, "unviable": 1, "missed": 0, "hang": 0,
+                                            "timeout": 0, "not_run": 0})
 
     def test_missing_or_partial_outcomes_remain_incomplete_with_unrun_candidates(self):
         missing = ADAPTER.outcome_report(self.bundle, self.job, self.root / "missing", "failed", 1)
@@ -328,18 +343,35 @@ class OutcomeTests(MutationFixture):
             with self.subTest(status=status):
                 self.assertFalse(self.report(records)["mutation_gate_passed"])
 
-    def test_missed_timeout_and_process_failures_never_pass(self):
-        for summary in ("MissedMutant", "Timeout"):
+    def test_missed_build_timeout_and_process_failures_never_pass(self):
+        for summary, status in (("MissedMutant", "missed"), ("BuildTimeout", "timeout")):
             records = self.records()
             records[1] = self.outcome(self.original[0], summary)
             with self.subTest(summary=summary):
                 report = self.report(records)
                 self.assertFalse(report["mutation_gate_passed"])
-                self.assertEqual(report["counts"]["missed" if summary == "MissedMutant" else "timeout"], 1)
+                self.assertEqual(report["counts"][status], 1)
         for status, code in (("failed", 1), ("timeout", -9), ("interrupted", None),
                              ("not_run", None), ("successful", 7), ("spawn_failed", None)):
             with self.subTest(status=status, code=code):
                 self.assertFalse(self.report(status=status, exit_code=code)["mutation_gate_passed"])
+
+    def test_a_mutant_that_hangs_the_suite_is_a_kill_and_not_a_failure(self):
+        """The only reading available for a mutant that removes a loop's advance.
+
+        Nothing reaches an assertion, so no test can fail; the suite not
+        terminating *is* the detection. It is counted apart from `caught` so a
+        reader can see how many there were and ask whether the budget is still
+        generous against the baseline, which is the other thing a timeout can
+        mean.
+        """
+        records = self.records()
+        records[1] = self.outcome(self.original[0], "Timeout")
+        report = self.report(records)
+        self.assertTrue(report["mutation_gate_passed"])
+        self.assertEqual(report["counts"]["hang"], 1)
+        self.assertEqual(report["counts"]["timeout"], 0)
+        self.assertEqual(report["counts"]["caught"], 1)
 
     def test_missing_or_empty_log_and_diff_is_evidence_failure(self):
         for relative in ("log/baseline.log", "log/mutant-1.log", "diff/mutant-1.diff"):

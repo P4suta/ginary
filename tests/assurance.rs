@@ -197,8 +197,15 @@ fn every_mutation_shard_fits_even_when_every_build_and_test_uses_its_entire_budg
     for shard in &plan.shards {
         let count = measured.modules[&shard.module].div_ceil(shard.shards);
         let test_seconds: u64 = shard.timeout.as_ref().unwrap().parse().unwrap();
-        let minutes = measured.baseline_minutes
-            + (count * (test_seconds + budget.build_timeout_seconds)).div_ceil(60)
+        // On the slowest runner in the matrix, where both the baseline and the
+        // build budget derived from it are largest: the budget is a multiple of
+        // a baseline build, and this is the recorded measurement that turns it
+        // into the wall clock `timeout-minutes` is.
+        let minutes = measured.slowest_baseline_minutes
+            + (count
+                * (test_seconds
+                    + budget.build_timeout_multiplier * measured.slowest_build_seconds))
+                .div_ceil(60)
             + 15;
         assert!(
             minutes <= plan.timeout_minutes,

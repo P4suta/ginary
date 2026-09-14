@@ -300,8 +300,16 @@ pub struct MutationBudget {
     pub modules: BTreeMap<String, u64>,
     /// Actual enumeration must refuse a larger shard before execution.
     pub max_mutants_per_shard: u64,
-    /// The maximum build time of one mutant.
-    pub build_timeout_seconds: u64,
+    /// How many times the baseline build one mutant's build may take.
+    ///
+    /// A multiple rather than a number of seconds, because a number of seconds
+    /// is a fact about one runner: the 120 that stood here was above every
+    /// Linux baseline build and below every Windows and macOS one, so on those
+    /// two every mutant timed out in its build phase and nothing was measured
+    /// about the tests at all. A mutant's build does no more work than the
+    /// baseline's, so a multiple of the baseline always fits, whatever the
+    /// machine.
+    pub build_timeout_multiplier: u64,
     /// The maximum test time of one mutant.
     pub test_timeout_seconds: u64,
 }
@@ -340,7 +348,10 @@ pub fn mutation_budget() -> MutationBudget {
     MutationBudget {
         modules,
         max_mutants_per_shard: positive(&parsed["max_mutants_per_shard"], "max_mutants_per_shard"),
-        build_timeout_seconds: positive(&parsed["build_timeout_seconds"], "build_timeout_seconds"),
+        build_timeout_multiplier: positive(
+            &parsed["build_timeout_multiplier"],
+            "build_timeout_multiplier",
+        ),
         test_timeout_seconds: positive(&parsed["test_timeout_seconds"], "test_timeout_seconds"),
     }
 }
@@ -395,6 +406,15 @@ pub struct MeasuredMutants {
     pub run: String,
     /// How long a shard takes to reach `ok Unmutated baseline`.
     pub baseline_minutes: u64,
+    /// The slowest baseline *build* any runner in the matrix was measured at.
+    ///
+    /// The per-mutant build budget is a multiple of a baseline the job has not
+    /// measured yet, and the job's `timeout-minutes` is a wall clock. This is
+    /// the measurement that converts one into the other, which is why it is
+    /// recorded rather than assumed.
+    pub slowest_build_seconds: u64,
+    /// The slowest baseline, build and test together, in whole minutes.
+    pub slowest_baseline_minutes: u64,
     /// What one mutant costs, build and test together.
     pub seconds_per_mutant: u64,
     /// How many mutants each module produces.
@@ -425,6 +445,13 @@ pub fn measured_mutants() -> MeasuredMutants {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} carries no `{key}` number"))
     };
+    let baseline = |key: &str| {
+        parsed
+            .get("baselines")
+            .and_then(|baselines| baselines.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} carries no `baselines.{key}` number"))
+    };
     let modules = parsed
         .get("modules")
         .and_then(serde_json::Value::as_object)
@@ -444,6 +471,8 @@ pub fn measured_mutants() -> MeasuredMutants {
             .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} names no `run`"))
             .to_owned(),
         baseline_minutes: number("baseline_minutes"),
+        slowest_build_seconds: baseline("slowest_build_seconds"),
+        slowest_baseline_minutes: baseline("slowest_baseline_minutes"),
         seconds_per_mutant: number("seconds_per_mutant"),
         modules,
     }
