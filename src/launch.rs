@@ -796,7 +796,21 @@ pub fn run_bounded(
         std::thread::sleep(POLL_INTERVAL);
     };
 
-    match (status.code(), signal_of(&status)) {
+    outcome_of(&status)
+}
+
+/// What one finished child reports.
+///
+/// Its own function so that the last arm can be tested. A status that is
+/// neither an exit nor a signal is what a stopped child leaves, and nothing a
+/// spawned test can arrange reliably produces one — but `ExitStatusExt::from_raw`
+/// can build one, and only a function taking the status can be handed it.
+///
+/// `-1` for that arm, and the sign is the whole of the claim: every real exit
+/// status is zero or above, so a negative code is this module saying it has no
+/// code rather than reporting one it did not get.
+fn outcome_of(status: &std::process::ExitStatus) -> Result<(), RunIssue> {
+    match (status.code(), signal_of(status)) {
         (Some(0), _) => Ok(()),
         (Some(code), _) => Err(RunIssue::Exit { code }),
         (None, Some(signal)) => Err(RunIssue::Signal { signal }),
@@ -1058,6 +1072,45 @@ const SLOGAN_SEARCH_LINES: usize = 64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What each shape of finished child reports.
+    ///
+    /// The fourth arm is the one no spawned test can reach: a status that is
+    /// neither an exit nor a signal is what a *stopped* child leaves, and
+    /// nothing a selftest does produces one on purpose. `ExitStatusExt::from_raw`
+    /// builds one, and the claim is about the sign — every real exit status is
+    /// zero or above, so `-1` is this module saying it has no code rather than
+    /// reporting one it did not get. A `1` there would be indistinguishable
+    /// from a runtime that really exited 1.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_with_neither_a_code_nor_a_signal_reports_no_code() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let exited = |raw: i32| std::process::ExitStatus::from_raw(raw);
+
+        assert!(outcome_of(&exited(0)).is_ok(), "exit zero is success");
+        assert!(
+            matches!(outcome_of(&exited(3 << 8)), Err(RunIssue::Exit { code: 3 })),
+            "an exit code travels as itself"
+        );
+        assert!(
+            matches!(outcome_of(&exited(9)), Err(RunIssue::Signal { signal: 9 })),
+            "a signal travels as itself"
+        );
+
+        // `0x7f` is `WIFSTOPPED`: neither `WIFEXITED` nor `WIFSIGNALED`, so
+        // both halves answer `None`.
+        let stopped = exited(0x7f);
+        assert!(stopped.code().is_none() && stopped.signal().is_none());
+        let Err(RunIssue::Exit { code }) = outcome_of(&stopped) else {
+            panic!("a status with neither is still an outcome this module reports");
+        };
+        assert!(
+            code < 0,
+            "a code no child gave has to be one no child could have given, and {code} is not"
+        );
+    }
 
     #[test]
     fn the_removed_names_are_the_documented_six() {
