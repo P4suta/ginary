@@ -83,6 +83,27 @@ fn ginary_lines(run: &Run) -> Vec<String> {
         .collect()
 }
 
+/// Runs the artifact once and empties the cache it filled.
+///
+/// The waits below are waits on the launcher, and a wait on a launcher that has
+/// never been executed is also a wait on whatever the host charges for assessing
+/// a freshly written binary — tens of seconds on a Mac, where `syspolicyd`
+/// assesses the file on its first exec and caches the answer against it (see
+/// `docs/dev/log/F1-macos-native.md`). The second exec of the same file does
+/// not pay it. Emptying the cache afterwards is what sends the next run through
+/// `cache::fill` again, because a complete entry returns before the extraction,
+/// the sweep or the fault point is reached at all.
+#[cfg(feature = "fault-injection")]
+fn warmed(artifact: &SyntheticArtifact) {
+    ok(&artifact.run().output());
+    let entry = artifact.app_dir().join(artifact.key());
+    assert!(
+        entry.join("ginary.json").is_file(),
+        "the warming run must leave a complete entry, or it did not extract"
+    );
+    std::fs::remove_dir_all(&entry).expect("empty the cache so the next run extracts again");
+}
+
 /// Waits until `predicate` holds, or fails after five seconds.
 ///
 /// The `fault-injection` tests are the ones that pause a run long enough to
@@ -778,12 +799,13 @@ fn eight_concurrent_cold_starts_produce_one_entry_and_no_residue() {
 fn a_process_killed_mid_extraction_is_swept_by_the_next_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact(&dir);
+    let app_dir = artifact.app_dir();
 
+    warmed(&artifact);
     let mut child = artifact
         .run()
         .env("GINARY_FAULT", "after-extract:pause")
         .spawn();
-    let app_dir = artifact.app_dir();
     wait_for("the temporary tree to appear", || {
         app_dir.is_dir() && names_in(&app_dir).iter().any(|name| name.contains(".tmp-"))
     });
@@ -841,19 +863,8 @@ fn a_residue_disowned_while_the_sweep_holds_its_lock_is_kept() {
     let app_dir = artifact.app_dir();
     let entry = app_dir.join(artifact.key());
 
-    // One ordinary run first, and then its entry removed. It is what makes the
-    // single wait below a wait on the sweep: a launcher that has never been
-    // executed pays whatever the host charges for assessing a freshly written
-    // binary before it reaches any of its own code, and on some hosts that is
-    // tens of seconds. The second run of the same file does not. Emptying the
-    // cache afterwards is what sends that second run through `fill` again,
-    // because a complete entry returns before the sweep is reached at all.
-    ok(&artifact.run().output());
-    assert!(
-        entry.join("ginary.json").is_file(),
-        "the first run must leave a complete entry"
-    );
-    std::fs::remove_dir_all(&entry).expect("empty the cache so the next run sweeps");
+    // The wait below is a wait on the sweep, which is what `warmed` is for.
+    warmed(&artifact);
 
     // A residue owned by a process id nothing will ever have, with no marker in
     // it — which is what an extraction killed before it wrote one leaves, and

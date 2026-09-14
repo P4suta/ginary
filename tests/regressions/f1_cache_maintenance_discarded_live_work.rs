@@ -327,6 +327,21 @@ fn f1_uninstall_during_extraction_preserves_the_live_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact =
         SyntheticArtifact::build_with_runtime_steps(dir.path(), &[ShimStep::Exit(STUB_EXIT)]);
+    // One ordinary run first, and its entry removed, so that the wait below is a
+    // wait on the launcher rather than on the host: the first exec of a freshly
+    // written binary costs tens of seconds on a Mac, where `syspolicyd` assesses
+    // the file and caches the answer against it, and the second exec of the same
+    // file costs nothing. Removing the entry is what sends the paused run
+    // through `cache::fill` again, because a complete entry returns from it
+    // before anything is extracted. See `docs/dev/log/F1-macos-native.md`.
+    let warm = artifact
+        .run()
+        .env("GINARY_CACHE_DIR", artifact.cache_root())
+        .output();
+    assert_eq!(warm.code(), STUB_EXIT, "the warming run must extract");
+    std::fs::remove_dir_all(artifact.app_dir().join(artifact.key()))
+        .expect("empty the cache so the paused run extracts again");
+
     let mut child = artifact
         .run()
         .env("GINARY_CACHE_DIR", artifact.cache_root())
