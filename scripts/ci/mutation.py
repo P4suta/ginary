@@ -22,6 +22,12 @@ import time
 
 RUNNERS = {"linux": "ubuntu-24.04", "windows": "windows-2025", "macos": "macos-15"}
 VERSION = "27.1.0"
+# The slowest baseline build any runner in the matrix has been measured at, from
+# run 34747498271: macOS 252.2 s, Windows 193-204 s, Linux 76-83 s. It is used
+# only to bound this process's own wall clock, because the per-mutant build
+# budget is now a multiple of a baseline that is not known until the job runs.
+# tests/fixtures/nightly/mutants-measured.json carries the figures and the run.
+SLOWEST_BASELINE_BUILD_SECONDS = 260
 TAIL_LIMIT = 1024 * 1024
 JSON_LIMIT = 128 * 1024 * 1024
 
@@ -192,7 +198,7 @@ def make_bundle(canonical, enriched, sources, divisions):
             or type(divisions.get("max_mutants_per_shard")) is not int
             or not 1 <= divisions["max_mutants_per_shard"] <= 13
             or any(type(divisions.get(key)) is not int or divisions[key] <= 0
-                   for key in ("build_timeout_seconds", "test_timeout_seconds"))):
+                   for key in ("build_timeout_multiplier", "test_timeout_seconds"))):
         raise ValueError("empty or invalid canonical mutation divisions")
     originals = [candidate for shard in canonical for candidate in shard["candidates"]]
     original_ids, enriched_ids = names(originals), names(enriched)
@@ -253,9 +259,24 @@ def list_command(module, *selection):
 
 
 def run_command(job, limits, output):
+    # The build budget is a multiple of the baseline build cargo-mutants times
+    # in this same job, on this same machine, rather than a number of seconds.
+    # A mutant's build does no more work than the baseline's, so a multiple of
+    # it always fits; a constant fits only the runner it was measured on, and
+    # the 120 seconds this used to pass was above the Linux baseline build (76
+    # to 83 seconds) and below the Windows one (193 to 204) and the macOS one
+    # (252) — so every mutant on those two timed out in its *build* phase, with
+    # nothing measured about the tests at all. See
+    # tests/fixtures/nightly/mutants-measured.json for the figures.
+    #
+    # The test budget stays a constant, because what it bounds is a mutant that
+    # never terminates rather than a machine that is slow: the suite's own
+    # runtime is what the baseline measures, and 420 seconds is above every
+    # baseline test in that record with room to spare.
     return ["cargo", "mutants", "--file", f"src/{job['module']}.rs", "--re", exact_regex(job["candidates"]),
             "--timeout", str(limits["test_timeout_seconds"]),
-            "--build-timeout", str(limits["build_timeout_seconds"]), "--features", "fault-injection",
+            "--build-timeout-multiplier", str(limits["build_timeout_multiplier"]),
+            "--features", "fault-injection",
             "--output", str(output), "--cargo-test-arg=--", "--cargo-test-arg=--show-output"]
 
 
@@ -337,6 +358,30 @@ def valid_phases(result):
     return False
 
 
+#: Every disposition a planned mutant can end in, in the order a report lists
+#: them. `hang` and `timeout` are both `Timeout` to cargo-mutants and are two
+#: different facts: see `timeout_kind`.
+STATUSES = ("caught", "unviable", "missed", "hang", "timeout", "not_run")
+
+
+def timeout_kind(result):
+    """Which of the two timeouts this is, by the phase that ran out of time.
+
+    A mutant whose *test* phase exceeds the budget is one the suite did not
+    pass: the ordinary reading of a hanging mutant, and the only reading
+    available for one that removes the advance from a loop, where no assertion
+    can fire because nothing ever reaches one. It is a kill, and is counted as
+    `hang` rather than folded into `caught` so that a reader can see how many
+    there were and check the budget is still generous against the baseline.
+
+    A mutant whose *build* phase exceeds the budget measured nothing at all.
+    That is a failure of the run and not a fact about the tests, so it keeps the
+    name `timeout` and keeps failing the gate.
+    """
+    phases = [phase["phase"] for phase in result["phase_results"]]
+    return "hang" if phases == ["Build", "Test"] else "timeout"
+
+
 def outcome_report(bundle, job, directory, process_status, process_exit):
     """Missing/partial files are evidence of incomplete work, never empty success."""
     expected = set(job["candidates"])
@@ -370,8 +415,9 @@ def outcome_report(bundle, job, directory, process_status, process_exit):
                 for key in ("name", "package", "file", "function", "span", "replacement", "genre"):
                     if mutant.get(key) != original.get(key):
                         raise ValueError(f"outcome candidate fields differ: {name}: {key}")
-                status = {"CaughtMutant": "caught", "Unviable": "unviable", "MissedMutant": "missed",
-                          "Timeout": "timeout"}.get(result["summary"])
+                status = {"CaughtMutant": "caught", "Unviable": "unviable",
+                          "MissedMutant": "missed",
+                          "Timeout": timeout_kind(result)}.get(result["summary"])
                 if status is None:
                     raise ValueError(f"unknown mutant summary: {result['summary']}")
                 rows[name].update(status=status, phases=result["phase_results"])
@@ -389,9 +435,10 @@ def outcome_report(bundle, job, directory, process_status, process_exit):
     except (OSError, ValueError, KeyError, TypeError) as error:
         errors.append(str(error))
     counts = {status: sum(row["status"] == status for row in rows.values())
-              for status in ("caught", "unviable", "missed", "timeout", "not_run")}
+              for status in STATUSES}
     complete = baseline == ["Success"] and not counts["not_run"] and not errors
-    passed = complete and not counts["missed"] and not counts["timeout"] and process_status == "successful" and process_exit == 0
+    passed = (complete and not counts["missed"] and not counts["timeout"]
+              and process_status == "successful" and process_exit == 0)
     return {"schema_version": 1, "job": job["id"], "platform": job["platform"],
             "process_status": process_status, "process_exit_code": process_exit,
             "baseline": baseline, "complete": complete, "mutation_gate_passed": passed,
@@ -441,7 +488,7 @@ def native_run(options):
               "build_target_policy": "cargo-mutants scratch; inherited target directory overrides removed",
               "required_tools": ["gleam", "erl"], "optional_tools": "reported as skipping: in full test logs"})
         result = execute(command, output / "execution",
-                         (len(job["candidates"]) + 1) * (limits["test_timeout_seconds"] + limits["build_timeout_seconds"]) + 120,
+                         (len(job["candidates"]) + 1) * (limits["test_timeout_seconds"] + SLOWEST_BASELINE_BUILD_SECONDS * limits["build_timeout_multiplier"]) + 120,
                          cwd=root, env=environment)
         status, code = result["status"], result["exit_code"]
         verify_sources(root, bundle["sources"])
@@ -524,7 +571,7 @@ def reconcile(bundle_path, evidence_root):
             "jobs": [{key: report[key] for key in ("job", "platform", "counts", "complete", "errors")}
                      for report in reports],
             "counts": {status: sum(report["counts"][status] for report in reports)
-                       for status in ("caught", "unviable", "missed", "timeout", "not_run")}}
+                       for status in STATUSES}}
 
 
 def main():

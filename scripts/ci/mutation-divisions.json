@@ -10,6 +10,6 @@
     "verify": 10
   },
   "max_mutants_per_shard": 13,
-  "build_timeout_seconds": 120,
-  "test_timeout_seconds": 420
+  "test_timeout_seconds": 420,
+  "build_timeout_multiplier": 2
 }

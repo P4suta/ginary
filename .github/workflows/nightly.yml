@@ -59,12 +59,19 @@ jobs:
     name: Mutation testing (${{ matrix.id }})
     needs: mutation-plan
     runs-on: ${{ matrix.runner }}
-    # tests/fixtures/nightly/mutants-measured.json is the historical timing
-    # record. scripts/ci/mutation-divisions.json holds every canonical shard:
-    # appfile, cache, closure, launch, payload, trailer, verify. Discovery
-    # rejects a shard over 13 candidates before dispatching any native subset.
-    # 13 * (120s build + 420s test), baseline and evidence fit in 150 minutes.
-    timeout-minutes: 150
+    # tests/fixtures/nightly/mutants-measured.json is the timing record.
+    # scripts/ci/mutation-divisions.json holds every canonical shard: appfile,
+    # cache, closure, launch, payload, trailer, verify. Discovery rejects a
+    # shard over 13 candidates before dispatching any native subset.
+    #
+    # The build budget is a multiple of the baseline build this job measures,
+    # not a constant: 120 seconds was above every Linux baseline build and below
+    # every Windows and macOS one, so on those two every mutant timed out in its
+    # build phase with nothing measured about the tests. This backstop is a wall
+    # clock, so it converts the ratio with the slowest baseline build in the
+    # record: 13 * (2 * 253s build + 420s test), plus that runner's whole
+    # baseline and time to retain evidence, is 224 minutes.
+    timeout-minutes: 225
     permissions:
       contents: read
     env:

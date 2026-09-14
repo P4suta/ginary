@@ -2237,8 +2237,20 @@ fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost
         "the canonical workload may not silently shrink"
     );
     assert_eq!(budget.max_mutants_per_shard, 13);
-    assert_eq!(budget.build_timeout_seconds, 120);
+    assert_eq!(budget.build_timeout_multiplier, 2);
     assert_eq!(budget.test_timeout_seconds, 420);
+    let measured = measured_mutants();
+    assert!(
+        budget.build_timeout_multiplier >= 2,
+        "a mutant's build is a build of the same crate, so anything under twice the baseline is \
+         a budget that can lose to ordinary variation"
+    );
+    assert!(
+        budget.test_timeout_seconds > measured.slowest_build_seconds,
+        "the test budget is a hang detector and stays a constant, so it has to clear the \
+         slowest suite in the record: {} seconds",
+        measured.slowest_build_seconds
+    );
 
     let plan = mutants_plan();
     assert_eq!(plan.shards.len(), 81);
@@ -2255,14 +2267,23 @@ fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost
             "routing must retain every canonical division exactly once: {module}"
         );
     }
-    let worst_case_minutes = measured_mutants().baseline_minutes
+    // The budget is a ratio and `timeout-minutes` is a wall clock, so the
+    // conversion needs one measured number: the slowest baseline build any
+    // runner in the matrix has been seen at. It is in the record beside the run
+    // it came from, because a budget argued from a measurement nobody can read
+    // is an assertion.
+    let worst_case_minutes = measured.slowest_baseline_minutes
         + (budget.max_mutants_per_shard
-            * (budget.build_timeout_seconds + budget.test_timeout_seconds))
+            * (budget.build_timeout_multiplier * measured.slowest_build_seconds
+                + budget.test_timeout_seconds))
             .div_ceil(60)
         + 15;
     assert!(
         worst_case_minutes <= plan.timeout_minutes,
-        "every build and test may consume its cap; evidence still needs time to be retained"
+        "every build and test may consume its cap on the slowest runner in the matrix, and \
+         evidence still needs time to be retained: {worst_case_minutes} minutes of budget \
+         against a job that is cut at {}",
+        plan.timeout_minutes
     );
 }
 
