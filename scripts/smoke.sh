@@ -21,7 +21,8 @@
 # Environment:
 #   GINARY_BIN                a ginary to use instead of `cargo run`
 #   GINARY_IMAGE              the image to run in (default ubuntu:24.04)
-#   GINARY_REQUIRE_TOOLCHAIN  1 makes an unreachable docker daemon a failure
+#   GINARY_REQUIRE_TOOLCHAIN  1 makes an unreachable docker daemon, or an
+#                             artifact this image cannot execute, a failure
 #                             rather than a reported skip, the same rule
 #                             `tests/common/tools.rs` follows
 
@@ -66,6 +67,25 @@ if [ ! -x "$artifact" ]; then
   exit 1
 fi
 printf 'smoke: artifact %s bytes\n' "$(wc -c <"$artifact" | tr -d ' ')"
+
+# A Linux container runs a Linux executable, and `ginary build` builds for the
+# host it runs on. So on a macOS host the artifact is a Mach-O and all three
+# checks below come back `Exec format error` — a clean-room claim that was never
+# tested, reported as a clean-room claim that failed.
+#
+# The question is the artifact's own first four bytes rather than the host's
+# name, because what the container needs is an ELF and nothing else about the
+# host decides that. `\x7fELF` is `7f454c46`.
+magic=$(od -An -v -tx1 -N4 "$artifact" | tr -d ' \n')
+if [ "$magic" != "7f454c46" ]; then
+  if [ "${GINARY_REQUIRE_TOOLCHAIN:-}" = "1" ]; then
+    echo "smoke: the artifact is not an ELF ($magic) and GINARY_REQUIRE_TOOLCHAIN=1" >&2
+    exit 1
+  fi
+  echo "skipping: the artifact is not an ELF ($magic), so $image cannot execute it" >&2
+  echo "          the macOS clean room is \`mise run smoke:macos\`" >&2
+  exit 0
+fi
 
 # `--network none` is not a convenience: an artifact that phoned home for a
 # runtime would still pass every other check in this file. The three runs are

@@ -139,6 +139,38 @@ fn an_unreachable_docker_daemon_is_a_reported_skip_the_way_smoke_sh_treats_one()
     );
 }
 
+/// An artifact the container cannot execute is a skip, not three failures.
+///
+/// `scripts/smoke.sh` builds for the host and runs the result in a Linux
+/// container. On a macOS host the artifact is a Mach-O, so all three checks
+/// come back `Exec format error` — and a clean-room claim that was never tested
+/// reported as a clean-room claim that failed is the wrong answer twice over.
+/// The rule is the one the daemon check already follows and `require_tools`
+/// follows in the suite: a skip says so, and `GINARY_REQUIRE_TOOLCHAIN=1` turns
+/// it into a failure, which is what the Linux CI job sets.
+#[test]
+fn an_artifact_a_linux_container_cannot_execute_is_a_reported_skip() {
+    let script = read("scripts/smoke.sh");
+
+    assert!(
+        script.contains("7f454c46"),
+        "the question is the artifact's own ELF magic rather than the host's name, because what \
+         the container needs is an ELF and nothing else about the host decides that: {script}"
+    );
+    assert!(
+        script.matches("skipping:").count() >= 2,
+        "the daemon skip and this one both say so"
+    );
+    assert!(
+        script.matches("GINARY_REQUIRE_TOOLCHAIN").count() >= 3,
+        "and CI can turn either skip into a failure"
+    );
+    assert!(
+        script.contains("smoke:macos"),
+        "a developer told their artifact cannot be smoke tested here should be told what can"
+    );
+}
+
 // --------------------------------------------------------- the tasks --
 
 #[test]
