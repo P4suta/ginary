@@ -92,7 +92,7 @@ toml = { version = "1.1.4", default-features = false, features = ["parse", "serd
 # The payload's compression. `default-features = false` keeps the multi-threaded
 # encoder and the `zstdmt` C sources out: packing is single-threaded on purpose,
 # because a thread count that varies with the machine varies the output bytes.
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "0.14.0", default-features = false }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip", "platform-verifier"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
