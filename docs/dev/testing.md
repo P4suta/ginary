@@ -1904,23 +1904,14 @@ applicable operating system, not every possible CPU/OS/feature combination. Linu
 for shared code, Windows for Windows-only code, and macOS for non-Linux Unix code.
 
 **The execution budget includes the full configured build and test caps.** Each mutation has
-`--build-timeout-multiplier 2` and `--timeout 420`. The build budget is a *ratio* because a number
-of seconds is a fact about one runner: `--build-timeout 120` was above every Linux baseline build
-(76 to 83 seconds) and below every Windows (193 to 204) and macOS (252) one, so on those two every
-mutant timed out in its build phase and the shard measured nothing at all. A mutant's build does no
-more work than the baseline build of the same crate, so twice the baseline the job itself measures
-is right on every runner without being measured again. The test budget stays a constant because
-what it bounds is a mutant that never terminates rather than a machine that is slow.
-
-All divisions are complete; the largest measured shard holds 13 mutants, which on the slowest
-runner in the record can consume 201 minutes plus that runner's baseline and evidence time inside
-`timeout-minutes: 225`. Before executing, the workflow lists the current shard and refuses more
-than 13 mutants, so growth causes a named precondition failure rather than a cancelled pass.
-The mutation plan, outcomes, diffs and logs are retained for 30 days even when testing fails.
-
-A **build-phase** timeout is still a failure and still fails the gate, and it is a different fact
-from a hang: a build that did not finish measured nothing about the tests. `scripts/ci/mutation.py`
-tells the two apart by the phase cargo-mutants reports the timeout in.
+`--build-timeout-multiplier 2` and `--timeout 420`: a *ratio* for the build, because a number of
+seconds is a fact about one runner and a mutant's build does no more work than the baseline build
+the job itself times; a constant for the test, because what that bounds is a mutant that never
+terminates rather than a machine that is slow. The largest shard holds 13 mutants, which on the
+slowest runner in the record can consume 201 minutes plus that runner's baseline and evidence time
+inside `timeout-minutes: 225`. Before executing, the workflow lists the current shard and refuses
+more than 13 mutants, so growth causes a named precondition failure rather than a cancelled pass.
+The plan, outcomes, diffs and logs are retained for 30 days even when testing fails.
 
 **The budget is measured, not guessed.** `tests/fixtures/nightly/mutants-measured.json` records
 what one mutant costs and how many each module produces, read off nightly run
@@ -1935,6 +1926,13 @@ job's `timeout-minutes` against that record, so a shard that could not finish is
 here rather than a `cancelled` job nobody reads. **Re-measure the record when the suite's runtime
 changes materially** — a pass sized from a stale measurement is the same cancelled job with a
 newer date.
+
+A **build-phase** timeout is a different fact from a hang, and stays a failure: a build that did
+not finish measured nothing about the tests. `scripts/ci/mutation.py` tells the two apart by the
+phase cargo-mutants reports the timeout in. `--build-timeout 120` used to be above every Linux
+baseline build and below every Windows and macOS one, so on those two runners every mutant timed
+out in its build phase and the shard caught nothing at all;
+[F1-mutation-budget.md](log/F1-mutation-budget.md) has the figures and the argument.
 
 The previous Ubuntu-only matrix could not catch mutations of `#[cfg(windows)]` bodies because
 those bodies were not compiled. F1 reproduced this with two surviving `ReadAt::read_at` mutations.
