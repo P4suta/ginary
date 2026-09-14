@@ -2244,13 +2244,13 @@ fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost
 
     let budget = mutation_budget();
     let expected: std::collections::BTreeMap<String, u64> = [
-        ("appfile", 16),
-        ("cache", 24),
-        ("closure", 8),
-        ("launch", 8),
+        ("appfile", 19),
+        ("cache", 25),
+        ("closure", 9),
+        ("launch", 10),
         ("payload", 12),
         ("trailer", 3),
-        ("verify", 10),
+        ("verify", 11),
     ]
     .into_iter()
     .map(|(module, divisions)| (module.to_owned(), divisions))
@@ -2276,7 +2276,7 @@ fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost
     );
 
     let plan = mutants_plan();
-    assert_eq!(plan.shards.len(), 81);
+    assert_eq!(plan.shards.len(), 89);
     let mut actual: std::collections::BTreeMap<&str, Vec<u64>> = std::collections::BTreeMap::new();
     for shard in &plan.shards {
         actual.entry(&shard.module).or_default().push(shard.index);
@@ -2344,24 +2344,45 @@ fn the_current_source_inventory_fits_every_canonical_mutation_division() {
 
     let current: serde_json::Value = serde_json::from_str(&read(CURRENT_MUTANT_COUNTS))
         .expect("the integrated mutation inventory is JSON");
-    let counts = current["modules"].as_object().expect("per-module counts");
     let budget = mutation_budget();
     assert_eq!(current["schema_version"], 1);
     assert_eq!(current["tool_version"], "27.1.0");
     assert_eq!(current["executed_mutants"], 0);
-    assert_eq!(counts.len(), budget.modules.len());
-    let mut total = 0;
-    for (module, divisions) in &budget.modules {
-        let count = counts[module].as_u64().expect("a measured candidate count");
-        total += count;
-        assert!(
-            count.div_ceil(*divisions) <= budget.max_mutants_per_shard,
-            "{module}: {count} candidates over {divisions} divisions exceed the {}-candidate cap",
-            budget.max_mutants_per_shard
-        );
+
+    // Both enumerations, not just the newest. A discovery on Windows or Linux
+    // sees the `#[cfg(windows)]` bodies a macOS one does not, so the older
+    // measurement is larger for several modules — and the difference is not all
+    // platform: the campaign's consolidations removed eight `entry_kind` arms
+    // from `verify` and twelve `is_symlink` terms from `cache`. Sizing the
+    // divisions to whichever enumeration the runner performs is what keeps the
+    // planner from refusing a shard, which is how `src/launch.rs` growing past
+    // 8 x 13 candidates took a whole nightly down.
+    for measurement in ["modules", "previous_measurement"] {
+        let counts = if measurement == "modules" {
+            current["modules"].as_object()
+        } else {
+            current[measurement]["modules"].as_object()
+        }
+        .unwrap_or_else(|| panic!("{measurement} carries per-module counts"));
+        assert_eq!(counts.len(), budget.modules.len(), "{measurement}");
+        let mut total = 0;
+        for (module, divisions) in &budget.modules {
+            let count = counts[module].as_u64().expect("a measured candidate count");
+            total += count;
+            assert!(
+                count.div_ceil(*divisions) <= budget.max_mutants_per_shard,
+                "{measurement}: {module}: {count} candidates over {divisions} divisions exceed \
+                 the {}-candidate cap",
+                budget.max_mutants_per_shard
+            );
+        }
+        let declared = if measurement == "modules" {
+            &current["total_selected"]
+        } else {
+            &current[measurement]["total_selected"]
+        };
+        assert_eq!(declared, &serde_json::json!(total), "{measurement}");
     }
-    assert_eq!(total, 960);
-    assert_eq!(current["total_selected"], total);
 }
 
 #[test]
