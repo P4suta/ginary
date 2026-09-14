@@ -207,15 +207,42 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
 
   **The nightly campaign that mutated the whole crate is retired.** Until 2026-09-15 it cut 920
   candidates into 89 canonical shards over 106 native jobs, with an AST planner assigning each to a
-  runner whose `cfg` could compile it. The campaign's own record — 101 survivors closed, 87 killed
-  and 14 removed with the redundancy they lived in — is in
-  [F1-mutation-clusters.md](log/F1-mutation-clusters.md), and what its three failure categories
-  turned out to be is in [F1-mutation-budget.md](log/F1-mutation-budget.md). What it cost was a
-  per-module shard budget that had to be re-measured whenever the source moved, and was not: a
-  module outgrowing its divisions took a whole night's campaign down before it mutated anything,
-  with every test still green. A diff pass has no budget to keep true, and its failures land on the
-  change that caused them. What it cannot reach — another platform's `cfg` bodies, and every line a
-  change did not touch — `mise run mutants` reaches.
+  runner whose `cfg` could compile it. What it cost was a per-module shard budget that had to be
+  re-measured whenever the source moved, and was not: a module outgrowing its divisions took a whole
+  night's campaign down before it mutated anything, with every test still green. A diff pass has no
+  budget to keep true, and its failures land on the change that caused them. What it cannot reach —
+  another platform's `cfg` bodies, and every line a change did not touch — `mise run mutants`
+  reaches.
+
+  **It was red from 2026-09-06 until it was retired, and each of its three failures has an answer.**
+  Run [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271) reconciles to
+  `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95 shards failing.
+  They are different things and are not counted as one:
+
+  - **`missed 101`** was a test-suite gap. 87 were killed and 14 removed with the redundancy they
+    lived in — and the campaign's last run found **twenty-six survivors that accounting missed**,
+    thirteen of them `#[cfg]` stubs whose body already *is* the mutant and twelve real error-path
+    and race guards on Linux. [F1-mutation-clusters.md](log/F1-mutation-clusters.md) lists each and
+    says why checking one mutation at a time against one test target is how they were missed. There
+    is still no `mutants.toml` and no `#[mutants::skip]` anywhere in `src/`.
+  - **`timeout 30`** was two things. 28 were Windows and macOS shards whose *build* phase hit
+    `--build-timeout 120` — a constant above every Linux baseline build and below theirs, so those
+    shards measured nothing at all; the budget became a multiple of the baseline the job itself
+    times. The other 2 are Linux mutants that stop a loop advancing, where the suite not terminating
+    is the only detection there can be; those are counted as kills, as mutation testing counts them.
+  - **`not_run 15`** was neither a gap nor a budget. 13 are one job whose runner GitHub shut down
+    eighteen minutes in, which the harness reported as `interrupted` and failed on. 2 are a macOS
+    baseline that failed on an ELF-magic assertion against a Mach-O, fixed when the suite was
+    first qualified on a macOS host.
+
+  What the campaign found while it ran is in [F1-mutation-clusters.md](log/F1-mutation-clusters.md)
+  and [F1-mutation-budget.md](log/F1-mutation-budget.md).
+
+  **A green campaign was never reached and will not be**, because the pass that would have reported
+  it is retired. Its last run —
+  [34859119976](https://github.com/P4suta/ginary/actions/runs/34859119976), cancelled at 78 of 113
+  shards once it had said what it had to say — is what corrected the count above. The twelve Linux
+  survivors it named are the honest remainder, and `mise run mutants` is where they are found.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
   the committed corpus. `mise run fuzz` runs it locally, and has: 601 seconds each and
