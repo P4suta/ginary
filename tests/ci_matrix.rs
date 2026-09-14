@@ -795,48 +795,6 @@ fn no_workflow_reaches_around_the_toolchain_action_and_no_override_is_committed(
     }
 }
 
-// ------------------------------------------------------- the nightly --
-
-#[test]
-fn the_nightly_workflow_runs_mutants_fuzz_and_the_full_smoke_matrix() {
-    let nightly = read_opt(".github/workflows/nightly.yml")
-        .expect("the heavy passes live in .github/workflows/nightly.yml, off the PR path");
-    assert!(
-        nightly.contains("schedule:") && nightly.contains("cron:"),
-        "nightly runs on a schedule so PR CI stays fast:\n{nightly}"
-    );
-    for needle in ["scripts/ci/mutation.py", "cargo fuzz"] {
-        assert!(
-            nightly.contains(needle),
-            "the nightly workflow is missing `{needle}`"
-        );
-    }
-    assert!(
-        crate::common::repo::workflow_steps(".github/workflows/nightly.yml")
-            .iter()
-            .any(|step| step.job == "smoke-matrix"
-                && step
-                    .run
-                    .contains("bash scripts/ci/smoke-matrix-evidence.sh")),
-        "nightly must invoke the smoke evidence wrapper"
-    );
-    let smoke_wrapper =
-        read_opt("scripts/ci/smoke-matrix-evidence.sh").expect("the invoked smoke wrapper exists");
-    assert!(
-        smoke_wrapper.contains("scripts/smoke-matrix.sh"),
-        "the evidence wrapper must still run the complete smoke matrix"
-    );
-    let budget = crate::common::nightly::mutation_budget();
-    for module in [
-        "trailer", "payload", "cache", "closure", "appfile", "launch", "verify",
-    ] {
-        assert!(
-            budget.modules.contains_key(module),
-            "the canonical mutation budget is missing the high-value module `{module}`"
-        );
-    }
-}
-
 /// The Rust target the fuzz smoke builds for.
 ///
 /// `cargo fuzz` builds with AddressSanitizer, and a sanitizer cannot be
@@ -1468,22 +1426,20 @@ fn dependabot_watches_every_manifest_this_repository_actually_has() {
         .iter()
         .map(|u| (u.ecosystem.as_str(), u.directory.as_str()))
         .collect();
-    // Both auxiliary tools are standalone workspaces. The root Cargo update
-    // cannot maintain their independent lockfiles. The `docker` entry is the
-    // other half of a digest pin: `scripts/ci/wincheck.Dockerfile` names an
-    // image by digest, and a digest nothing updates is an image that never
-    // gets a patch.
+    // `fuzz/` is a standalone workspace: the root Cargo update cannot maintain
+    // its independent lockfile. The `docker` entry is the other half of a digest
+    // pin: `scripts/ci/wincheck.Dockerfile` names an image by digest, and a
+    // digest nothing updates is an image that never gets a patch.
     assert_eq!(
         watched,
         vec![
             ("cargo", "/"),
             ("cargo", "/fuzz"),
-            ("cargo", "/tools/mutation-plan"),
             ("docker", "/scripts/ci"),
             ("github-actions", "/"),
         ],
-        "dependabot covers the crate, both standalone tools, the pinned image and the actions, \
-         and nothing this repository does not have; it covers: {watched:?}"
+        "dependabot covers the crate, the standalone fuzz workspace, the pinned image and the \
+         actions, and nothing this repository does not have; it covers: {watched:?}"
     );
     assert!(
         read("scripts/ci/wincheck.Dockerfile")
@@ -1492,20 +1448,17 @@ fn dependabot_watches_every_manifest_this_repository_actually_has() {
             .any(|line| line.trim_start().starts_with("FROM ") && line.contains("@sha256:")),
         "the `docker` entry exists to watch a digest, so there has to be one to watch"
     );
-    for directory in ["fuzz", "tools/mutation-plan"] {
-        let manifest = read(&format!("{directory}/Cargo.toml"));
-        assert!(
-            manifest
-                .lines()
-                .map(shell_code)
-                .any(|line| line.trim() == "[workspace]"),
-            "the separate update entry must belong to a real standalone workspace: {directory}"
-        );
-        assert!(
-            exists(&format!("{directory}/Cargo.lock")),
-            "the planner and fuzz tool must retain their reproducible dependency selections"
-        );
-    }
+    assert!(
+        read("fuzz/Cargo.toml")
+            .lines()
+            .map(shell_code)
+            .any(|line| line.trim() == "[workspace]"),
+        "the separate update entry must belong to a real standalone workspace"
+    );
+    assert!(
+        exists("fuzz/Cargo.lock"),
+        "the fuzz workspace must retain its reproducible dependency selection"
+    );
     for update in &updates {
         assert_eq!(
             (
@@ -2220,276 +2173,6 @@ fn the_two_ways_of_running_the_fuzzers_run_the_same_plan() {
         task.source
     );
     insta::assert_snapshot!("fuzz_smoke_plan", workflow.render());
-}
-
-// ------------------------------------------- the nightly mutation budget (E21) --
-
-#[test]
-fn the_mutants_job_points_at_the_record_its_budget_rests_on() {
-    let nightly = read(".github/workflows/nightly.yml");
-    let job = job_text(&nightly, "mutants").expect("the nightly workflow declares a `mutants` job");
-
-    assert!(
-        job.contains(crate::common::nightly::MEASURED_MUTANTS),
-        "a `timeout-minutes` with no measurement beside it is a number the next reader doubles. \
-         The job names `{}` — the mutant counts and the per-mutant cost measured from a real \
-         run — so that the budget and the evidence for it move together:\n{job}",
-        crate::common::nightly::MEASURED_MUTANTS
-    );
-}
-
-#[test]
-fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost() {
-    use crate::common::nightly::{measured_mutants, mutants_plan, mutation_budget};
-
-    let budget = mutation_budget();
-    let expected: std::collections::BTreeMap<String, u64> = [
-        ("appfile", 19),
-        ("cache", 25),
-        ("closure", 9),
-        ("launch", 10),
-        ("payload", 12),
-        ("trailer", 3),
-        ("verify", 11),
-    ]
-    .into_iter()
-    .map(|(module, divisions)| (module.to_owned(), divisions))
-    .collect();
-    assert_eq!(
-        budget.modules, expected,
-        "the canonical workload may not silently shrink"
-    );
-    assert_eq!(budget.max_mutants_per_shard, 13);
-    assert_eq!(budget.build_timeout_multiplier, 2);
-    assert_eq!(budget.test_timeout_seconds, 420);
-    let measured = measured_mutants();
-    assert!(
-        budget.build_timeout_multiplier >= 2,
-        "a mutant's build is a build of the same crate, so anything under twice the baseline is \
-         a budget that can lose to ordinary variation"
-    );
-    assert!(
-        budget.test_timeout_seconds > measured.slowest_build_seconds,
-        "the test budget is a hang detector and stays a constant, so it has to clear the \
-         slowest suite in the record: {} seconds",
-        measured.slowest_build_seconds
-    );
-
-    let plan = mutants_plan();
-    assert_eq!(plan.shards.len(), 89);
-    let mut actual: std::collections::BTreeMap<&str, Vec<u64>> = std::collections::BTreeMap::new();
-    for shard in &plan.shards {
-        actual.entry(&shard.module).or_default().push(shard.index);
-        assert_eq!(shard.shards, budget.modules[&shard.module]);
-        assert_eq!(shard.timeout.as_deref(), Some("420"));
-    }
-    for (module, divisions) in &budget.modules {
-        assert_eq!(
-            actual[module.as_str()],
-            (0..*divisions).collect::<Vec<_>>(),
-            "routing must retain every canonical division exactly once: {module}"
-        );
-    }
-    // The budget is a ratio and `timeout-minutes` is a wall clock, so the
-    // conversion needs one measured number: the slowest baseline build any
-    // runner in the matrix has been seen at. It is in the record beside the run
-    // it came from, because a budget argued from a measurement nobody can read
-    // is an assertion.
-    let worst_case_minutes = measured.slowest_baseline_minutes
-        + (budget.max_mutants_per_shard
-            * (budget.build_timeout_multiplier * measured.slowest_build_seconds
-                + budget.test_timeout_seconds))
-            .div_ceil(60)
-        + 15;
-    assert!(
-        worst_case_minutes <= plan.timeout_minutes,
-        "every build and test may consume its cap on the slowest runner in the matrix, and \
-         evidence still needs time to be retained: {worst_case_minutes} minutes of budget \
-         against a job that is cut at {}",
-        plan.timeout_minutes
-    );
-}
-
-/// The one measured number `scripts/ci/mutation.py` also carries.
-///
-/// The per-mutant build budget is a ratio, so nothing in the script needs a
-/// number of seconds — except the wall clock it gives its own subprocess, which
-/// has to cover a budget the job has not computed yet. That makes
-/// `SLOWEST_BASELINE_BUILD_SECONDS` a second copy of a measurement, and two
-/// copies of a measurement with nothing between them is the drift every other
-/// number in this file is held against.
-#[test]
-fn the_scripts_wall_clock_covers_the_slowest_baseline_build_in_the_record() {
-    let script = read("scripts/ci/mutation.py");
-    let line = script
-        .lines()
-        .find(|line| line.starts_with("SLOWEST_BASELINE_BUILD_SECONDS"))
-        .expect("scripts/ci/mutation.py declares SLOWEST_BASELINE_BUILD_SECONDS");
-    let seconds: u64 = line
-        .split('=')
-        .nth(1)
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or_else(|| panic!("`{line}` is not a number of seconds"));
-    let measured = crate::common::nightly::measured_mutants().slowest_build_seconds;
-    assert!(
-        seconds >= measured,
-        "`{line}` is below the slowest baseline build the record holds ({measured} s), so the \
-         script would cut its own subprocess before the budget it passes could be reached"
-    );
-}
-
-#[test]
-fn the_current_source_inventory_fits_every_canonical_mutation_division() {
-    use crate::common::nightly::{CURRENT_MUTANT_COUNTS, mutation_budget};
-
-    let current: serde_json::Value = serde_json::from_str(&read(CURRENT_MUTANT_COUNTS))
-        .expect("the integrated mutation inventory is JSON");
-    let budget = mutation_budget();
-    assert_eq!(current["schema_version"], 1);
-    assert_eq!(current["tool_version"], "27.1.0");
-    assert_eq!(current["executed_mutants"], 0);
-
-    // Both enumerations, not just the newest. A discovery on Windows or Linux
-    // sees the `#[cfg(windows)]` bodies a macOS one does not, so the older
-    // measurement is larger for several modules — and the difference is not all
-    // platform: the campaign's consolidations removed eight `entry_kind` arms
-    // from `verify` and twelve `is_symlink` terms from `cache`. Sizing the
-    // divisions to whichever enumeration the runner performs is what keeps the
-    // planner from refusing a shard, which is how `src/launch.rs` growing past
-    // 8 x 13 candidates took a whole nightly down.
-    for measurement in ["modules", "previous_measurement"] {
-        let counts = if measurement == "modules" {
-            current["modules"].as_object()
-        } else {
-            current[measurement]["modules"].as_object()
-        }
-        .unwrap_or_else(|| panic!("{measurement} carries per-module counts"));
-        assert_eq!(counts.len(), budget.modules.len(), "{measurement}");
-        let mut total = 0;
-        for (module, divisions) in &budget.modules {
-            let count = counts[module].as_u64().expect("a measured candidate count");
-            total += count;
-            assert!(
-                count.div_ceil(*divisions) <= budget.max_mutants_per_shard,
-                "{measurement}: {module}: {count} candidates over {divisions} divisions exceed \
-                 the {}-candidate cap",
-                budget.max_mutants_per_shard
-            );
-        }
-        let declared = if measurement == "modules" {
-            &current["total_selected"]
-        } else {
-            &current[measurement]["total_selected"]
-        };
-        assert_eq!(declared, &serde_json::json!(total), "{measurement}");
-    }
-}
-
-#[test]
-fn the_mutants_job_consumes_the_planned_matrix_on_its_assigned_native_runner() {
-    let parsed = crate::common::repo::yaml(crate::common::nightly::NIGHTLY);
-    let jobs = parsed.as_mapping_get("jobs").expect("nightly jobs");
-    let planner = jobs
-        .as_mapping_get("mutation-plan")
-        .expect("mutation inventory planner");
-    let mutants = jobs
-        .as_mapping_get("mutants")
-        .expect("mutation execution job");
-    let matrix = mutants
-        .as_mapping_get("strategy")
-        .and_then(|strategy| strategy.as_mapping_get("matrix"))
-        .and_then(YamlOwned::as_str)
-        .expect("the execution matrix is generated from actual mutation inventory");
-    let compact = |text: &str| text.split_whitespace().collect::<String>();
-    assert_eq!(
-        compact(matrix),
-        "${{fromJSON(needs.mutation-plan.outputs.matrix)}}",
-        "a handwritten matrix can omit platform-only mutants or retain stale assignments"
-    );
-    let needs = mutants.as_mapping_get("needs").expect("planner dependency");
-    assert!(
-        needs.as_str() == Some("mutation-plan")
-            || needs.as_vec().is_some_and(|dependencies| dependencies
-                .iter()
-                .any(|dependency| dependency.as_str() == Some("mutation-plan"))),
-        "execution must wait for the same inventory that supplied the matrix"
-    );
-    assert!(
-        planner
-            .as_mapping_get("outputs")
-            .and_then(|outputs| outputs.as_mapping_get("matrix"))
-            .and_then(YamlOwned::as_str)
-            .is_some_and(|expression| expression.contains("steps.")
-                && expression.contains(".outputs.matrix")),
-        "the matrix output must come from the actual planning step"
-    );
-    let runner = mutants
-        .as_mapping_get("runs-on")
-        .and_then(YamlOwned::as_str)
-        .expect("a planned native runner");
-    assert_eq!(compact(runner), "${{matrix.runner}}");
-    assert_eq!(
-        mutants
-            .as_mapping_get("strategy")
-            .and_then(|strategy| strategy.as_mapping_get("fail-fast"))
-            .and_then(YamlOwned::as_bool),
-        Some(false),
-        "one failure must not cancel the evidence from other assigned shards"
-    );
-    let execution = workflow_steps(crate::common::nightly::NIGHTLY)
-        .into_iter()
-        .find(|step| step.job == "mutants" && step.run.contains("scripts/ci/mutation.py run"))
-        .expect("native execution passes through inventory and prerequisite checks");
-    assert_eq!(
-        compact(&execution.env["GINARY_REQUIRE_TOOLCHAIN"]),
-        "${{matrix.platform=='linux'&&'1'||'0'}}",
-        "native macOS/Windows must report unavailable optional tools as explicit skips"
-    );
-    assert!(
-        workflow_steps(crate::common::nightly::NIGHTLY)
-            .iter()
-            .any(|step| {
-                step.job == "mutants"
-                    && step.uses.starts_with("erlef/setup-beam@")
-                    && step.with.contains_key("otp-version")
-                    && step.with.contains_key("gleam-version")
-            }),
-        "every native runner must install the real application build and runtime prerequisites"
-    );
-}
-
-#[test]
-fn the_testing_document_says_what_the_nightly_mutation_pass_does_not_cover() {
-    let testing = read("docs/dev/testing.md");
-    let record = crate::common::nightly::MEASURED_MUTANTS;
-
-    // Not "the path appears somewhere": a sentence that names the fixture and
-    // says nothing about coverage would satisfy that, which is the section
-    // deleted down to a bare reference. The same twenty-line-window form
-    // `the_cache_cleaner_is_documented_beside_the_other_tasks` uses, and for
-    // the same reason — by lines rather than by byte offset, because this
-    // document is dense with em dashes and a window cut mid-character turns a
-    // documentation-drift failure into a char-boundary panic.
-    let lines: Vec<&str> = testing.lines().collect();
-    let documented = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(record))
-        .any(|(at, _)| {
-            let window = lines[at.saturating_sub(20)..lines.len().min(at + 20)].join("\n");
-            ["does not cover", "--timeout", "timeout-minutes"]
-                .iter()
-                .all(|needle| window.contains(needle))
-        });
-
-    assert!(
-        documented,
-        "docs/dev/testing.md is where a contributor learns what the assurance passes prove. A \
-         mutation pass that is divided, capped or rotated proves something narrower than \
-         \"every mutant of these modules is caught\", and no passage of the document names \
-         `{record}` and, within twenty lines of it, says what the pass `does not cover`, what \
-         `--timeout` bounds and what `timeout-minutes` the budget is"
-    );
 }
 
 // ------------------------------------------- the token an OTP fetch needs --

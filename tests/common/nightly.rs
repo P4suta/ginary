@@ -1,40 +1,22 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The nightly assurance workflow, read as the two plans it runs.
+//! The nightly assurance workflow, read as the plan it runs.
 //!
-//! Two of the three heavy passes are configured twice — once in
-//! `.github/workflows/nightly.yml` and once in `mise.toml`, so a developer can
-//! run what CI runs — and a precondition one of them satisfies and the other
-//! does not is invisible to a reader of either file. That is exactly how run
-//! 33969332537's fuzz shards failed: `mise.toml`'s task creates
-//! `fuzz/corpus/<target>` before it starts libFuzzer, the workflow passes the
-//! same directory and creates nothing, and git tracks no empty directory. So
-//! the two are reduced to a comparable shape here and compared.
-//!
-//! The mutation half is not a duplicate but a budget, and a budget is a claim
-//! about time. `tests/fixtures/nightly/mutants-measured.json` is the measured
-//! side of it — how many mutants a module produces and what one costs — and
-//! this module reads the configured side so the two can be held against each
-//! other. A gate that cannot finish inside its own `timeout-minutes` is not a
-//! gate.
-
-use std::collections::BTreeMap;
+//! The fuzz pass is configured twice — once in `.github/workflows/nightly.yml`
+//! and once in `mise.toml`, so a developer can run what CI runs — and a
+//! precondition one of them satisfies and the other does not is invisible to a
+//! reader of either file. That is exactly how run 33969332537's fuzz shards
+//! failed: `mise.toml`'s task creates `fuzz/corpus/<target>` before it starts
+//! libFuzzer, the workflow passes the same directory and creates nothing, and
+//! git tracks no empty directory. So the two are reduced to a comparable shape
+//! here and compared.
 
 use saphyr::YamlOwned;
 
 use crate::common::mise;
-use crate::common::repo::{WorkflowStep, read, shell_code, workflow_steps, yaml};
+use crate::common::repo::{WorkflowStep, shell_code, workflow_steps, yaml};
 
 /// The workflow both plans are read out of.
 pub const NIGHTLY: &str = ".github/workflows/nightly.yml";
-
-/// The measured record a mutation budget is argued from.
-pub const MEASURED_MUTANTS: &str = "tests/fixtures/nightly/mutants-measured.json";
-
-/// Current integrated source counts, kept separate from historical timing data.
-pub const CURRENT_MUTANT_COUNTS: &str = "tests/fixtures/nightly/mutants-F1-integration-counts.json";
-
-/// The canonical module divisions and per-shard execution caps.
-pub const MUTATION_DIVISIONS: &str = "scripts/ci/mutation-divisions.json";
 
 /// What a fuzz target's name is replaced by, so the workflow's
 /// `${{ matrix.target }}` and the task's `"$target"` reduce to one shape.
@@ -263,220 +245,6 @@ fn loop_values(commands: &[String], name: &str) -> Vec<String> {
 }
 
 // ------------------------------------------------------------ the mutants --
-
-/// One canonical mutation shard before the planner assigns native runners.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MutantsShard {
-    /// The matrix row, `key=value` pairs joined by a space, for a message.
-    pub row: String,
-    /// The module named by `--file src/<module>.rs`, or the empty string when
-    /// the command names no file and therefore mutates the whole crate.
-    pub module: String,
-    /// The `i` of `--shard i/n`, or 0 when the command names no shard.
-    ///
-    /// `cargo mutants` numbers a division from zero — it refuses a `k` that is
-    /// not less than `n` — so an undivided command is shard 0 of 1.
-    pub index: u64,
-    /// The `n` of `--shard i/n`, or 1 when the command names no shard.
-    pub shards: u64,
-    /// The `--timeout` value, or [`None`] when a single mutant's test run is
-    /// uncapped.
-    pub timeout: Option<String>,
-}
-
-/// The mutation pass the nightly workflow configures.
-#[derive(Debug)]
-pub struct MutantsPlan {
-    /// The job's `timeout-minutes`: the budget one shard has.
-    pub timeout_minutes: u64,
-    /// One entry per canonical shard, before native-runner assignment.
-    pub shards: Vec<MutantsShard>,
-}
-
-/// The canonical workload and process limits consumed by the actual planner.
-#[derive(Debug)]
-pub struct MutationBudget {
-    /// Every module and the number of complete divisions assigned to it.
-    pub modules: BTreeMap<String, u64>,
-    /// Actual enumeration must refuse a larger shard before execution.
-    pub max_mutants_per_shard: u64,
-    /// How many times the baseline build one mutant's build may take.
-    ///
-    /// A multiple rather than a number of seconds, because a number of seconds
-    /// is a fact about one runner: the 120 that stood here was above every
-    /// Linux baseline build and below every Windows and macOS one, so on those
-    /// two every mutant timed out in its build phase and nothing was measured
-    /// about the tests at all. A mutant's build does no more work than the
-    /// baseline's, so a multiple of the baseline always fits, whatever the
-    /// machine.
-    pub build_timeout_multiplier: u64,
-    /// The maximum test time of one mutant.
-    pub test_timeout_seconds: u64,
-}
-
-/// Reads the same budget ledger that the workflow's planner consumes.
-///
-/// # Panics
-///
-/// If the ledger is absent, malformed, has an unknown schema or contains a
-/// missing or zero limit. A failed read must not become an empty passing plan.
-pub fn mutation_budget() -> MutationBudget {
-    let parsed: serde_json::Value = serde_json::from_str(&read(MUTATION_DIVISIONS))
-        .unwrap_or_else(|error| panic!("{MUTATION_DIVISIONS} is not JSON: {error}"));
-    assert_eq!(
-        parsed
-            .get("schema_version")
-            .and_then(serde_json::Value::as_u64),
-        Some(1),
-        "{MUTATION_DIVISIONS} must use the supported schema"
-    );
-    let positive = |value: &serde_json::Value, field: &str| {
-        value
-            .as_u64()
-            .filter(|number| *number > 0)
-            .unwrap_or_else(|| {
-                panic!("{MUTATION_DIVISIONS}'s `{field}` must be a positive integer")
-            })
-    };
-    let modules: BTreeMap<String, u64> = parsed["modules"]
-        .as_object()
-        .unwrap_or_else(|| panic!("{MUTATION_DIVISIONS} has no modules object"))
-        .iter()
-        .map(|(module, divisions)| (module.clone(), positive(divisions, module)))
-        .collect();
-    assert!(!modules.is_empty(), "{MUTATION_DIVISIONS} has no work");
-    MutationBudget {
-        modules,
-        max_mutants_per_shard: positive(&parsed["max_mutants_per_shard"], "max_mutants_per_shard"),
-        build_timeout_multiplier: positive(
-            &parsed["build_timeout_multiplier"],
-            "build_timeout_multiplier",
-        ),
-        test_timeout_seconds: positive(&parsed["test_timeout_seconds"], "test_timeout_seconds"),
-    }
-}
-
-/// The canonical mutation pass, with the real workflow's wall-clock budget.
-///
-/// Native-runner assignment may split a canonical shard by platform. The
-/// historical budget regressions still reason about the complete canonical
-/// divisions, so they read the ledger rather than treating a dynamic matrix
-/// expression as an empty plan or counting a routed shard more than once.
-///
-/// # Panics
-///
-/// If the job has no timeout or the canonical ledger cannot be read.
-pub fn mutants_plan() -> MutantsPlan {
-    let job = "mutants";
-    let timeout_minutes = job_field(job, "timeout-minutes")
-        .and_then(|value| value.as_integer())
-        .and_then(|value| u64::try_from(value).ok())
-        .unwrap_or_else(|| {
-            panic!("{NIGHTLY}'s `{job}` job declares no `timeout-minutes`, so it has no budget")
-        });
-
-    let budget = mutation_budget();
-    let shards = budget
-        .modules
-        .iter()
-        .flat_map(|(module, &divisions)| {
-            (0..divisions)
-                .map(|index| MutantsShard {
-                    row: format!("module={module} shard={index}/{divisions}"),
-                    module: module.clone(),
-                    index,
-                    shards: divisions,
-                    timeout: Some(budget.test_timeout_seconds.to_string()),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    MutantsPlan {
-        timeout_minutes,
-        shards,
-    }
-}
-
-/// What run 33969332537 measured: the mutant count of each module and what one
-/// mutant costs.
-#[derive(Debug)]
-pub struct MeasuredMutants {
-    /// The nightly run the numbers were read from.
-    pub run: String,
-    /// How long a shard takes to reach `ok Unmutated baseline`.
-    pub baseline_minutes: u64,
-    /// The slowest baseline *build* any runner in the matrix was measured at.
-    ///
-    /// The per-mutant build budget is a multiple of a baseline the job has not
-    /// measured yet, and the job's `timeout-minutes` is a wall clock. This is
-    /// the measurement that converts one into the other, which is why it is
-    /// recorded rather than assumed.
-    pub slowest_build_seconds: u64,
-    /// The slowest baseline, build and test together, in whole minutes.
-    pub slowest_baseline_minutes: u64,
-    /// What one mutant costs, build and test together.
-    pub seconds_per_mutant: u64,
-    /// How many mutants each module produces.
-    pub modules: BTreeMap<String, u64>,
-}
-
-impl MeasuredMutants {
-    /// The minutes a shard of `mutants` mutants needs, baseline included.
-    pub fn minutes_for(&self, mutants: u64) -> u64 {
-        self.baseline_minutes + mutants.saturating_mul(self.seconds_per_mutant).div_ceil(60)
-    }
-}
-
-/// The measured record, parsed.
-///
-/// # Panics
-///
-/// If the fixture is not there, is not JSON, or is missing a field. It is the
-/// evidence the budget rests on: a budget argued from a record nobody can read
-/// is an assertion.
-pub fn measured_mutants() -> MeasuredMutants {
-    let text = read(MEASURED_MUTANTS);
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|error| panic!("{MEASURED_MUTANTS} is not JSON: {error}"));
-    let number = |key: &str| {
-        parsed
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} carries no `{key}` number"))
-    };
-    let baseline = |key: &str| {
-        parsed
-            .get("baselines")
-            .and_then(|baselines| baselines.get(key))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} carries no `baselines.{key}` number"))
-    };
-    let modules = parsed
-        .get("modules")
-        .and_then(serde_json::Value::as_object)
-        .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} carries no `modules` object"))
-        .iter()
-        .map(|(module, count)| {
-            let count = count
-                .as_u64()
-                .unwrap_or_else(|| panic!("{MEASURED_MUTANTS}'s `{module}` is not a count"));
-            (module.clone(), count)
-        })
-        .collect();
-    MeasuredMutants {
-        run: parsed
-            .get("run")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| panic!("{MEASURED_MUTANTS} names no `run`"))
-            .to_owned(),
-        baseline_minutes: number("baseline_minutes"),
-        slowest_build_seconds: baseline("slowest_build_seconds"),
-        slowest_baseline_minutes: baseline("slowest_baseline_minutes"),
-        seconds_per_mutant: number("seconds_per_mutant"),
-        modules,
-    }
-}
 
 // -------------------------------------------------------- reading the YAML --
 

@@ -1710,17 +1710,13 @@ cover reads as an empty one, so a contributor adding a task keeps to those four.
 `cleaner_violations`, the rule `mise run clean:cache` is held to, stated over a task so that the
 shell this repository does *not* carry can be handed to it as well.
 
-`nightly.rs` is E21's, and it reads `.github/workflows/nightly.yml` as the two plans it runs.
+`nightly.rs` is E21's, and it reads `.github/workflows/nightly.yml` as the plan it runs.
 `FuzzPlan` reduces a caller of the fuzz targets — the workflow's `fuzz` job, or `mise.toml`'s
 `fuzz` task — to the targets it names, the directories it creates before the first
 `cargo fuzz run`, the directories it passes and the libFuzzer flags after the `--`, so the two
 can be compared and a precondition one satisfies and the other does not stops being invisible.
-`MutantsPlan` reads `scripts/ci/mutation-divisions.json` as one `MutantsShard` per canonical
-division — module, `--shard i/n`, `--timeout` — and `measured_mutants` parses
-`tests/fixtures/nightly/mutants-measured.json`, the
-measured record the budget is argued from. A gate that cannot finish inside its own
-`timeout-minutes` is not a gate, and holding the configured side against the measured one is how
-that is checked here rather than in a `cancelled` job nobody reads.
+Its mutation half — `MutantsPlan`, `MutationBudget` and `measured_mutants`, which held a sharded
+campaign's configured budget against a measured one — went with the campaign.
 
 The `Artifact` helper this section used to list as "still to come" is
 `tests/common/built.rs`: `FixtureProject` copies the project, `BuiltProject::build` runs this
@@ -1773,8 +1769,8 @@ Planned test categories:
     write, publication or signature check preserves the previous artifact and leaves no partial
     replacement. Retained staging is reported when requested. `FAULT_POINTS` in `src/fault.rs` is the list both this
   document and `debugging.md` are held against by unit test, so the three cannot drift apart.
-- **Mutation testing** — `cargo-mutants`, sharded in a nightly CI job; see
-  [what the nightly mutation pass covers](#what-the-nightly-mutation-pass-covers).
+- **Mutation testing** — `cargo-mutants`, over the diff on every pull request; see
+  [what the mutation pass covers](#what-the-mutation-pass-covers).
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table
   above and `tests/regressions/README.md`.
@@ -1788,7 +1784,7 @@ are all installed on the current development machine, and each has a mise task:
 |---|---|---|
 | `mise run deny` | `cargo deny check` | advisories, bans, licences, sources; part of `mise run check` |
 | `mise run cov` | `cargo llvm-cov ... --lcov --output-path target/lcov.info`, then a summary | gated at 90% lines |
-| `mise run mutants` | `cargo mutants` | copies the tree; not `--in-place`; the nightly job shards it, see below |
+| `mise run mutants` | `cargo mutants` | the whole crate, and the only place it runs; copies the tree, not `--in-place` |
 | `mise run test:nextest` | `cargo nextest run` | nextest does not run doc tests, so it is not a replacement for `mise run test` |
 | `mise run fuzz:build` | `cargo +nightly fuzz build` | builds the four targets; nightly, and outside the gate |
 | `mise run fuzz` | each target for 600 s, in turn | nightly; see the fuzzing section |
@@ -1885,106 +1881,56 @@ with `No version is set for shim: cargo-insta`; pin it, or call the binary under
 dependency and needs none of that: `cargo test` compares snapshots and writes `.snap.new` beside
 a mismatch, and only reviewing them wants the subcommand.
 
-### What the nightly mutation pass covers
+### What the mutation pass covers
 
-The `mutants` job in `.github/workflows/nightly.yml` is a *divided* pass, and a divided pass
-proves something narrower than "every mutant of this crate is caught". What it is, exactly:
+The `mutants` job in `.github/workflows/ci.yml` mutates **the lines this change touched**, and
+nothing else. That is a narrower claim than "every mutant of this crate is caught", and it is the
+claim a pull request can afford: the crate is 920 candidates and hours of runners, a change is not,
+and `scripts/ci/mutation-diff.sh` asks cargo-mutants for `--in-diff` over `git diff <base>...HEAD`.
 
-**It covers** every mutant `cargo-mutants` generates for the seven modules the canonical ledger names —
-`appfile`, `cache`, `closure`, `launch`, `payload`, `trailer` and `verify` — with the
-`fault-injection` feature on. Each module is enumerated with `--shard i/n` and **every** shard
-of every division is retained. The Rust AST planner assigns every candidate to an applicable
-native Linux, Windows or macOS runner; a canonical shard with candidates for several operating
-systems produces several jobs. No candidate is discarded by this partition.
-`tests/regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs` fails if a
-canonical shard of a division is ever missing.
+**It covers** every mutant cargo-mutants generates inside the diff, with the `fault-injection`
+feature on, on Linux. **It does not cover** anything the change did not touch, any `#[cfg]` body
+Linux does not compile, or a build the feature is off in. The whole-crate pass is
+`mise run mutants` on a developer's machine, and there is nowhere else it runs.
 
-**It does not cover** any other module of the crate: `src/main.rs`, `src/lib.rs`, `src/cli.rs`,
-`src/download.rs` and the rest are not mutated by CI at all. A mutant whose suite run exceeds
-`--timeout 420` is reported as a `hang` and counted as a kill rather than as `caught`, because the
-suite failing to terminate *is* the detection — which is the only detection available for a mutant
-that stops a loop advancing, where nothing reaches an assertion for one to fail. It proves
-nothing about a build the `fault-injection` feature is off in. It tests each candidate on one
-applicable operating system, not every possible CPU/OS/feature combination. Linux is preferred
-for shared code, Windows for Windows-only code, and macOS for non-Linux Unix code.
+**A change too large for the job is a named refusal.** The candidates are counted before anything
+is built, and a diff over `BUDGET` (40) of them fails with the count and the cap rather than
+running out of the hour with nothing to show — run the whole-crate pass locally and record what it
+found. A diff that touches no source, or no mutable line, is a pass that says so.
 
-**The execution budget includes the full configured build and test caps.** Each mutation has
-`--build-timeout-multiplier 2` and `--timeout 420`: a *ratio* for the build, because a number of
-seconds is a fact about one runner and a mutant's build does no more work than the baseline build
-the job itself times; a constant for the test, because what that bounds is a mutant that never
-terminates rather than a machine that is slow. A shard is capped at 13 mutants and the largest
-holds 11; on the slowest runner in the record that is 201 minutes plus its baseline and evidence
-time, inside `timeout-minutes: 225`. Growth past the cap is a named precondition failure rather
-than a cancelled pass, and the `lint` job plans every shard on each pull request so that failure
-lands on the change that caused it. Plan, outcomes, diffs and logs are retained for 30 days.
+**The budgets.** `--build-timeout-multiplier 2` and `--timeout 420`: a *ratio* for the build,
+because a number of seconds is a fact about one runner and a mutant's build does no more work than
+the baseline build the job itself times; a constant for the test, because what that bounds is a
+mutant that never terminates rather than a machine that is slow.
 
-**The budget is measured, not guessed.** `tests/fixtures/nightly/mutants-measured.json` records
-what one mutant costs and how many each module produces, read off nightly run
-[33969332537](https://github.com/P4suta/ginary/actions/runs/33969332537), and — under
-`baselines` — what one shard's unmutated baseline costs on each runner in the matrix, read off run
-[34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271). The second is what turns
-the build *ratio* into the wall clock `timeout-minutes` is, which is the one place a measurement is
-unavoidable; its `README.md` derives
-every number, including why the figure is that run's 210 seconds a mutant rather than the 107 the
-one small shard that finished averaged. `tests/ci_matrix.rs` and the regression above hold the
-job's `timeout-minutes` against that record, so a shard that could not finish is a failing test
-here rather than a `cancelled` job nobody reads. **Re-measure the record when the suite's runtime
-changes materially** — a pass sized from a stale measurement is the same cancelled job with a
-newer date.
+**Two readings of a timeout, and only one of them fails.**
+`scripts/ci/mutation-verdict.py` reads `mutants.out/outcomes.json` and tells them apart by the
+phase that ran out of time. A **test** phase that did is a mutant the suite did not pass — the only
+detection available for one that stops a loop advancing, where nothing reaches an assertion for one
+to fail — and it is a kill, counted as `hang` rather than folded into `caught` so a reader can see
+how many there were. A **build** phase that did measured nothing at all, and stays a failure. A run
+whose unmutated baseline failed is not a pass either, because nothing it reports is about the
+mutations. The outcomes, diffs and logs are retained for 30 days even when the job fails.
 
-A **build-phase** timeout is a different fact from a hang, and stays a failure: a build that did
-not finish measured nothing about the tests. `scripts/ci/mutation.py` tells the two apart by the
-phase cargo-mutants reports the timeout in. `--build-timeout 120` used to be above every Linux
-baseline build and below every Windows and macOS one, so on those two runners every mutant timed
-out in its build phase and the shard caught nothing at all;
-[F1-mutation-budget.md](log/F1-mutation-budget.md) has the figures and the argument.
+### What replaced the nightly campaign, and why
 
-The previous Ubuntu-only matrix could not catch mutations of `#[cfg(windows)]` bodies because
-those bodies were not compiled. F1 reproduced this with two surviving `ReadAt::read_at` mutations.
-The [upstream cfg discovery limitation](https://github.com/sourcefrog/cargo-mutants/issues/50)
-is addressed here by preserving cargo-mutants 27.1.0's entire discovery, then parsing enclosing
-Rust `cfg` attributes with `syn`. Unknown predicates, ambiguous ownership and a candidate with
-no supported native platform fail planning. The planner is a separate unpublished Cargo workspace
-at `tools/mutation-plan`, with its own lockfile and required tests; it adds no product dependency.
+Until 2026-09-15 the whole crate was mutated every night: 920 candidates cut into 89 canonical
+shards over 106 native jobs, with a Rust AST planner assigning each candidate to a runner whose
+`cfg` could compile it, and a reconcile job holding every outcome against the original plan. It is
+worth saying what that bought and what it cost, because the trade is the reason it is gone.
 
-Each native job rechecks the checkout hashes and re-lists its exact candidate names before
-execution. Selection uses an anchored regex and **does not apply `--shard` again**, since
-cargo-mutants filters before sharding. The final `mutation-gate` job runs even after a native
-failure and reconciles the original plan against every raw outcome, phase result, diff, log,
-process status and selection record. Missing, duplicate, unknown, changed, timed-out and surviving
-results fail the gate. Compile-rejected mutations remain separately classified as unviable.
-The final counts retain failed jobs and candidates that were never run.
+It bought coverage of `#[cfg(windows)]` and `#[cfg(target_os = "macos")]` bodies that a Linux-only
+pass cannot compile, and a per-mutant accounting no diff pass has. It cost hours of runners nightly
+and, more expensively, a *budget* — how many shards each module is cut into — that had to be
+re-measured whenever the source moved. It was not, and the failure mode was the one that matters:
+`src/launch.rs` grew past `8 x 13` candidates with every test still green, and the planner refused
+the whole campaign before it mutated anything, on the night it was to prove the campaign green.
 
-Native jobs require successful startup of Gleam and Erlang. Linux additionally asserts its
-installed Docker/POSIX toolchain through `GINARY_REQUIRE_TOOLCHAIN=1`; Windows and macOS do not
-claim those Linux capabilities. `--show-output` preserves explicit optional-tool and platform
-skips in the full test logs, including for the baseline.
-
-To inspect or reproduce the same assignment locally (Rust and cargo-mutants 27.1.0 required):
-
-```sh
-cargo build --manifest-path tools/mutation-plan/Cargo.toml --locked
-python3 scripts/ci/mutation.py plan \
-  --planner tools/mutation-plan/target/debug/ginary-mutation-plan \
-  --output target/mutation-plan-local
-# Use a job ID assigned to this OS from target/mutation-plan-local/matrix.json.
-python3 scripts/ci/mutation.py run \
-  --bundle target/mutation-plan-local/plan.json \
-  --job trailer-1-windows --output target/mutation-local/trailer-1-windows
-```
-
-On Windows, append `.exe` to the planner path. Use a fresh output directory for each plan and
-keep its source checkout unchanged while executing it. `mise run mutants` remains the raw
-whole-crate cargo-mutants command; its cfg-inactive candidates are not a qualified native gate.
-The adapter removes inherited Cargo target-directory overrides from the mutation child so that
-cargo-mutants owns its fresh scratch build. Reusing another run's target can reuse a test binary
-whose embedded source paths name a deleted scratch directory. Each local run also places the
-tests' bounded subprocess JSON evidence under its own `test-failures` output directory.
-
-Before E21 the job took whole modules against `timeout-minutes: 90`, which was five to twelve
-hours of work each: six of the seven shards of run 33969332537 were cancelled at the cap or lost
-to a runner shutdown, and a cancelled job neither passes nor fails. A gate that cannot finish is
-not a gate.
+A diff pass has no budget to keep true. Its cost is the size of the change, its failure lands on
+the change that caused it, and what it cannot reach — another platform's `cfg` bodies, and every
+line the change did not touch — is reached by `mise run mutants` on a machine that can spend the
+hours. `docs/dev/log/F1-mutation-clusters.md` and `F1-mutation-budget.md` record what the campaign
+found while it ran, and `tests/fixtures/nightly/README.md` says where its measurements went.
 
 `proptest` is a dev dependency too. Its failure-persistence file for an integration test lands at
 `tests/<target>.proptest-regressions`; a file that records a real counterexample is committed with
