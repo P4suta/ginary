@@ -2287,6 +2287,34 @@ fn the_mutation_budget_keeps_all_eighty_one_canonical_shards_and_caps_their_cost
     );
 }
 
+/// The one measured number `scripts/ci/mutation.py` also carries.
+///
+/// The per-mutant build budget is a ratio, so nothing in the script needs a
+/// number of seconds — except the wall clock it gives its own subprocess, which
+/// has to cover a budget the job has not computed yet. That makes
+/// `SLOWEST_BASELINE_BUILD_SECONDS` a second copy of a measurement, and two
+/// copies of a measurement with nothing between them is the drift every other
+/// number in this file is held against.
+#[test]
+fn the_scripts_wall_clock_covers_the_slowest_baseline_build_in_the_record() {
+    let script = read("scripts/ci/mutation.py");
+    let line = script
+        .lines()
+        .find(|line| line.starts_with("SLOWEST_BASELINE_BUILD_SECONDS"))
+        .expect("scripts/ci/mutation.py declares SLOWEST_BASELINE_BUILD_SECONDS");
+    let seconds: u64 = line
+        .split('=')
+        .nth(1)
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` is not a number of seconds"));
+    let measured = crate::common::nightly::measured_mutants().slowest_build_seconds;
+    assert!(
+        seconds >= measured,
+        "`{line}` is below the slowest baseline build the record holds ({measured} s), so the \
+         script would cut its own subprocess before the budget it passes could be reached"
+    );
+}
+
 #[test]
 fn the_current_source_inventory_fits_every_canonical_mutation_division() {
     use crate::common::nightly::{CURRENT_MUTANT_COUNTS, mutation_budget};
