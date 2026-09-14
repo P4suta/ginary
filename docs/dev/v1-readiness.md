@@ -205,14 +205,28 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
   runner whose `cfg` can actually compile it — 95 native jobs — and `mise run mutants` runs it
   locally.
 
-  **The campaign is red and has been since 2026-09-06.** Run
-  [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271) reconciles to
-  `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95 shards
-  failing. The three failures are different things and are not counted as one: `missed` is
-  101 mutants no test kills, which is a test-suite gap; `timeout` is 30 almost entirely on the
-  Windows shards, which is a per-mutant budget that image does not meet; and `not_run` is 15
-  from two shards that did not finish. Nothing else in the nightly workflow is failing — fuzz,
-  the formal model and the cross-Linux smoke matrix are green in the same run.
+  **The campaign has been red since 2026-09-06, and every one of its three failures now has an
+  answer.** Run [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271)
+  reconciles to `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95
+  shards failing. They are different things and are not counted as one:
+
+  - **`missed 101`** was a test-suite gap. 87 are killed and 14 are gone with the redundancy they
+    lived in; [F1-mutation-clusters.md](log/F1-mutation-clusters.md) accounts for each, and there
+    is still no `mutants.toml` and no `#[mutants::skip]` anywhere in `src/`.
+  - **`timeout 30`** was two things. 28 were Windows and macOS shards whose *build* phase hit
+    `--build-timeout 120` — a constant above every Linux baseline build and below theirs, so those
+    shards measured nothing at all; the budget is a multiple of the baseline the job itself times
+    now. The other 2 are Linux mutants that stop a loop advancing, where the suite not terminating
+    is the only detection there can be; those are counted as kills, as mutation testing counts
+    them.
+  - **`not_run 15`** was neither a gap nor a budget. 13 are one job whose runner GitHub shut down
+    eighteen minutes in, which the harness reported as `interrupted` and failed on. 2 are a macOS
+    baseline that failed on an ELF-magic assertion against a Mach-O, fixed when the suite was
+    first qualified on a macOS host.
+
+  A green campaign is a nightly run away rather than a piece of work away, and is claimed here
+  when a run says so. Nothing else in the nightly workflow is failing — fuzz, the formal model and
+  the cross-Linux smoke matrix are green in the same run.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
   the committed corpus. `mise run fuzz` runs it locally.
