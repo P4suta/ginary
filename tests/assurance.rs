@@ -140,15 +140,12 @@ fn macos_exit_probe_runs_the_workflow_assertion_and_keeps_failed_evidence() {
 
 #[test]
 fn every_expensive_nightly_pass_preserves_thirty_days_of_evidence() {
+    // The mutation pass is on the pull-request path now, not here: it mutates
+    // the lines a change touched rather than the whole crate, and retains its
+    // own evidence under `mutants-diff`. `ci.yml`'s own retention is asserted
+    // beside it there.
     let workflow = common::repo::yaml(".github/workflows/nightly.yml");
-    for name in [
-        "mutation-plan",
-        "mutants",
-        "mutation-gate",
-        "fuzz",
-        "formal",
-        "smoke-matrix",
-    ] {
+    for name in ["fuzz", "formal", "smoke-matrix"] {
         let steps = workflow["jobs"][name]["steps"]
             .as_sequence()
             .expect("assurance job steps");
@@ -170,6 +167,50 @@ fn every_expensive_nightly_pass_preserves_thirty_days_of_evidence() {
     assert!(helper.contains("GINARY_SMOKE_EVIDENCE_DIR") && helper.contains("GINARY_TRACE"));
 }
 
+/// The mutation pass is a pull-request check over the diff, and keeps evidence.
+///
+/// The whole crate was 920 candidates over 106 native shards and hours of
+/// runners every night. A change is not the whole crate, and a pull request is
+/// about a change: `cargo mutants --in-diff` keeps only the mutants in lines
+/// the branch touched. The full pass is `mise run mutants` on a developer's
+/// machine, where it can take as long as it takes.
+#[test]
+fn the_mutation_pass_runs_over_the_diff_and_retains_what_it_found() {
+    let workflow = common::repo::yaml(".github/workflows/ci.yml");
+    let steps = workflow["jobs"]["mutants"]["steps"]
+        .as_sequence()
+        .expect("the mutants job has steps");
+    assert!(
+        steps.iter().any(|step| step
+            .as_mapping_get("run")
+            .and_then(saphyr::YamlOwned::as_str)
+            .is_some_and(|run| run.contains("scripts/ci/mutation-diff.sh"))),
+        "the job runs the committed script rather than an inline copy of it"
+    );
+    assert!(
+        steps.iter().any(|step| step
+            .as_mapping_get("uses")
+            .and_then(saphyr::YamlOwned::as_str)
+            .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+            && step
+                .as_mapping_get("if")
+                .and_then(saphyr::YamlOwned::as_str)
+                .is_some_and(|condition| condition.contains("always()"))
+            && step["with"]["retention-days"].as_integer() == Some(30)),
+        "a mutant that survived is evidence, and evidence a failing job drops is evidence nobody \
+         reads"
+    );
+
+    let script = common::repo::read("scripts/ci/mutation-diff.sh");
+    for needle in ["--in-diff", "--list", "BUDGET", "mutation-verdict.py"] {
+        assert!(script.contains(needle), "the script is missing `{needle}`");
+    }
+    assert!(
+        !common::repo::read(".github/workflows/nightly.yml").contains("mutants"),
+        "the nightly pass is gone; the diff pass above replaced it"
+    );
+}
+
 #[test]
 fn nightly_fuzzing_has_a_real_budget_and_the_corpus_survives_the_runner() {
     let text = common::repo::read(".github/workflows/nightly.yml");
@@ -187,217 +228,4 @@ fn nightly_fuzzing_has_a_real_budget_and_the_corpus_survives_the_runner() {
     );
     assert!(text.contains("source scripts/ci/fuzz-evidence.sh"));
     assert!(text.contains("\"status\":\"not_run\""));
-}
-
-#[test]
-fn every_mutation_shard_fits_even_when_every_build_and_test_uses_its_entire_budget() {
-    let plan = common::nightly::mutants_plan();
-    let budget = common::nightly::mutation_budget();
-    let measured = common::nightly::measured_mutants();
-    for shard in &plan.shards {
-        let count = measured.modules[&shard.module].div_ceil(shard.shards);
-        let test_seconds: u64 = shard.timeout.as_ref().unwrap().parse().unwrap();
-        // On the slowest runner in the matrix, where both the baseline and the
-        // build budget derived from it are largest: the budget is a multiple of
-        // a baseline build, and this is the recorded measurement that turns it
-        // into the wall clock `timeout-minutes` is.
-        let minutes = measured.slowest_baseline_minutes
-            + (count
-                * (test_seconds
-                    + budget.build_timeout_multiplier * measured.slowest_build_seconds))
-                .div_ceil(60)
-            + 15;
-        assert!(
-            minutes <= plan.timeout_minutes,
-            "{} would consume {minutes} minutes",
-            shard.row
-        );
-    }
-    let current: serde_json::Value =
-        serde_json::from_str(&common::repo::read(common::nightly::CURRENT_MUTANT_COUNTS)).unwrap();
-    for shard in &plan.shards {
-        let count = current["modules"][&shard.module].as_u64().unwrap();
-        assert!(
-            count.div_ceil(shard.shards) <= budget.max_mutants_per_shard,
-            "{} cannot fit the current integrated source enumeration",
-            shard.module
-        );
-    }
-}
-
-#[test]
-fn mutation_reconciliation_uses_the_original_plan_and_every_native_jobs_evidence() {
-    use common::repo::{option_value, workflow_steps, yaml};
-
-    let workflow = yaml(common::nightly::NIGHTLY);
-    let steps = workflow_steps(common::nightly::NIGHTLY);
-    let invocation = |job: &str, verb: &str| {
-        let prefix = format!("python3 scripts/ci/mutation.py {verb} ");
-        let calls: Vec<_> = steps
-            .iter()
-            .filter(|step| step.job == job)
-            .flat_map(|step| {
-                step.commands()
-                    .into_iter()
-                    .map(move |command| (step, command))
-            })
-            .filter(|(_, command)| command.starts_with(&prefix))
-            .collect();
-        assert_eq!(calls.len(), 1, "{job} must invoke {verb} exactly once");
-        calls.into_iter().next().unwrap()
-    };
-    let (planner, planning) = invocation("mutation-plan", "plan");
-    let (runner, running) = invocation("mutants", "run");
-    let (gate, finalizing) = invocation("mutation-gate", "finalize");
-    // Like common::deps, read the committed section/key spelling so this
-    // contract runs when the CLI-only toml dependency is disabled as well.
-    let manifest = common::repo::read("tools/mutation-plan/Cargo.toml");
-    let binary_name = manifest
-        .lines()
-        .map(common::repo::shell_code)
-        .map(str::trim)
-        .skip_while(|line| *line != "[package]")
-        .skip(1)
-        .take_while(|line| !line.starts_with('['))
-        .find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            if key.trim() != "name" {
-                return None;
-            }
-            value.trim().strip_prefix('"')?.strip_suffix('"')
-        })
-        .filter(|name| !name.is_empty())
-        .expect("the standalone manifest declares its binary name in [package]");
-    assert_eq!(
-        option_value(&planning, "--planner"),
-        Some(format!("tools/mutation-plan/target/debug/{binary_name}")),
-        "the planning command must execute the standalone binary that Cargo actually builds"
-    );
-    assert!(
-        !planner.id.is_empty(),
-        "the matrix needs a real step output"
-    );
-    assert_eq!(
-        workflow["jobs"]["mutation-plan"]["outputs"]["matrix"]
-            .as_str()
-            .unwrap()
-            .split_whitespace()
-            .collect::<String>(),
-        format!("${{{{steps.{}.outputs.matrix}}}}", planner.id)
-    );
-    let planned = option_value(&planning, "--output").unwrap();
-    let bundle = format!("{planned}/plan.json");
-    assert_eq!(option_value(&running, "--bundle"), Some(bundle.clone()));
-    assert_eq!(option_value(&finalizing, "--bundle"), Some(bundle));
-    assert_eq!(
-        option_value(&running, "--job").as_deref(),
-        Some("$MUTATION_JOB")
-    );
-    assert_eq!(runner.env["MUTATION_JOB"], "${{ matrix.id }}");
-
-    let plan_upload = steps
-        .iter()
-        .find(|step| {
-            step.job == "mutation-plan" && step.uses.starts_with("actions/upload-artifact@")
-        })
-        .expect("the original plan is retained");
-    assert_eq!(plan_upload.with["path"], planned);
-    for job in ["mutants", "mutation-gate"] {
-        let download = steps
-            .iter()
-            .find(|step| {
-                step.job == job
-                    && step.uses.starts_with("actions/download-artifact@")
-                    && step.with.get("name") == plan_upload.with.get("name")
-            })
-            .expect("each consumer downloads the same original plan artifact");
-        assert_eq!(download.with["path"], planned);
-    }
-    let native_upload = steps
-        .iter()
-        .find(|step| step.job == "mutants" && step.uses.starts_with("actions/upload-artifact@"))
-        .expect("native raw outcomes are retained");
-    assert_eq!(native_upload.with["name"], "mutants-${{ matrix.id }}");
-    assert_eq!(
-        option_value(&running, "--output").as_deref(),
-        Some(native_upload.with["path"].as_str())
-    );
-    let evidence_download = steps
-        .iter()
-        .find(|step| {
-            step.job == "mutation-gate"
-                && step.uses.starts_with("actions/download-artifact@")
-                && step
-                    .with
-                    .get("pattern")
-                    .is_some_and(|pattern| pattern == "mutants-*")
-        })
-        .expect("reconciliation reads every native job, including failed ones");
-    assert_ne!(
-        evidence_download
-            .with
-            .get("merge-multiple")
-            .map(String::as_str),
-        Some("true"),
-        "per-job raw outcomes must retain their identities instead of overwriting each other"
-    );
-    assert_eq!(
-        option_value(&finalizing, "--evidence").as_deref(),
-        Some(evidence_download.with["path"].as_str())
-    );
-    let final_job = &workflow["jobs"]["mutation-gate"];
-    let mut dependencies: Vec<_> = final_job["needs"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .map(|name| name.as_str().unwrap())
-        .collect();
-    dependencies.sort_unstable();
-    assert_eq!(dependencies, ["mutants", "mutation-plan"]);
-    assert_eq!(
-        final_job["if"]
-            .as_str()
-            .unwrap()
-            .split_whitespace()
-            .collect::<String>(),
-        "${{always()}}",
-        "a failed or cancelled native job must still be reconciled"
-    );
-    for step in [gate, evidence_download, native_upload, plan_upload] {
-        assert_eq!(
-            step.cond.split_whitespace().collect::<String>(),
-            "${{always()}}",
-            "{step} must not disappear after an earlier failure"
-        );
-        assert!(
-            !step.run.contains("|| true"),
-            "reconciliation cannot hide failure"
-        );
-    }
-    let final_steps = final_job["steps"].as_sequence().unwrap();
-    let final_step = final_steps
-        .iter()
-        .find(|step| {
-            step.as_mapping_get("name")
-                .and_then(saphyr::YamlOwned::as_str)
-                == Some(gate.name.as_str())
-        })
-        .unwrap();
-    for node in [final_step, final_job] {
-        assert_ne!(
-            node.as_mapping_get("continue-on-error")
-                .and_then(saphyr::YamlOwned::as_bool),
-            Some(true)
-        );
-    }
-    let summary_upload = steps
-        .iter()
-        .find(|step| {
-            step.job == "mutation-gate" && step.uses.starts_with("actions/upload-artifact@")
-        })
-        .expect("the reconciled verdict is retained");
-    assert_eq!(
-        option_value(&finalizing, "--output").as_deref(),
-        Some(summary_upload.with["path"].as_str())
-    );
 }

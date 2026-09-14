@@ -124,9 +124,9 @@ reported the artifact valid and satisfying its Designated Requirement *before an
 out of. That closes the D3 "awaits a Mac runner" gap.
 
 What the `macos` job does not claim is the rest of the suite. It is a build, launch and signature
-qualification on two images; the full test configurations, the coverage measurements and the
-mutation campaign run elsewhere, and the [Phase F](#phase-f--product-completeness) table says
-where.
+qualification on two images; the full test configurations and the coverage measurements run
+elsewhere, and the [Phase F](#phase-f--product-completeness) table says where. Mutation is a
+pull-request check over the diff, on Linux; the whole-crate pass is local.
 
 **Windows reached the same place one milestone earlier.** E23 was the first milestone worked on a
 Windows host, and the launcher's own suite runs there now: `tests/launcher.rs` was `#![cfg(unix)]`
@@ -184,7 +184,7 @@ maintainer cuts a release per `docs/RELEASE.md`.
 | `distribute.yml` runs the event SHA, never a moved tag | `tests/regressions/f1_distribution_executed_a_tag_in_the_default_branch_context.rs` | done — `d82107f` (F1) |
 | Native Windows build, launch and exit codes | `ci.yml` `windows` job, run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) | done — F1 |
 | Native macOS build, launch and signature | `ci.yml` `macos` job, run [34281075949](https://github.com/P4suta/ginary/actions/runs/34281075949) | done — F1 |
-| Every mutation assigned to a runner that can run it | `tools/mutation-plan`, `scripts/ci/mutation.py`, `nightly.yml` | planned — F1; **the campaign itself is red, below** |
+| Mutation testing over every change | `ci.yml` `mutants` job, `scripts/ci/mutation-diff.sh` | done — F1; the whole-crate campaign it replaced is [below](#the-mutation-and-fuzz-status) |
 
 F1 is the milestone that stopped treating a packaged artifact as the end of the pipeline and
 started treating the *user's* directory as part of it: an export that fails half-way leaves the
@@ -199,36 +199,23 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
 
 ## The mutation and fuzz status
 
-- **Mutation testing** runs in `.github/workflows/nightly.yml`, sharded over the highest-value
-  modules (`trailer`, `payload`, `cache`, `closure`, `appfile`, `launch`, `verify`); a surviving
-  mutant fails its shard. F1 replaced one flat list with a plan that assigns each candidate to a
-  runner whose `cfg` can actually compile it — 95 native jobs — and `mise run mutants` runs it
-  locally.
+- **Mutation testing** runs in `.github/workflows/ci.yml` over **the diff**: every pull request
+  mutates the lines it touched and nothing else, which is what
+  `scripts/ci/mutation-diff.sh` asks cargo-mutants for. A change too large for the job is a named
+  refusal rather than a job that runs out of its hour. `mise run mutants` is the whole-crate pass
+  and it belongs on a developer's machine.
 
-  **The campaign has been red since 2026-09-06, and every one of its three failures now has an
-  answer.** Run [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271)
-  reconciles to `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95
-  shards failing. They are different things and are not counted as one:
-
-  - **`missed 101`** was a test-suite gap. 87 are killed and 14 are gone with the redundancy they
-    lived in; [F1-mutation-clusters.md](log/F1-mutation-clusters.md) accounts for each, and there
-    is still no `mutants.toml` and no `#[mutants::skip]` anywhere in `src/`.
-  - **`timeout 30`** was two things. 28 were Windows and macOS shards whose *build* phase hit
-    `--build-timeout 120` — a constant above every Linux baseline build and below theirs, so those
-    shards measured nothing at all; the budget is a multiple of the baseline the job itself times
-    now. The other 2 are Linux mutants that stop a loop advancing, where the suite not terminating
-    is the only detection there can be; those are counted as kills, as mutation testing counts
-    them.
-  - **`not_run 15`** was neither a gap nor a budget. 13 are one job whose runner GitHub shut down
-    eighteen minutes in, which the harness reported as `interrupted` and failed on. 2 are a macOS
-    baseline that failed on an ELF-magic assertion against a Mach-O, fixed when the suite was
-    first qualified on a macOS host.
-
-  The clusters are in [F1-mutation-clusters.md](log/F1-mutation-clusters.md) and the budget and the
-  two shards that did not finish are in [F1-mutation-budget.md](log/F1-mutation-budget.md). A green
-  campaign is a nightly run away rather than a piece of work away, and is claimed here when a run
-  says so. Nothing else in the nightly workflow is failing — fuzz, the formal model and
-  the cross-Linux smoke matrix are green in the same run.
+  **The nightly campaign that mutated the whole crate is retired.** Until 2026-09-15 it cut 920
+  candidates into 89 canonical shards over 106 native jobs, with an AST planner assigning each to a
+  runner whose `cfg` could compile it. The campaign's own record — 101 survivors closed, 87 killed
+  and 14 removed with the redundancy they lived in — is in
+  [F1-mutation-clusters.md](log/F1-mutation-clusters.md), and what its three failure categories
+  turned out to be is in [F1-mutation-budget.md](log/F1-mutation-budget.md). What it cost was a
+  per-module shard budget that had to be re-measured whenever the source moved, and was not: a
+  module outgrowing its divisions took a whole night's campaign down before it mutated anything,
+  with every test still green. A diff pass has no budget to keep true, and its failures land on the
+  change that caused them. What it cannot reach — another platform's `cfg` bodies, and every line a
+  change did not touch — `mise run mutants` reaches.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
   the committed corpus. `mise run fuzz` runs it locally, and has: 601 seconds each and
@@ -288,9 +275,12 @@ it is no longer deferred is a bullet in the wrong section.
   release. Its consequence for the catalog is visible today: `dist/otp/catalog.json` carries the
   three Linux entries this machine repacked, and the other four targets of `target::ALL` have no
   published runtime, so a cross build for them finds none and says so.
-- **A green mutation campaign** — `nightly.yml`. The plan covers every candidate and the shards
-  run; what has not happened is a reconciliation with no survivor, no timeout and no unrun
-  mutation. The numbers, and what each of the three failures is, are under
+- **A whole-crate mutation pass in CI.** There was one, nightly, and it is retired: its cost was
+  a per-module shard budget that had to be re-measured whenever the source moved, and a module
+  outgrowing its divisions took the whole campaign down with every test still green. CI mutates
+  the diff now and `mise run mutants` is the whole-crate pass, which means **the crate's mutation
+  score is a local measurement rather than a CI-enforced one** — including for `#[cfg]` bodies
+  Linux does not compile. The campaign's own findings are recorded; see
   [the mutation and fuzz status](#the-mutation-and-fuzz-status).
 
 Nothing above is tagged, pushed or published now. The release and distribution workflows are
