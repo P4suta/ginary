@@ -263,10 +263,59 @@ over it with warnings denied.
 - **`mise run smoke`** — not run. The Docker daemon, reachable at the start of this session, was
   unreachable by the time the task ran, and `scripts/smoke.sh` reported the skip rather than
   taking it silently. The Linux clean-room claim is unmeasured on this host and is not claimed.
+
+  **Since, with the daemon up:** it does not skip, it *fails* — `3 of 3 checks failed`, every one
+  of them `Exec format error`. The task builds for the host and runs the result in `ubuntu:24.04`,
+  so on a Mac the artifact is a Mach-O and no check could have run. A clean-room claim that was
+  never tested, reported as a clean-room claim that failed. It asks the artifact's own first four
+  bytes now — what the container needs is an ELF, and nothing else about the host decides that —
+  and says so:
+
+  ```text
+  skipping: the artifact is not an ELF (cffaedfe), so ubuntu:24.04 cannot execute it
+            the macOS clean room is `mise run smoke:macos`
+  ```
+
+  `GINARY_REQUIRE_TOOLCHAIN=1` turns it into a failure, which is what the Linux CI job sets. The
+  Linux clean-room claim is still unmeasured here; the difference is that the task now says that
+  rather than the opposite.
 - **`mise run mutants`** — started, not finished, and at this load it cannot be: one mutant of
   `maintenance_owns` took about five minutes. What it did report is recorded in the next section.
+
+  **Since:** the whole campaign is still not finishable here, and it does not have to be. The
+  question a local run has to answer is "did this change resurrect anything?", and
+  `cargo mutants --in-diff` answers exactly that over the mutants in the changed lines. Thirty of
+  them, against the branch that closed the campaign's last fourteen: **28 caught, 2 unviable, 0
+  missed, 0 timeout**, in 21 minutes.
+
+  Two things had to be taken off `PATH` first, and both are recorded above rather than worked
+  around: `erl` and `gleam`, so the end-to-end tests skip instead of failing on first-exec
+  assessment, and `f1_distribution_executed_a_tag_in_the_default_branch_context`, which this
+  machine's `git` policy wrapper refuses. cargo-mutants requires a green baseline, and a baseline
+  green for the wrong reason is worse than a red one.
 - **`mise run cov`** and **`mise run fuzz`** — not run. Coverage is a full instrumented suite run
   and fuzzing needs a nightly toolchain this host does not have; neither is claimed here.
+
+  **Since, both run.**
+
+  Coverage, with `--no-fail-fast` because the default stops at the first failing target and
+  reports the coverage of everything that did not run: **89.81% lines, 85.57% functions, 90.59%
+  regions**, against a gate of 90% lines. Five end-to-end tests did not finish, every one of them
+  the `incomplete process observation` shape this record already accounts for, so the assertions
+  after their failure point never ran and the lines those reach are uncovered. The number is a
+  floor for this host rather than a measurement of the tree, and the tree's own figure is the one
+  CI reports.
+
+  Fuzzing, with the nightly toolchain this host has since acquired: four targets, 601 seconds
+  each, **30,034,873 / 11,487,024 / 24,241,642 / 11,039,175 runs**, no crash and nothing in
+  `fuzz/artifacts/`.
+
+  It found one real defect, and not in the fuzzers. Building them updated `fuzz/Cargo.lock`, which
+  turned out to be **stale on `main`**: #21 bumped `zstd` to 0.14 in the root lockfile and left the
+  fuzz workspace's own at 0.13.3, where `cargo metadata --locked` refuses to resolve. Nothing
+  caught it — dependabot watches the two ecosystems separately, and the nightly `fuzz` job was the
+  only thing that had ever read that lockfile, so the failure would have arrived in a different
+  workflow hours after the pull request that caused it. The `lint` job resolves it now.
 
 ## Code scanning, triaged and not dismissed
 
