@@ -16,6 +16,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use common::artifact::{APP, SyntheticArtifact};
 use common::cachefs::{DAY, HeldLock, plant_entry};
@@ -1417,4 +1418,295 @@ fn an_application_directory_the_sweep_cannot_read_is_an_error_and_not_an_empty_a
         rendered.contains(&app.display().to_string()),
         "the error names the directory it could not read: {rendered}"
     );
+}
+
+// ------------------------------------------- the edges of what is pruned --
+
+/// The instant a planted entry's marker is stamped with, so that the age a
+/// prune computes is exact rather than however long the test took to get here.
+///
+/// `plant_entry` sets the mtime to `now - age`, which makes `age.as_secs()`
+/// depend on the milliseconds between planting and the call. The boundary this
+/// pins is a single second wide, so the stamp is fixed and `now` is derived
+/// from it: every run computes the same age.
+fn stamped(app: &Path, key: &str) -> (PathBuf, SystemTime) {
+    let entry = plant_entry(app, key, Duration::ZERO);
+    let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    common::cachefs::set_mtime(&entry.join("ginary.json"), stamp);
+    (entry, stamp)
+}
+
+#[test]
+fn an_entry_exactly_as_old_as_the_prune_asks_for_is_old_enough() {
+    // `age < days` and not `age <= days`: `--days 7` prunes what is seven days
+    // old, because "keep what is younger than seven days" is what the flag
+    // means. One second either side of that decides, so both are here.
+    for (extra, removed) in [(0u64, true), (1, true), (-1i64 as u64, false)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join(APP);
+        let (entry, stamp) = stamped(&app, "0123456789abcdef");
+        let seconds = 7 * 86_400_u64;
+        let now = stamp + Duration::from_secs(seconds.wrapping_add(extra));
+
+        let report = cache::prune_app(
+            &app,
+            None,
+            PruneOptions {
+                all: false,
+                days: 7,
+            },
+            now,
+            &Diag::disabled(),
+        );
+
+        assert_eq!(
+            report.removed.contains(&entry),
+            removed,
+            "an entry {} seconds past seven days: {report:?}",
+            extra as i64
+        );
+    }
+}
+
+#[test]
+fn a_prune_keeps_a_name_that_is_a_file_and_a_name_that_is_a_link() {
+    // The ownership chain is three terms — the name is a cache key, the path is
+    // a real directory, and the marker says this application wrote it — and a
+    // reading that lost the middle one would hand a file or a symlink to the
+    // removal below it. Both are planted beside an entry that *is* prunable, so
+    // the prune has something to do and the report is not empty for the wrong
+    // reason.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    let (prunable, stamp) = stamped(&app, "0123456789abcdef");
+    let file = app.join("fedcba9876543210");
+    std::fs::write(&file, b"a file wearing a key's name").expect("the file");
+    #[cfg(unix)]
+    let link = {
+        let link = app.join("aaaabbbbccccdddd");
+        std::os::unix::fs::symlink(&prunable, &link).expect("the link");
+        link
+    };
+
+    let report = cache::prune_app(
+        &app,
+        None,
+        PruneOptions { all: true, days: 0 },
+        stamp + Duration::from_secs(1),
+        &Diag::disabled(),
+    );
+
+    assert_eq!(report.removed, vec![prunable], "{report:?}");
+    assert!(
+        file.is_file(),
+        "a file is not an entry, whatever it is called"
+    );
+    #[cfg(unix)]
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("the link is still there")
+            .file_type()
+            .is_symlink(),
+        "a link is not an entry either"
+    );
+}
+
+#[test]
+fn an_application_directory_that_still_holds_something_is_not_removed() {
+    // `uninstall` removes the application directory only when it emptied it:
+    // an entry it kept is an application somebody is still using, and the crash
+    // dumps beside it are still worth reading. Both halves have to be true at
+    // once, so this plants one entry it will take and one file it will not.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    let entry = plant_entry(&app, "0123456789abcdef", Duration::ZERO);
+    let evidence = app.join("erl_crash.dump");
+    std::fs::write(&evidence, b"a dump a user has not read yet").expect("the evidence");
+
+    let report = cache::uninstall(&app);
+
+    assert_eq!(report.removed, vec![entry], "{report:?}");
+    assert!(
+        app.is_dir(),
+        "the application directory survives its evidence"
+    );
+    assert!(evidence.is_file(), "and so does the evidence");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_application_directory_that_cannot_be_stated_is_unremovable_and_not_absent() {
+    // The first thing `clean_app` does is ask what `app_dir` is, and the two
+    // failures mean opposite things: a directory that is not there has already
+    // been uninstalled, and one this process may not look at is a directory
+    // whose contents are unknown. Reporting the second as the first tells a
+    // user their cache is clean.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let closed = dir.path().join("closed");
+    let app = closed.join(APP);
+    std::fs::create_dir_all(&app).expect("the application directory");
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
+        .expect("close the parent");
+    let unstatable = std::fs::symlink_metadata(&app).is_err();
+
+    let report = cache::uninstall(&app);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    if !unstatable {
+        eprintln!("skipping: this user can stat through a directory with mode 000");
+        return;
+    }
+    assert!(
+        report.removed.is_empty() && !report.kept.is_empty(),
+        "a directory nothing can look at is reported, not passed over: {report:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_wearing_a_residue_name_is_not_followed_to_the_tree_it_points_at() {
+    // The nastiest shape `clean_app` can be handed, and the one its
+    // `symlink_metadata` arm exists for: a link whose *target* would pass every
+    // ownership check, so a reader that asked about the target instead of the
+    // name would delete somebody else's tree and leave the link. The marker at
+    // the end of the link names this application, so the only thing standing
+    // between the removal and that directory is that the entry is a link.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    std::fs::create_dir_all(&app).expect("the application directory");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a directory outside the application");
+    std::fs::write(elsewhere.join("ginary.json"), manifest_padded_to(APP, 1024))
+        .expect("a manifest for this application, outside it");
+    let link = app.join(dead_residue("0123456789abcdef"));
+    std::os::unix::fs::symlink(&elsewhere, &link).expect("the residue link");
+
+    let report = cache::uninstall(&app);
+
+    assert!(
+        report.removed.is_empty(),
+        "a link is not a tree this application extracted: {report:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("the link is still there")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        elsewhere.join("ginary.json").is_file(),
+        "and the directory it pointed at is untouched"
+    );
+}
+
+#[test]
+fn an_empty_application_directory_is_left_where_it_is() {
+    // `uninstall` removes the application directory only when it *emptied* it.
+    // A directory that was already empty is one it did nothing to, and removing
+    // it would be this command deleting a thing it never owned — the same
+    // reasoning that keeps a directory holding evidence. Both halves of that
+    // condition decide, and this is the half the other test cannot reach.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(APP);
+    std::fs::create_dir_all(&app).expect("an application directory with nothing in it");
+
+    let report = cache::uninstall(&app);
+
+    assert!(
+        report.removed.is_empty() && report.kept.is_empty(),
+        "{report:?}"
+    );
+    assert!(
+        app.is_dir(),
+        "a directory this call did not empty is a directory it does not remove"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_application_directory_the_sweep_cannot_stat_is_an_error() {
+    // The companion of `…cannot_read_is_an_error_and_not_an_empty_answer`,
+    // which closes the directory itself and so fails at `read_dir`. This closes
+    // the *parent*, so the failure is in the `symlink_metadata` above it — a
+    // different match with the same two meanings to tell apart, and reporting
+    // "there was nothing to sweep" for either is telling a launcher its cache
+    // is clean.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let closed = dir.path().join("closed");
+    let app = closed.join(APP);
+    std::fs::create_dir_all(&app).expect("the application directory");
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
+        .expect("close the parent");
+    let unstatable = std::fs::symlink_metadata(&app).is_err();
+
+    let outcome = cache::sweep(&app, std::process::id(), &Diag::disabled());
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    if !unstatable {
+        eprintln!("skipping: this user can stat through a directory with mode 000");
+        return;
+    }
+    outcome.expect_err("a directory nothing can look at is not a directory with nothing in it");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cache_root_that_cannot_be_listed_is_not_a_cache_that_was_never_created() {
+    // Both `prune` and `clean_detailed` read the root to find the applications
+    // under it, and both treat a root that is not there as nothing to do —
+    // "a cache that was never created has nothing to prune, and saying so is
+    // not the same as failing". A root that *is* there and cannot be listed is
+    // the other thing, and answering "nothing to do" for it tells a user their
+    // cache is clean when nobody has looked.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    std::fs::create_dir_all(root.join(APP)).expect("a cache with an application in it");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+        .expect("close the root");
+    let unreadable = std::fs::read_dir(&root).is_err();
+
+    let pruned = cache::prune(
+        &root,
+        None,
+        PruneOptions { all: true, days: 0 },
+        SystemTime::now(),
+    );
+    let cleaned = cache::clean_detailed(&root, None);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    if !unreadable {
+        eprintln!("skipping: this user can read a directory with mode 000");
+        return;
+    }
+    pruned.expect_err("a root that cannot be listed is not an empty prune");
+    cleaned.expect_err("nor an empty clean");
+}
+
+#[test]
+fn a_cache_root_that_was_never_created_is_nothing_to_do() {
+    // The other side of the same edge, so that neither reading passes for the
+    // wrong reason: a root nobody has made is an empty report and not an error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("never-created");
+
+    let pruned = cache::prune(
+        &root,
+        None,
+        PruneOptions { all: true, days: 0 },
+        SystemTime::now(),
+    )
+    .expect("a cache that does not exist has nothing to prune");
+    assert!(pruned.removed.is_empty() && pruned.kept.is_empty());
+
+    let cleaned = cache::clean_detailed(&root, None).expect("nor anything to clean");
+    assert!(cleaned.removed.is_empty() && cleaned.kept.is_empty());
 }
