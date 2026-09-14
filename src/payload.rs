@@ -204,7 +204,14 @@ pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
         return Ok(None);
     };
 
-    if section_size < TRAILER_LEN {
+    // The section begins with the trailer, so what is left after subtracting it
+    // is the payload — and there being nothing to subtract from is the refusal.
+    // The bound is the subtraction rather than a comparison beside it because a
+    // comparison has a boundary, and this one's boundary is a case no fixture
+    // can reach: a section of exactly `TRAILER_LEN` is the file's own last
+    // sixty-four bytes, which `Trailer::read_from` finds at the top of this
+    // function before a section is looked for at all.
+    let Some(payload_span) = section_size.checked_sub(TRAILER_LEN) else {
         return Err(TrailerError::Section {
             message: format!(
                 "the {segment},{section} section is {section_size} bytes, too small to hold \
@@ -213,7 +220,7 @@ pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
                 section = crate::macho::PAYLOAD_SECTION,
             ),
         });
-    }
+    };
 
     // The section's own first 64 bytes are the trailer struct, with
     // `payload_offset` relative to the section rather than to the file; see
@@ -257,9 +264,14 @@ pub fn locate(file: &File) -> Result<Option<PayloadLoc>, TrailerError> {
         });
     }
 
+    // `payload_span` and `inner_trailer.payload_len` are the same number by the
+    // two checks above — `Trailer::parse`'s equation over a region one trailer
+    // longer than the section, and the fixed `payload_offset` — and the one
+    // taken from the section's own geometry is the one that cannot name bytes
+    // outside it.
     Ok(Some(PayloadLoc {
         offset: section_offset.saturating_add(inner_trailer.payload_offset),
-        len: inner_trailer.payload_len,
+        len: payload_span,
         sha256: inner_trailer.payload_sha256,
         via: PayloadVia::MachOSection,
     }))
@@ -997,25 +1009,34 @@ impl HostDestinations {
                 path: logical.clone(),
                 existing,
             })?;
-        let mut host_prefix = String::new();
-        let mut target_prefix = String::new();
-        for (host_part, target_part) in host.split('/').zip(target.split('/')) {
-            if !host_prefix.is_empty() {
-                host_prefix.push('/');
-                target_prefix.push('/');
-            }
-            host_prefix.push_str(host_part);
-            target_prefix.push_str(target_part);
-            if let Some(existing) = self.names.get(&host_prefix) {
-                if existing != &target_prefix {
+        // Each directory level of the two destinations, shortest first: `a`,
+        // then `a/b`, then `a/b/c`. The separators are already in the strings —
+        // `lexical_destination` joined the components with them, and promises
+        // no empty component, no leading separator and at least one component —
+        // so a level *is* a prefix and there is nothing to put back between
+        // them. Growing the levels by pushing a separator, as this once did,
+        // needs a term for "not before the first one", and that term can decide
+        // nothing: both sides are built the same way from the same component
+        // count, so a separator in the wrong place moves both, and what answers
+        // here is the comparison between them.
+        let host_levels = host
+            .match_indices('/')
+            .chain(std::iter::once((host.len(), "")));
+        let target_levels = target
+            .match_indices('/')
+            .chain(std::iter::once((target.len(), "")));
+        for ((host_end, _), (target_end, _)) in host_levels.zip(target_levels) {
+            let (host_prefix, target_prefix) = (&host[..host_end], &target[..target_end]);
+            if let Some(existing) = self.names.get(host_prefix) {
+                if existing != target_prefix {
                     return Err(PayloadError::DestinationConflict {
-                        path: target_prefix,
+                        path: target_prefix.to_owned(),
                         existing: existing.clone(),
                     });
                 }
             } else {
                 self.names
-                    .insert(host_prefix.clone(), target_prefix.clone());
+                    .insert(host_prefix.to_owned(), target_prefix.to_owned());
             }
         }
         Ok(())
@@ -1339,17 +1360,14 @@ mod tests {
     /// builds the prefix of each level, so that a target name and the host
     /// name it would land on can be compared level by level.
     ///
-    /// This does **not** kill `delete ! in HostDestinations::insert`, and the
-    /// reason is worth writing down rather than leaving as a gap. Removing the
-    /// `!` puts the separator before the first component instead of between
-    /// the later ones, so `lib/ab` and `liba/b` both spell `/libab` — but the
-    /// host prefix and the target prefix are built from the *same* component
-    /// list by the same loop, so whatever garbles one garbles the other
-    /// identically, and the comparison that decides is between them. Two
-    /// prefixes that collide under garbling carry target prefixes that collide
-    /// with them, so the answer never changes: the mutant is equivalent. What
-    /// this test does hold is the claim a reader cares about, which is that
-    /// the two paths do not collide.
+    /// The levels used to be grown by pushing a separator between components,
+    /// which needed a term for "not before the first one" — and that term could
+    /// decide nothing, because both sides were grown by the same loop from the
+    /// same component list, so a separator in the wrong place moved both and
+    /// the comparison between them still answered the same. The levels are
+    /// slices of the joined path now and there is no such term. What this test
+    /// holds is the claim a reader cares about either way: that the two paths
+    /// do not collide.
     #[test]
     fn a_separator_between_components_keeps_two_paths_apart() {
         let mut seen = HostDestinations::default();

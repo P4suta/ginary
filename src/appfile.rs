@@ -159,14 +159,23 @@ fn render_float(value: f64) -> String {
     if !value.is_finite() {
         return format!("{value}");
     }
+    // An Erlang float literal must carry a fraction. `Debug` writes one for
+    // every finite value it spells without an exponent, and does not for the
+    // mantissa of one it spells with: `1e300` comes out as `1`. The question
+    // used to be asked once per spelling, and the copy on the exponent-free
+    // side had no input that could answer it `no` — which also made the whole
+    // rendering rest on a promise about the standard library. Asked once, of
+    // the mantissa either spelling produces, both answers have an input and
+    // there is no promise left to rest on.
     let text = format!("{value:?}");
-    match text.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) if !mantissa.contains('.') => {
-            format!("{mantissa}.0e{exponent}")
-        }
-        Some(_) => text,
-        None if text.contains('.') => text,
-        None => format!("{text}.0"),
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (text.as_str(), None),
+    };
+    let fraction = if mantissa.contains('.') { "" } else { ".0" };
+    match exponent {
+        Some(exponent) => format!("{mantissa}{fraction}e{exponent}"),
+        None => format!("{mantissa}{fraction}"),
     }
 }
 

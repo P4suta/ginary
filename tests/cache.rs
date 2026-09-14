@@ -1340,6 +1340,12 @@ fn a_dead_owners_residue_whose_marker_disowns_it_is_kept() {
         residue.join("partial").is_file(),
         "the tree the sweep kept is still whole"
     );
+    assert!(
+        !residue.join(".lock").exists(),
+        "and nothing was written into it: taking the lock creates `<entry>/.lock`, so a sweep \
+         that refused this tree only after taking the lock would have left a file inside a \
+         directory it had just decided it does not own"
+    );
 }
 
 #[cfg(unix)]
@@ -1379,6 +1385,15 @@ fn a_residue_that_is_a_link_to_an_entry_this_application_owns_is_still_a_link() 
     assert!(
         elsewhere.join("ginary.json").is_file(),
         "the directory it pointed at is untouched"
+    );
+    assert_eq!(
+        std::fs::read_dir(&elsewhere)
+            .expect("the directory it pointed at is readable")
+            .count(),
+        1,
+        "and nothing was added to it. Taking the lock opens `<entry>/.lock` with `create`, and \
+         through a link that is a file written *outside* the application directory — so the \
+         refusal has to happen before the lock is taken, not only after it"
     );
 }
 

@@ -1756,13 +1756,15 @@ Planned test categories:
   tree on disk, so a test can `SIGKILL` the process and assert the next run sweeps it),
   `rename:eexist` (the losing side of the extraction race), `unpack:corrupt` (a payload that
   changes under the reader), `before-lock` (the cache entry is removed between the preflight and
-  the shared lock, which is what a prune that won the race leaves behind), `launcher:panic` (a
+  the shared lock, which is what a prune that won the race leaves behind), `sweep-locked:pause`
+  (the sweep sleeps holding a residue's exclusive lock, between deciding the tree is sweepable and
+  asking again, so a test can disown the tree in between), `launcher:panic` (a
     panic on the launcher path), `pack:fail` (the *builder* stops between the stub and the
     payload), `output-write:fail` (stop after writing part of a temporary artifact or document),
     `output-persist:fail` (stop immediately before replacing its final name),
     `output-write:fail-document` / `output-persist:fail-document` (reach document publication after the executable has been completed),
     `artifact-sign:fail` (stop the macOS signing path after a partial temporary write), and
-    `artifact-sign:corrupt` (alter a completed signature before verification). The first four are
+    `artifact-sign:corrupt` (alter a completed signature before verification). The first five are
     about *timing*, which is why no artifact a test can build reaches
   them, and each is paired with an assertion that the **next** run recovers: a fault that is only
   shown to fail is half a test. `launcher:panic` is about a promise: `main` installs a panic hook
