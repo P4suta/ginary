@@ -205,13 +205,16 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
   runner whose `cfg` can actually compile it — 95 native jobs — and `mise run mutants` runs it
   locally.
 
-  **The campaign has been red since 2026-09-06, and every one of its three failures now has an
-  answer.** Run [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271)
+  **The campaign was red from 2026-09-06 until it was retired, and each of its three failures has
+  an answer.** Run [34747498271](https://github.com/P4suta/ginary/actions/runs/34747498271)
   reconciles to `caught 733, unviable 81, missed 101, timeout 30, not_run 15`, with 56 of the 95
   shards failing. They are different things and are not counted as one:
 
-  - **`missed 101`** was a test-suite gap. 87 are killed and 14 are gone with the redundancy they
-    lived in; [F1-mutation-clusters.md](log/F1-mutation-clusters.md) accounts for each, and there
+  - **`missed 101`** was a test-suite gap. 87 were killed and 14 removed with the redundancy they
+    lived in — and the campaign's last run found **twenty-six survivors that accounting missed**,
+    thirteen of them `#[cfg]` stubs whose body already *is* the mutant and twelve real error-path
+    and race guards on Linux. [F1-mutation-clusters.md](log/F1-mutation-clusters.md) lists each and
+    says why checking one mutation at a time against one test target is how they were missed. There
     is still no `mutants.toml` and no `#[mutants::skip]` anywhere in `src/`.
   - **`timeout 30`** was two things. 28 were Windows and macOS shards whose *build* phase hit
     `--build-timeout 120` — a constant above every Linux baseline build and below theirs, so those
@@ -225,10 +228,14 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
     first qualified on a macOS host.
 
   The clusters are in [F1-mutation-clusters.md](log/F1-mutation-clusters.md) and the budget and the
-  two shards that did not finish are in [F1-mutation-budget.md](log/F1-mutation-budget.md). A green
-  campaign is a nightly run away rather than a piece of work away, and is claimed here when a run
-  says so. Nothing else in the nightly workflow is failing — fuzz, the formal model and
-  the cross-Linux smoke matrix are green in the same run.
+  two shards that did not finish are in [F1-mutation-budget.md](log/F1-mutation-budget.md).
+
+  **A green campaign was never reached and will not be**, because the pass that would have reported
+  it is retired. Its last run — [34859119976](https://github.com/P4suta/ginary/actions/runs/34859119976),
+  cancelled at 78 of 113 shards once it had said what it had to say — is what corrected the count
+  above. The twelve Linux survivors it named are the honest remainder, and `mise run mutants` is
+  where they are found. Nothing else in the nightly workflow is failing — fuzz, the formal model and
+  the cross-Linux smoke matrix are green.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
   the committed corpus. `mise run fuzz` runs it locally, and has: 601 seconds each and

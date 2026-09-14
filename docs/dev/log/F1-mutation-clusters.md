@@ -65,6 +65,10 @@ contains a term to mutate, because the duplication the mutant lived in is gone.
 | twenty-three functions with one each | 23 | 20 | 3 |
 | **total** | **101** | **87** | **14** |
 
+**This table is the first pass's own accounting and it overstates.** The campaign's last run found
+twenty-six survivors it does not show; the correction at the end of this record says which, and why
+checking one mutation at a time against one target is how they were missed.
+
 The three singles that are removed rather than killed are `payload::locate`,
 `payload::HostDestinations::insert` and `appfile::render_float`; the last section says what
 happened to each.
@@ -192,11 +196,73 @@ than a term, because taking the lock creates a file.
 Neither would have been found by rereading the argument, which is the reason each one was checked
 by applying the mutation and running the target instead.
 
-## What this leaves
+## What this leaves — corrected, 2026-09-15
 
-Nothing. Every mutant the campaign reported is killed or gone, there is still no `mutants.toml`
-and no `#[mutants::skip]` anywhere in `src/`, and `docs/dev/v1-readiness.md` can keep saying that a
-surviving mutant fails its shard.
+**"Nothing" was wrong, and the campaign's own last run is what said so.** The sentence that stood
+here read: *"Every mutant the campaign reported is killed or gone."* Run
+[34859119976](https://github.com/P4suta/ginary/actions/runs/34859119976) — the first full pass
+after the work above, and the last one this project will run in CI — reported **twenty-six**
+outcomes that are neither `caught` nor `unviable`, across seventy-eight shards before it was
+cancelled.
+
+The claim was checked per cluster, one mutation at a time, applied by hand and run against the
+smallest target that could observe it. That is exactly how it went wrong: the campaign runs the
+whole suite on the platform the candidate was assigned to, and a mutation checked against one test
+target is not a mutation the campaign checked. Four of the `cache::sweep` survivors below were
+re-checked by hand after the run named them, and they survive `cargo test --test cache` here too.
+The earlier pass had not measured what it recorded.
+
+### Thirteen are `#[cfg]` stubs whose body *is* the mutant
+
+A function that exists only to say "this platform does not do that" has a body that is already a
+constant, and cargo-mutants replacing that constant with itself is the textbook equivalent mutant.
+No test can kill one, on that platform, ever:
+
+| where | platform | the body it already has |
+|---|---|---|
+| `cache::chmod_tree -> Ok(0)`, `Ok(1)` | windows | `Ok(0)` |
+| `cache::sync_tree -> Ok(true)`, `Ok(false)` | windows | a stub |
+| `cache::syncfs -> false` | macos | `false` |
+| `cache::is_occupied -> true`, `cache::is_refusal -> false` | windows | a `win32` code list |
+| `launch::signal_of -> None`, `Some(-1)`, `Some(0)`, `Some(1)` | windows | no signal exists |
+| `launch::hint_for -> None`, `Some("")`, `Some("xyzzy")` | windows | a stub |
+| `payload::set_mode -> Ok(())` | windows | no mode bits |
+
+This is the same finite category the fourteen above were, reached from the other direction: not a
+term a change could remove, but a platform on which the function has nothing to do. Restructuring
+does not apply, and the exclusion mechanism this repository does not have is the only answer that
+would.
+
+### Twelve are real, and on Linux
+
+Every one guards an error path or a race, and none has a fixture:
+
+- **`cache::sweep`**, four: the `NotFound` guard on `read_dir` (→ `false`), and all three mutations
+  of the `NotFound` guard on `remove_dir_all`. They are the tree vanishing between the stat and the
+  listing, and between the lock and the removal — the same shape as the second guard `sweep-locked`
+  was added for, which is the shape of fixture they need.
+- **`cache::clean_app`**, three: the same `NotFound` guard, on the same race.
+- **`cache::create_fallback_root`**, one: the `AlreadyExists` guard, which is two processes
+  creating `/tmp/ginary-<uid>` at once.
+- **`cache::sync_tree`**, two on Linux (`-> Ok(true)` and `delete !`): what the function reports
+  when `syncfs` succeeds, which on a Linux runner it always does.
+
+Two more were named by shards this record did not download before the run was cancelled.
+
+### And one is a kill the old gate scored as a failure
+
+`appfile::Parser::skip_trivia`'s `!=` → `==` is a `hang`: the parser stops advancing and the suite
+never terminates, which is the only detection there can be.
+`scripts/ci/mutation-verdict.py` counts that as a kill. The retired gate counted it correctly and
+then failed the shard anyway, because it also required cargo-mutants' own exit status to be zero —
+and cargo-mutants exits nonzero on a timeout. The diff pass does not make that mistake; the
+campaign it replaced did, right up to its last run.
+
+### What this means now that CI mutates the diff
+
+None of the twenty-six is re-detected by a pull request that does not touch those lines, so this
+list is the only place they exist. The thirteen are not work. The twelve are, and
+`mise run mutants` is where they will be found again.
 
 The general lesson is the one the removals have in common rather than the exclusions they avoided.
 Thirteen of the fourteen were a *second* spelling of a decision already made somewhere else — a
