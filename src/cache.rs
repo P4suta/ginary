@@ -838,6 +838,13 @@ pub fn sweep(app_dir: &Path, _self_pid: u32, diag: &Diag) -> Result<SweepReport,
             report.kept.push(reported(&path));
             continue;
         };
+        // Both questions again, under the lock, because both answers can have
+        // changed while it was being taken: an owner's id can be reused, and
+        // another sweeper can replace the tree with one that is not ours. This
+        // is the race the lock exists for, and a race is not reachable by
+        // handing the sweep a different cache — so the point that lets a test
+        // change the answer in between is here, between the two askings.
+        let _ = fault::point("sweep-locked");
         if is_alive(pid) || !owned_sweep_tree(&path, &app_dir) {
             report.kept.push(reported(&path));
             continue;

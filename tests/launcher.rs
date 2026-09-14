@@ -825,6 +825,79 @@ fn a_process_killed_mid_extraction_is_swept_by_the_next_run() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
+fn a_residue_disowned_while_the_sweep_holds_its_lock_is_kept() {
+    // The sweep asks twice whether a residue is its to remove: once before it
+    // takes the residue's exclusive lock and once after. The second asking is
+    // the only reason the lock is there — another sweeper can replace the tree,
+    // and a dead owner's process id can be reused, while this one waits — and a
+    // race is not reachable by handing the launcher a different cache. So
+    // `sweep-locked:pause` makes it reachable: the sweep sleeps holding the
+    // lock with the decision already made in its favour, and this test changes
+    // the answer while it sleeps. Without the second asking — or with its two
+    // conditions read as `&&` instead of `||` — the sweep deletes the tree it
+    // has just been told is not its own.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = artifact(&dir);
+    let app_dir = artifact.app_dir();
+    let entry = app_dir.join(artifact.key());
+
+    // One ordinary run first, and then its entry removed. It is what makes the
+    // single wait below a wait on the sweep: a launcher that has never been
+    // executed pays whatever the host charges for assessing a freshly written
+    // binary before it reaches any of its own code, and on some hosts that is
+    // tens of seconds. The second run of the same file does not. Emptying the
+    // cache afterwards is what sends that second run through `fill` again,
+    // because a complete entry returns before the sweep is reached at all.
+    ok(&artifact.run().output());
+    assert!(
+        entry.join("ginary.json").is_file(),
+        "the first run must leave a complete entry"
+    );
+    std::fs::remove_dir_all(&entry).expect("empty the cache so the next run sweeps");
+
+    // A residue owned by a process id nothing will ever have, with no marker in
+    // it — which is what an extraction killed before it wrote one leaves, and
+    // what the sweep is for.
+    let residue = app_dir.join(format!(".{}.tmp-4000000000", artifact.key()));
+    std::fs::create_dir_all(&residue).expect("the residue directory");
+    std::fs::write(residue.join("partial"), b"an interrupted extraction").expect("some content");
+    assert!(
+        !lock_path(&residue).exists(),
+        "nothing has locked the residue yet, so the lock file appearing is the sweep arriving"
+    );
+
+    let sweeper = artifact
+        .run()
+        .env("GINARY_FAULT", "sweep-locked:pause")
+        .spawn();
+    wait_for("the sweep to take the residue's lock", || {
+        lock_path(&residue).is_file()
+    });
+
+    // What another sweeper replacing the tree looks like from inside this one:
+    // a marker that is valid JSON and is not this application's manifest, which
+    // is what `cache::maintenance_owns` refuses.
+    std::fs::write(residue.join("ginary.json"), b"{}").expect("disown the residue");
+
+    let output = common::bounded::wait_bounded(sweeper, RUN_BUDGET, "the sweeping run");
+    assert_eq!(
+        output.status.code(),
+        Some(STUB_EXIT),
+        "the run still reaches the runtime\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        residue.join("partial").is_file(),
+        "the sweep asked again under the lock and kept a tree that had stopped being its own"
+    );
+    assert!(
+        entry.join("ginary.json").is_file(),
+        "and the run it was doing finished: the entry is complete again"
+    );
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
 fn a_lost_rename_race_reuses_the_winner_s_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact = artifact(&dir);
