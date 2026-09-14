@@ -867,7 +867,10 @@ $ mise run check:windows
 
 The image is `scripts/ci/wincheck.Dockerfile` — `rust:1-bookworm` plus `mingw-w64` plus
 `rustup target add x86_64-pc-windows-gnu` — and the task builds it and runs the check inside it,
-against a target directory of its own so a foreign libc's objects never land in `target/`:
+against a target directory of its own so a foreign libc's objects never land in `target/`. The
+base is pinned by digest with the tag left beside it, and `.github/dependabot.yml` carries a
+`docker` entry for `scripts/ci` so the digest moves when the tag does; `tests/ci_matrix.rs` holds
+the two together, because a digest nothing updates is an image that never gets a patch.
 
 ```console
 $ docker build -t ginary-wincheck:1 -f scripts/ci/wincheck.Dockerfile .
