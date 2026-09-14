@@ -36,40 +36,58 @@ the next operator mutation in that expression too.
 
 ## What this closed
 
-| cluster | mutants | killed | equivalent |
+One row per function the campaign reported a survivor in, from the campaign's own list of 101.
+**Killed** is a test that fails when the mutation is applied; **removed** is code that no longer
+contains a term to mutate, because the duplication the mutant lived in is gone.
+
+| function | reported | killed | removed |
 |---|---|---|---|
-| `appfile` (ten tests over escapes, bounds, lookaheads, nesting) | 14 | 13 | 1 |
-| `payload::destined_path_for` | 5 | 5 | 0 |
-| `payload::Destinations::insert` | 3 | 3 | 0 |
-| `payload::set_mode` | 2 | 2 | 0 |
-| `payload` bounds (`MAX_FRONT_ENTRY_BYTES`, `MACHO_HEAD_CAP`) | 2 | 2 | 0 |
-| `verify::read_entry` bounds | 3 | 2 | 1 |
-| `closure::AppSet::is_empty` | 2 | 2 | 0 |
-| `payload::locate` section bound | 1 | 0 | 1 |
-| `cache::maintenance_owns` (recorded in F1-macos-native.md) | 20 | 12 | 5 |
-| `cache` classifiers (`is_errno`, `is_occupied`, `is_refusal`, `is_cache_key`, `residue_owner`) | 6 | 6 | 0 |
-| `cache::files_under` | 3 | 3 | 0 |
-| `cache::remove_anything` | 3 | 3 | 0 |
-| `cache::prune_app` | 3 | 2 | 1 |
-| `cache::clean_app` | 4 | 3 | 1 |
-| `cache::sweep` and `owned_sweep_tree` | 3 | 2 | 1 |
+| `cache::maintenance_owns` | 10 | 10 | 0 |
+| `cache::sweep` | 9 | 9 | 0 |
+| `verify::entry_kind` | 8 | 0 | 8 |
+| `cache::clean_app` | 7 | 6 | 1 |
+| `payload::check_entry_type` | 5 | 5 | 0 |
+| `appfile::Parser::parse_sequence` | 4 | 4 | 0 |
+| `appfile::Parser::parse_binary` | 3 | 3 | 0 |
 | `cache::chmod_tree` | 3 | 3 | 0 |
+| `cache::files_under` | 3 | 3 | 0 |
+| `cache::prune_app` | 3 | 2 | 1 |
+| `cache::remove_anything` | 3 | 3 | 0 |
 | `cache::sync_tree` | 3 | 3 | 0 |
-| `cache::rename_into_place` | 1 | 1 | 0 |
-| `cache::rename_aside` | 1 | 0 | 1 |
-| `cache::prune`, `cache::clean_detailed` | 2 | 2 | 0 |
-| `cache::PayloadSource` | 2 | 2 | 0 |
-| `cache::Corrupting` | 2 | 2 | 0 |
-| `launch::run_bounded` | 1 | 1 | 0 |
+| `verify::read_entry` | 3 | 2 | 1 |
+| `appfile::Parser::parse_term` | 2 | 2 | 0 |
+| `cache::Corrupting::read` | 2 | 2 | 0 |
+| `cache::PayloadSource::read` | 2 | 2 | 0 |
+| `cache::is_errno` | 2 | 2 | 0 |
+| `closure::AppSet::is_empty` | 2 | 2 | 0 |
+| `payload::destined_path_for` | 2 | 2 | 0 |
+| `payload::set_mode` | 2 | 2 | 0 |
+| twenty-three functions with one each | 23 | 20 | 3 |
+| **total** | **101** | **87** | **14** |
 
-**All 101 are accounted for: 80 killed, 13 equivalent, 8 removed with the duplicate they lived
-in.**
+The three singles that are removed rather than killed are `payload::locate`,
+`payload::HostDestinations::insert` and `appfile::render_float`; the last section says what
+happened to each.
 
-`verify`'s eight `entry_kind` arm mutants are gone rather than killed: `verify::entry_kind` and
-`payload::check_entry_type` carried the same ten-arm table, and `verify`'s header promised the two
-commands "name the same shapes the same way" — a promise a reader had to check by eye, and which
-two green test suites would have kept while a word drifted in one copy. There is one function now,
-in `payload`, and `verify` calls it.
+`verify`'s eight `entry_kind` arm mutants are the largest removal and the plainest:
+`verify::entry_kind` and `payload::check_entry_type` carried the same ten-arm table, and `verify`'s
+header promised the two commands "name the same shapes the same way" — a promise a reader had to
+check by eye, and which two green test suites would have kept while a word drifted in one copy.
+There is one function now, in `payload`, and `verify` calls it.
+
+### The first pass's own numbers, and the one that was wrong
+
+This table replaces a per-cluster one that did not reconcile: it summed to 89 of the 101 and
+reported `cache::sweep` and `owned_sweep_tree` as three mutants, two killed and one equivalent.
+The campaign's list has nine in `sweep` and one in `owned_sweep_tree`, and of the three the first
+pass meant — the two guards' `||` and `owned_sweep_tree`'s `&&` — only `owned_sweep_tree`'s was
+killed. **Both** guards survived, which the prose beside that row had actually said ("the campaign
+can never kill either") while the count said otherwise. So the first pass ended at 79 killed, 14
+equivalent and 8 removed rather than at 80, 13 and 8.
+
+That miscount is the reason this table is per function and built from the campaign's list rather
+than from a reading of the work: a summary written alongside the work agrees with the work, and
+the list is the only thing that agrees with the campaign.
 
 ## Two facts about the tar reader, held rather than assumed
 
@@ -83,72 +101,102 @@ holds *that* fact instead of leaving their absence unexplained: `tests/payload.r
 those four never come back as an `UnsupportedEntry`. If the reader ever changes, that test fails
 and the arms become reachable, which is the moment they start earning their place.
 
-## The equivalent mutants, with the argument
+## The fourteen that were equivalent, and are not any more
 
-Mutation testing's own literature treats these as a finite category that has to be *argued*, and
-an equivalent mutant whose argument is not written down costs the next reader the same hour it
-cost the first. Each was checked by applying the mutation and running the target, not reasoned at.
+The first pass left them alive with a written argument each, and asked for a decision between
+excluding them, restructuring them away, and accepting a permanently red shard. The decision was
+**restructuring**, and it turned out to be cheaper than the argument for exclusion suggested — and
+to find a mistake in one of the arguments.
 
-- **`payload::locate`, `section_size < TRAILER_LEN` → `<=`.** A section of exactly `TRAILER_LEN`
-  sits at the end of the file, so its bytes *are* the file's last sixty-four, and
-  `Trailer::read_from` finds them before `locate` looks for a section at all. Every size that
-  reaches the bound is below it, where the two readings agree. No fixture can separate them.
-- **`verify::read_entry`, `head.len() < OBJECT_MAGIC_BYTES` → `<=`.** Reading a fifth byte changes
-  nothing that is decided: `object_format_of` answers the same for four bytes and five, the extra
-  byte comes out of the same entry so every partial sum against `bound` is one larger and the
-  total is unchanged, and the length and digest are over the same bytes either way.
-- **`payload::HostDestinations::insert`, `delete !`.** Removing it puts the separator before the
-  first component instead of between the later ones, so `lib/ab` and `liba/b` both spell `/libab`.
-  But the host prefix and the target prefix are built from the same component list by the same
-  loop, so whatever garbles one garbles the other identically — and the comparison that decides is
-  between them.
-- **`appfile::render_float`, the `text.contains('.')` guard.** Its `None` arm cannot be reached:
-  `text` is the `Debug` form of a finite `f64` with no exponent, and Rust writes a decimal point
-  for every such value. That is an assumption about the standard library, so it is pinned by a
-  property over normal floats and a case list of the subnormal and zero ones instead of argued in
-  a comment.
-- **Five in `cache::maintenance_owns`**, recorded in [F1-macos-native.md](F1-macos-native.md):
-  the function checks the same bound twice and the first check makes the second unreachable.
-- **`cache::prune_app` and `cache::clean_app`, `&&` in the metadata closure.** The two readings
-  differ only for a regular file — nothing is both `is_dir` and `is_symlink` under
-  `symlink_metadata` — and for a regular file the next term asks `maintenance_owns` for
-  `<file>/ginary.json`, which no filesystem answers. Either way the entry is `Unowned`.
-- **`cache::rename_aside`'s guard.** It would let a stat that failed for some reason *other* than
-  absence fall through to the rename below, and there is no such pair: a closed parent directory
-  refuses both the stat and the rename. The guard is what makes the intent legible — "an existing
-  name is a refusal" — so it stays.
-- **`cache::sweep`, the first of its two identical guards.** They sit either side of the lock and
-  are each the other's equivalent mutant: mutate one and the other still refuses the entry, so
-  only a wasted lock differs. The second is not redundant — it exists because the answer can
-  change while the lock is being taken, which is the race the sweep is written around — but the
-  campaign can never kill either.
+Eight are killed and six no longer exist. Each is below with what changed.
 
-One that *looked* equivalent and is not, which is why each of these is checked rather than argued.
-`residue_owner`'s digit check appears to be subsumed by the `digits.parse()` under it: every
-string the check refuses, the parse refuses too — except `+12`, which `u32::from_str` accepts.
-Without the check, `.tmp-12` and `.tmp-+12` would be two spellings of one owner's residue. One
-input in the whole space separates them.
+### Killed: the term was unreachable because another term stood in front of it
+
+- **Five in `cache::maintenance_owns`.** The function checked `len()` against
+  `MAX_FRONT_ENTRY_BYTES` before opening the marker, and then read it through
+  `take(MAX_FRONT_ENTRY_BYTES + 1)` and checked the length again. The pre-check saved reading a
+  file it could reject from its size, and cost the read below the ability to decide anything:
+  every file over the bound was gone before `take` saw it. One bound, checked where the bytes are,
+  and the `+ 1`, the `>` and the `||` beside them all became reachable. The `is_symlink()` term
+  beside `!is_file()` went the same way and for the same reason — `symlink_metadata` does not
+  follow a link, so `is_file()` is already false for one — with what it was documenting moved into
+  the comment above the line that actually does the refusing.
+- **`cache::sweep`, the first of its two guards.** This is the mistake. The first pass argued the
+  two guards were each other's equivalent mutant and that "only a wasted lock differs". A wasted
+  lock is not nothing: `cache_lock::try_exclusive` **creates** `<entry>/.lock`. Reading the first
+  guard as `&&` lets a residue with a dead owner and an *unowned* tree reach the lock, so the
+  sweep writes a file into a directory it has just decided is not its own — and when that entry is
+  a link, writes it through the link, outside the application directory entirely. Two assertions
+  on fixtures that already existed kill it. The lesson is the one the first pass stated and did not
+  apply to itself: an equivalent mutant has to be *checked*, and "nothing observable differs" is a
+  claim about side effects as much as about return values.
+- **`cache::sweep`, the second of the two.** Genuinely unreachable by any cache a test can hand
+  the launcher, because what it decides is a race: the answers can change while the lock is being
+  taken. That is what `src/fault.rs` exists for — its own header says a promise with nothing to
+  trigger it is a promise no test can check — so there is a tenth fault point now,
+  `sweep-locked:pause`, which sleeps holding the residue's lock between the two askings.
+  `a_residue_disowned_while_the_sweep_holds_its_lock_is_kept` disowns the tree while it sleeps.
+  The guard had never been exercised at all before this; the mutant was the thing that said so.
+- **`cache::rename_aside`'s guard.** The two arms under it refused alike, so the guard decided
+  only between refusing here and attempting a rename that cannot succeed either. Written as the
+  refusal itself — `symlink_metadata(aside).err().map(|e| e.kind()) != Some(NotFound)` — the same
+  question has the same answer and the comparison in it decides the whole thing: reading `!=` as
+  `==` refuses every absent name, which is every ordinary call.
+
+### Removed: the code no longer contains a term to mutate
+
+- **`cache::prune_app` and `cache::clean_app`, `&&` in the metadata closure.** `is_dir()` under
+  `symlink_metadata` is already false for a link, so `!is_symlink()` beside it was a term no input
+  could reach. All six spellings of that pair now call one `is_unfollowed_dir`, which is where the
+  rule and the warning about `metadata` are written once. Twelve mutants went with the duplication;
+  the two the new function introduces are both killed.
+- **`verify::read_entry`, `head.len() < OBJECT_MAGIC_BYTES`.** A hand-rolled loop that counted the
+  bytes itself, so the limit was spelled twice — once as the count it stopped at and once as the
+  capacity beside it. `entry.by_ref().take(OBJECT_MAGIC_BYTES).read_to_end(&mut head)` is the same
+  read with one bound in it, and `read_to_end` retries `Interrupted` where the loop propagated it.
+- **`payload::HostDestinations::insert`, `delete !`.** The directory levels were grown by pushing a
+  separator between components, which needs a term for "not before the first one". The separators
+  are already in the string — `lexical_destination` joined the components with them — so a level
+  *is* a prefix of the path, and `match_indices('/')` hands the levels over with nothing to put
+  back. Choosing offsets over a helper function was deliberate: `names` decides nothing on a host
+  that is not Windows, so a function there would have contributed three *survivors* on every Linux
+  shard in place of the one equivalent mutant it removed.
+- **`appfile::render_float`, the `text.contains('.')` guard.** The question "does this carry a
+  fraction?" was asked once per spelling, and the copy on the exponent-free side had no input that
+  could answer it `no`. Asked once, of the mantissa either spelling produces, both answers have an
+  input — `1e300` needs the fraction added and `1.5` does not. The whole rendering had been resting
+  on a promise about the standard library, and does not any more, so `tests/appfile.rs` pins the
+  output instead of the promise: every finite float is written with a dot in its mantissa and reads
+  back as itself.
+- **`payload::locate`, `section_size < TRAILER_LEN`.** A comparison has a boundary and this one's
+  boundary is unreachable, so the bound is the subtraction instead: `section_size.checked_sub(
+  TRAILER_LEN)` refuses the same sections and *names the payload* in what is left, which is the
+  number `PayloadLoc::len` wanted anyway. The trailer's own `payload_len` is the same value by the
+  two checks above it; the one taken from the section's geometry is the one that cannot name bytes
+  outside the section.
+
+### Two arguments for equivalence that were wrong, out of sixteen
+
+`cache::sweep`'s first guard above is one. The other was caught in the first pass and is worth
+keeping beside it. `residue_owner`'s digit check appears to be subsumed by the `digits.parse()`
+under it: every string the check refuses, the parse refuses too — except `+12`, which
+`u32::from_str` accepts. Without the check, `.tmp-12` and `.tmp-+12` would be two spellings of one
+owner's residue, and one input in the whole space separates them.
+
+Sixteen arguments were written and two of them were wrong, which is the rate to expect and the
+reason each one was checked by applying the mutation rather than reasoned at. The two failed in
+opposite directions — one found a term that decided something after all, the other a side effect
+the argument had not counted — and neither would have been found by rereading the argument.
 
 ## What this leaves
 
-Every mutant the campaign reported now has an answer, and **that is not the same as a green
-campaign.** Thirteen are equivalent, and this repository has no mechanism for one: there is no
-`mutants.toml`, no `#[mutants::skip]` anywhere in `src/`, and `docs/dev/v1-readiness.md` says
-flatly that a surviving mutant fails its shard. So the nightly shards for those thirteen will keep
-failing until somebody decides between three things:
+Nothing. Every mutant the campaign reported is killed or gone, there is still no `mutants.toml`
+and no `#[mutants::skip]` anywhere in `src/`, and `docs/dev/v1-readiness.md` can keep saying that a
+surviving mutant fails its shard.
 
-1. **A documented per-mutant exclusion.** `cargo mutants` reads an `exclude_re` from
-   `mutants.toml`; each entry would carry the argument this record already holds, and a test would
-   hold the list against the arguments so an exclusion cannot be added without one.
-2. **Restructuring the code until the redundancy is gone.** Every one of the thirteen is a term
-   that cannot change an answer: a bound checked twice, a guard duplicated either side of a lock,
-   a `!is_file()` that already implies `!is_symlink()`. Removing them would kill the mutants and
-   cost the documentation those terms carry — the `is_symlink()` in `maintenance_owns` is what
-   tells a future reader that changing `symlink_metadata` to `metadata` would break it.
-3. **Accepting a permanently red shard**, and saying so in `v1-readiness.md` instead of the
-   sentence that is there now.
-
-The first is what the literature does and what this record is written to support. The choice is a
-decision about the project's assurance policy rather than a change to make quietly, so it is left
-to be made — but it is now the *only* thing standing between the campaign and green, which it was
-not before.
+The general lesson is the one the removals have in common rather than the exclusions they avoided.
+Thirteen of the fourteen were a *second* spelling of a decision already made somewhere else — a
+bound checked before the read that checks it, a link refused by a call that does not follow links,
+a separator inserted into a string that already has it, a fraction demanded of text that has one.
+The fourteenth was a guard against a race that nothing could create. Mutation testing found all of
+them, and what it was pointing at each time was duplication rather than a missing test.
