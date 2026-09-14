@@ -796,7 +796,7 @@ fn reported(path: &Path) -> PathBuf {
 pub fn sweep(app_dir: &Path, _self_pid: u32, diag: &Diag) -> Result<SweepReport, LauncherError> {
     let app_dir = walked(app_dir);
     match std::fs::symlink_metadata(&app_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(metadata) if is_unfollowed_dir(&metadata) => {}
         Ok(_) => {
             return Ok(SweepReport {
                 removed: Vec::new(),
@@ -883,11 +883,23 @@ fn owner_pid(name: &OsStr) -> Option<u32> {
         .then_some(pid)
 }
 
+/// Whether metadata taken with [`std::fs::symlink_metadata`] — which is the
+/// whole of the rule — describes a directory rather than a link to one.
+///
+/// Housekeeping never follows a directory link. That call does not follow one,
+/// so a link to a directory is a link here and `is_dir()` is already false for
+/// it: a `!is_symlink()` term beside this would be one no input could reach.
+/// The danger the name guards against is the other call — taking the metadata
+/// with `metadata` would follow the link and hand the removals below somebody
+/// else's tree.
+fn is_unfollowed_dir(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir()
+}
+
 /// Automatic housekeeping never follows a directory link or overrides an
 /// existing invalid/foreign manifest, even if the name resembles a residue.
 fn owned_sweep_tree(path: &Path, app_dir: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| is_unfollowed_dir(&metadata))
         && maintenance_owns(path, app_dir, true)
 }
 
@@ -1606,18 +1618,23 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// caller cannot keep holding a lock on a directory that is no longer there.
 fn rename_aside(path: &Path, aside: &Path, lock: crate::cache_lock::ExclusiveLock) -> bool {
     // Unix rename may replace an empty destination directory. That directory
-    // can be residue another live operation still owns, so an existing name
-    // is a refusal even when this platform would permit replacing it.
+    // can be residue another live operation still owns, so an existing name is
+    // a refusal even when this platform would permit replacing it — and so is a
+    // name this process cannot see well enough to say. The question is
+    // therefore "is it definitely absent?", which is one comparison.
     //
-    // `replace match guard … with true` here is an equivalent mutant. It would
-    // let a stat that failed for some *other* reason fall through to the rename
-    // below, and there is no such pair: the reasons `symlink_metadata` fails on
-    // a path a rename then succeeds at do not exist in practice — a closed
-    // parent directory refuses both. The guard is what makes the intent legible
-    // ("an existing name is a refusal"), so it stays.
-    match std::fs::symlink_metadata(aside) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) | Err(_) => return false,
+    // It used to be a guard over two arms that refuse alike, and the guard
+    // decided between refusing here and attempting a rename that cannot succeed
+    // either — a stat that fails for some reason other than absence is a path a
+    // rename fails on too, a closed parent directory refusing both. Nothing
+    // could observe which of the two happened, so the guard was a term with no
+    // input; the comparison that replaces it decides the refusal itself.
+    if std::fs::symlink_metadata(aside)
+        .err()
+        .map(|error| error.kind())
+        != Some(std::io::ErrorKind::NotFound)
+    {
+        return false;
     }
     match rename_aside_order(crate::platform::HOST) {
         RenameAsideOrder::DropThenRename => {
@@ -1688,9 +1705,7 @@ pub fn prune_app(
         return report;
     }
     let app_dir = walked(app_dir);
-    if !std::fs::symlink_metadata(&app_dir)
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-    {
+    if !std::fs::symlink_metadata(&app_dir).is_ok_and(|metadata| is_unfollowed_dir(&metadata)) {
         if app_dir.exists() {
             report.kept.push((reported(&app_dir), KeptReason::Unowned));
         }
@@ -1720,8 +1735,7 @@ pub fn prune_app(
             continue;
         }
         if !is_cache_key(name)
-            || !std::fs::symlink_metadata(&path)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || !std::fs::symlink_metadata(&path).is_ok_and(|metadata| is_unfollowed_dir(&metadata))
             || !maintenance_owns(&path, &app_dir, false)
         {
             report.kept.push((reported(&path), KeptReason::Unowned));
@@ -1833,7 +1847,7 @@ fn clean_app(app_dir: &Path) -> DetailedCleanReport {
     let mut report = DetailedCleanReport::default();
     let app_dir = walked(app_dir);
     match std::fs::symlink_metadata(&app_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(metadata) if is_unfollowed_dir(&metadata) => {}
         Ok(_) => {
             report.kept.push((reported(&app_dir), KeptReason::Unowned));
             return report;
@@ -1878,7 +1892,7 @@ fn clean_app(app_dir: &Path) -> DetailedCleanReport {
             continue;
         }
         match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(metadata) if is_unfollowed_dir(&metadata) => {}
             Ok(_) => {
                 report.kept.push((reported(&path), KeptReason::Unowned));
                 continue;
@@ -1967,10 +1981,22 @@ fn maintenance_owns(entry: &Path, app_dir: &Path, missing_marker_allowed: bool) 
         }
         Err(_) => return false,
     };
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > crate::payload::MAX_FRONT_ENTRY_BYTES
-    {
+    // One term, and the two that used to be beside it are gone because neither
+    // could decide anything.
+    //
+    // `symlink_metadata` does not follow links, so `is_file()` is already false
+    // for one: the `is_symlink()` that stood here was implied by this line and
+    // read as a second check. It is worth knowing that *this* call is what
+    // refuses a link, so changing it to `metadata` would follow one and quietly
+    // admit whatever it points at — which is why that is written here rather
+    // than spelled as a term no input can reach.
+    //
+    // The length was checked here too, against the same bound the read below
+    // checks. The pre-check saved reading a marker it could reject from its
+    // size, and cost the read below the ability to decide anything: every file
+    // over the bound was gone before `take` saw it, so the `+ 1` and the `>`
+    // down there were unreachable. One bound, checked where the bytes are.
+    if !metadata.is_file() {
         return false;
     }
     let Ok(file) = File::open(marker) else {
