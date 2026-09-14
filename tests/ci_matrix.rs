@@ -155,6 +155,18 @@ fn the_lint_job_runs_all_three_clippy_flavors_and_the_deny_check() {
     // lower-case word in a comment would satisfy with no `toolchain:` line in
     // the job at all.
     assert_toolchain_of("lint", STABLE);
+
+    // `--locked` on the root manifest says nothing about `fuzz/Cargo.toml`,
+    // which is a workspace of its own that depends on this crate by path. A
+    // bump to the root lockfile can leave the fuzz one unresolvable, dependabot
+    // updates only the ecosystem it is looking at, and the nightly fuzz job
+    // used to be the only thing that ever read it -- so the pull request that
+    // broke it was green and the failure arrived in a different workflow hours
+    // later. That is what happened to `zstd 0.13.3 -> 0.14.0`.
+    assert!(
+        lint.contains("--manifest-path fuzz/Cargo.toml --locked"),
+        "the lint job has to resolve the fuzz workspace's own lockfile:\n{lint}"
+    );
 }
 
 /// Asserts that one job of `ci.yml` installs exactly one Rust toolchain, and
