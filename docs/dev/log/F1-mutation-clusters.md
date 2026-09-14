@@ -47,6 +47,12 @@ the next operator mutation in that expression too.
 | `closure::AppSet::is_empty` | 2 | 2 | 0 |
 | `payload::locate` section bound | 1 | 0 | 1 |
 | `cache::maintenance_owns` (recorded in F1-macos-native.md) | 20 | 12 | 5 |
+| `cache` classifiers (`is_errno`, `is_occupied`, `is_refusal`, `is_cache_key`, `residue_owner`) | 6 | 6 | 0 |
+| `cache::files_under` | 3 | 3 | 0 |
+| `cache::remove_anything` | 3 | 3 | 0 |
+| `cache::prune_app` | 3 | 2 | 1 |
+| `cache::clean_app` | 4 | 3 | 1 |
+| `cache::sweep` and `owned_sweep_tree` | 3 | 2 | 1 |
 
 `verify`'s eight `entry_kind` arm mutants are gone rather than killed: `verify::entry_kind` and
 `payload::check_entry_type` carried the same ten-arm table, and `verify`'s header promised the two
@@ -92,18 +98,33 @@ cost the first. Each was checked by applying the mutation and running the target
   a comment.
 - **Five in `cache::maintenance_owns`**, recorded in [F1-macos-native.md](F1-macos-native.md):
   the function checks the same bound twice and the first check makes the second unreachable.
+- **`cache::prune_app` and `cache::clean_app`, `&&` in the metadata closure.** The two readings
+  differ only for a regular file — nothing is both `is_dir` and `is_symlink` under
+  `symlink_metadata` — and for a regular file the next term asks `maintenance_owns` for
+  `<file>/ginary.json`, which no filesystem answers. Either way the entry is `Unowned`.
+- **`cache::sweep`, the first of its two identical guards.** They sit either side of the lock and
+  are each the other's equivalent mutant: mutate one and the other still refuses the entry, so
+  only a wasted lock differs. The second is not redundant — it exists because the answer can
+  change while the lock is being taken, which is the race the sweep is written around — but the
+  campaign can never kill either.
+
+One that *looked* equivalent and is not, which is why each of these is checked rather than argued.
+`residue_owner`'s digit check appears to be subsumed by the `digits.parse()` under it: every
+string the check refuses, the parse refuses too — except `+12`, which `u32::from_str` accepts.
+Without the check, `.tmp-12` and `.tmp-+12` would be two spellings of one owner's residue. One
+input in the whole space separates them.
 
 ## What this leaves
 
-`cache` still carries the bulk of the campaign's survivors outside `maintenance_owns` and the
-three `sweep` rules — the `NotFound` guards of `prune_app`, `clean_app` and `sweep`, the boolean
-chains of `residue_owner`, `is_cache_key` and `remove_anything`, and the `Corrupting` reader's
-fault points. `launch` has one, `delete -` in the `(None, None)` arm of `run_bounded`, which needs
+`cache` keeps the survivors this pass did not reach: `chmod_tree` and `sync_tree`'s return
+replacements, the guards of `rename_into_place`, `rename_aside`, `prune`, `clean_detailed` and
+`create_fallback_root`, and the fault-injection fixtures `Corrupting` and `PayloadSource`.
+`launch` has one, `delete -` in the `(None, None)` arm of `run_bounded`, which needs
 an `ExitStatus` that is neither exited nor signalled; `ExitStatusExt::from_raw` can build one, and
 reaching the arm needs the match extracted from the middle of that function first.
 
 The campaign is still red, and the policy question [F1-macos-native.md](F1-macos-native.md) raises
-is unchanged and now has eleven subjects rather than six: this repository has no mechanism for an
+is unchanged and now has fourteen subjects rather than six: this repository has no mechanism for an
 equivalent mutant — no `mutants.toml`, no `#[mutants::skip]` — and `docs/dev/v1-readiness.md` says
 flatly that a surviving mutant fails its shard. Something has to give, and which thing is a
 decision about this project's assurance policy rather than a change to make quietly.
