@@ -175,18 +175,22 @@ Eight are killed and six no longer exist. Each is below with what changed.
   two checks above it; the one taken from the section's geometry is the one that cannot name bytes
   outside the section.
 
-### Two arguments for equivalence that were wrong, out of sixteen
+### Two arguments for equivalence that were wrong, out of fifteen
 
-`cache::sweep`'s first guard above is one. The other was caught in the first pass and is worth
-keeping beside it. `residue_owner`'s digit check appears to be subsumed by the `digits.parse()`
-under it: every string the check refuses, the parse refuses too — except `+12`, which
-`u32::from_str` accepts. Without the check, `.tmp-12` and `.tmp-+12` would be two spellings of one
-owner's residue, and one input in the whole space separates them.
+Fifteen mutants were argued equivalent across the two passes: the fourteen above, and
+`residue_owner`'s digit check, which the first pass argued and then withdrew. Two of the fifteen
+arguments were wrong, and they failed in opposite directions.
 
-Sixteen arguments were written and two of them were wrong, which is the rate to expect and the
-reason each one was checked by applying the mutation rather than reasoned at. The two failed in
-opposite directions — one found a term that decided something after all, the other a side effect
-the argument had not counted — and neither would have been found by rereading the argument.
+`residue_owner`'s appears to be subsumed by the `digits.parse()` under it: every string the check
+refuses, the parse refuses too — except `+12`, which `u32::from_str` accepts. Without the check,
+`.tmp-12` and `.tmp-+12` would be two spellings of one owner's residue, and one input in the whole
+space separates them. The argument had missed a term that decides something after all.
+
+`cache::sweep`'s first guard is the other, above: the argument had missed a *side effect* rather
+than a term, because taking the lock creates a file.
+
+Neither would have been found by rereading the argument, which is the reason each one was checked
+by applying the mutation and running the target instead.
 
 ## What this leaves
 
