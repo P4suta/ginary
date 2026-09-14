@@ -224,8 +224,10 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
     baseline that failed on an ELF-magic assertion against a Mach-O, fixed when the suite was
     first qualified on a macOS host.
 
-  A green campaign is a nightly run away rather than a piece of work away, and is claimed here
-  when a run says so. Nothing else in the nightly workflow is failing — fuzz, the formal model and
+  The clusters are in [F1-mutation-clusters.md](log/F1-mutation-clusters.md) and the budget and the
+  two shards that did not finish are in [F1-mutation-budget.md](log/F1-mutation-budget.md). A green
+  campaign is a nightly run away rather than a piece of work away, and is claimed here when a run
+  says so. Nothing else in the nightly workflow is failing — fuzz, the formal model and
   the cross-Linux smoke matrix are green in the same run.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
