@@ -1457,17 +1457,28 @@ fn dependabot_watches_every_manifest_this_repository_actually_has() {
         .map(|u| (u.ecosystem.as_str(), u.directory.as_str()))
         .collect();
     // Both auxiliary tools are standalone workspaces. The root Cargo update
-    // cannot maintain their independent lockfiles.
+    // cannot maintain their independent lockfiles. The `docker` entry is the
+    // other half of a digest pin: `scripts/ci/wincheck.Dockerfile` names an
+    // image by digest, and a digest nothing updates is an image that never
+    // gets a patch.
     assert_eq!(
         watched,
         vec![
             ("cargo", "/"),
             ("cargo", "/fuzz"),
             ("cargo", "/tools/mutation-plan"),
+            ("docker", "/scripts/ci"),
             ("github-actions", "/"),
         ],
-        "dependabot covers the crate, both standalone tools and the actions, and nothing this \
-         repository does not have; it covers: {watched:?}"
+        "dependabot covers the crate, both standalone tools, the pinned image and the actions, \
+         and nothing this repository does not have; it covers: {watched:?}"
+    );
+    assert!(
+        read("scripts/ci/wincheck.Dockerfile")
+            .lines()
+            .map(shell_code)
+            .any(|line| line.trim_start().starts_with("FROM ") && line.contains("@sha256:")),
+        "the `docker` entry exists to watch a digest, so there has to be one to watch"
     );
     for directory in ["fuzz", "tools/mutation-plan"] {
         let manifest = read(&format!("{directory}/Cargo.toml"));

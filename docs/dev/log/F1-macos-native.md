@@ -279,7 +279,7 @@ rather than findings. The triage:
 | 15 | `rust/cleartext-logging` | `tests/regressions/f1_trace_could_not_be_shared_or_correlated.rs:47` | False positive, and pointing the wrong way: this is the *redaction* test. It asserts the trace does **not** contain `secret-argument-123` and friends, and prints the needle it searched for when the assertion fails. The literals are fixtures. |
 | 9 | `rust/log-injection` | `tests/regressions/e13_…:151` | False positive. An assertion message quoting a reply the test's own fixture server wrote. Not a log, and not a peer's data reaching one. |
 | 6 | `rust/cleartext-logging` | `src/sbom.rs:497` | False positive. A `#[test]` asserting the RFC 4122 variant nibble of a UUID derived from a content digest, printing the UUID when it does not hold. |
-| 8 | Scorecard `PinnedDependencies` | `scripts/ci/wincheck.Dockerfile:15` | Real, and the fix is not obviously an improvement. `FROM rust:1-bookworm` is a *developer* image (`mise run check:windows`) and nothing in CI builds it. Pinning it by digest with no updater watching that digest trades "gets patches" for "never changes", and `.github/dependabot.yml` has no `docker` ecosystem entry. Pinning **and** adding that entry is the honest pair; it is a decision, so it is recorded rather than taken. |
+| 8 | Scorecard `PinnedDependencies` | `scripts/ci/wincheck.Dockerfile:15` | Real, and the fix was not obviously an improvement on its own: `FROM rust:1-bookworm` is a *developer* image (`mise run check:windows`) that nothing in CI builds, and pinning it by digest with no updater watching that digest trades "gets patches" for "never changes". **Taken since, as the pair it needs to be**: the base is pinned by digest with the tag beside it, `.github/dependabot.yml` has a `docker` entry for `scripts/ci`, and `tests/ci_matrix.rs` asserts each half so neither can be removed alone. |
 | 7, 2 | Scorecard `BinaryArtifacts` | `tests/fixtures/{elf,macho}/inet_gethost-*` | Working as intended. These are the committed real ELF and Mach-O a linker wrote, whose provenance each fixture's `README.md` records, and E9 replaced `current_exe()` with them *because* a real object is what those tests need. Removing them removes the tests. |
 | 5, 4, 3, 1 | Scorecard `CIIBestPractices`, `CodeReview`, `Maintained`, `BranchProtection` | repository | Not code. Repository-administration questions for the maintainer. |
 
@@ -350,13 +350,14 @@ forbids `git add -A`. `fuzz/.gitignore` already did the equivalent for the fuzz 
 - **The Windows console control event.** Unchanged, and still the one mechanism of `docs/adr/0015`
   resting on argument rather than on a run. It needs a Windows host and an ADR for a second
   `#[allow(unsafe_code)]`, and this session had neither.
-- **Open pull requests.** #13 is merged. #15 is ported and verified here but not pushed. #10
-  carries E23 work that is already on `main` as `d43c619` and conflicts; the editorial question
-  `docs/dev/log/E23.md` raises about which record is the canonical E23 is still open. #7 is the
+- **Open pull requests.** #13 is merged. #15 was ported, verified and has since been superseded
+  and closed; #10 carried E23 work already on `main` as `d43c619` and is closed. #7 is the
   release-please pull request and is out of scope by instruction.
-- **Code scanning.** Ten alerts remain open (two `rust/cleartext-logging`, one
-  `rust/log-injection`, and Scorecard's `PinnedDependencies`, `BinaryArtifacts` and repository
-  ones). None was triaged here and none was dismissed.
+- **Code scanning.** Ten alerts were open and are triaged in the table above. One of them —
+  Scorecard's `PinnedDependencies` — was a decision rather than a finding, and it has since been
+  taken; the row says what was done. The other nine stand, and none was dismissed, because
+  dismissing one is a decision about this repository's security posture rather than a code
+  change.
 
 ## The local suite, finally measured
 
