@@ -1,5 +1,4 @@
 /target/
-/tools/mutation-plan/target/
 /.cache/
 /build/
 # `mise run mutants` writes its working copy, its logs and its outcome

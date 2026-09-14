@@ -487,8 +487,6 @@ mod e20_a_workflow_could_point_the_version_check_at_another_tree;
 mod e20_release_please_did_not_rewrite_the_unreleased_section;
 #[path = "regressions/e20_the_cleaner_deleted_the_directory_it_was_run_from.rs"]
 mod e20_the_cleaner_deleted_the_directory_it_was_run_from;
-#[path = "regressions/e21_a_mutation_shard_could_not_finish_inside_its_budget.rs"]
-mod e21_a_mutation_shard_could_not_finish_inside_its_budget;
 #[path = "regressions/e21_a_quoted_command_substitution_hid_a_removal.rs"]
 mod e21_a_quoted_command_substitution_hid_a_removal;
 #[path = "regressions/e21_a_quoted_verb_walked_around_the_cleaner_guard.rs"]

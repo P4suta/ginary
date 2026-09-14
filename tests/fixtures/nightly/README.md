@@ -1,54 +1,29 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
-# What the nightly assurance run cost
+# What the nightly mutation campaign cost, while there was one
 
-`mutants-measured.json` is the record a mutation budget can be argued from: how
-many mutants each sharded module produces, and how long one costs. It is
-*measured*, not estimated, and it names the run it was measured from so a
-reader can check it.
+Nothing here is read by a test any more. It is kept because
+[`docs/dev/log/F1-assurance.md`](../../../docs/dev/log/F1-assurance.md) and
+[`E21.md`](../../../docs/dev/log/E21.md) cite it as the evidence their claims rest on, and a log
+that points at a deleted file is a log nobody can check.
 
-Nightly run
-[33969332537](https://github.com/P4suta/ginary/actions/runs/33969332537) is the
-first in this project's history in which every mutation shard printed
-`ok Unmutated baseline`, so it is the first that reports a mutant count per
-module at all. One shard — `trailer` — also ran to completion inside the
-90-minute cap:
+`mutants-F1-counts.json` is the F1 discovery snapshot: 946 candidates across the seven modules the
+campaign sharded, with the source and discovery hashes each count was read from. It claims no
+baseline and no executed mutation.
 
-```text
-28 mutants tested in 50m: 8 missed, 18 caught, 2 unviable
-```
+## Why there is nothing else here
 
-50 minutes over 28 mutants is 107 seconds each. **That average is not what
-`seconds_per_mutant` records**, and the difference matters: `trailer` is the
-smallest and fastest module in the crate, and a figure read off it alone prices
-every other module at the speed of the one that had the least to compile. The
-same run's own per-mutant lines read about 210 seconds — roughly 39 seconds of
-build and 171 of test — and 210 is the number in the file, because a budget
-argued from the optimistic reading is a budget that keeps passing right up to
-the run in which a shard is cancelled again. `baseline_minutes` is what every
-shard took to reach `ok Unmutated baseline` — under four minutes, each of them.
+The campaign this directory sized is gone. It cut the crate into 89 canonical shards over 106
+native jobs and ran every night; sizing it needed two records — how many mutants each module
+produces, and what one costs — and keeping those true needed them re-measured whenever the source
+moved. They were not, which is how `src/launch.rs` grew past `8 x 13` candidates with every test
+still green and took a whole night's campaign down before it mutated anything.
 
-The two figures are worth keeping apart when this file is next revised. 107 is
-a measured completion; 210 is a measured cost per mutant on the shards that did
-not complete. Until a *large* shard finishes, 210 is the honest one, and
-re-measuring from the first nightly in which one does is the way to replace it
-with something better than a conservative reading.
+**Mutation is a pull-request check over the diff now.** `scripts/ci/mutation-diff.sh` mutates the
+lines a change touched and nothing else, so its cost is the size of the change rather than the size
+of the crate, and there is no budget to keep true. The whole-crate pass is `mise run mutants` on a
+developer's machine, where it can take as long as it takes.
 
-The other six shards never printed a total: five were `cancelled` at
-`timeout-minutes: 90` and `appfile` died on a runner shutdown. Their entries in
-`modules` are the mutant counts they *announced*, which is what a shard prints
-before it starts testing, and those are exact.
-
-`tests/ci_matrix.rs` reads this file to answer one question: can the pass the
-nightly workflow configures actually finish inside the budget it is given? A
-gate that cannot finish is not a gate. Re-measure and update the file when the
-suite's runtime changes materially; the workflow points at it by name so that
-the two move together.
-
-`mutants-F1-counts.json` preserves the earlier F1 discovery snapshot. The
-current source-count guard reads `mutants-F1-integration-counts.json`, which
-records a separate offline enumeration after integration with E23: 960
-candidates across the same seven modules. Verification grew from 107 to 121
-candidates, requiring ten canonical divisions to keep each at or below thirteen.
-The other module counts are unchanged. Source and discovery-output hashes are
-recorded for each module. Enumeration does not claim a baseline or an executed
-mutation, and neither count fixture replaces the historical timing measurements.
+`mutants-measured.json` — the per-mutant cost and per-runner baselines — and
+`mutants-F1-integration-counts.json` — the post-E23 enumeration the shard cap was held against —
+were deleted with it. Both are in the history, at `refs` before this directory was emptied, if the
+campaign is ever rebuilt.

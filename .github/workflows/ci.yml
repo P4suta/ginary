@@ -44,9 +44,6 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo fmt --manifest-path tools/mutation-plan/Cargo.toml -- --check
-      - run: cargo test --manifest-path tools/mutation-plan/Cargo.toml --locked --no-fail-fast
-      - run: cargo clippy --manifest-path tools/mutation-plan/Cargo.toml --all-targets --locked -- -D warnings
       # Three clippy flavors. `--all-features` compiles the fault-injection
       # tests in; the plain run is what a contributor's `cargo clippy` does and
       # keeps a helper only the gated tests call from rotting; the stub run is
@@ -88,7 +85,7 @@ jobs:
       - run: cargo test --locked --no-fail-fast --test regressions actionlint_accepts_every_workflow
       # The long native script is linted by file path: actionlint's Windows
       # stdin pipe can block before it starts ShellCheck for a large run block.
-      - run: shellcheck scripts/ci/macos-smoke.sh scripts/ci/coverage.sh scripts/ci/coverage-gate.sh scripts/ci/fuzz-evidence.sh scripts/ci/smoke-matrix-evidence.sh scripts/smoke-matrix.sh
+      - run: shellcheck scripts/ci/macos-smoke.sh scripts/ci/coverage.sh scripts/ci/coverage-gate.sh scripts/ci/fuzz-evidence.sh scripts/ci/mutation-diff.sh scripts/ci/smoke-matrix-evidence.sh scripts/smoke-matrix.sh
       # `fuzz/` is a workspace of its own with a lockfile of its own, and it
       # depends on this crate by path: a bump to the root's lockfile can leave
       # the fuzz one unresolvable. Dependabot watches the two separately and
@@ -99,22 +96,6 @@ jobs:
       # it. Seconds, and no nightly toolchain: `cargo metadata` resolves, it does
       # not build.
       - run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
-      # And the same shape again for the mutation plan. `mutation-divisions.json`
-      # fixes how many shards each module is cut into, the planner refuses a
-      # shard over `max_mutants_per_shard`, and nothing on a pull request ever
-      # ran it -- so `src/launch.rs` growing past 8 x 13 candidates was a red
-      # nightly rather than a red pull request, and the nightly it broke was the
-      # one that would have proved the campaign green. Planning is discovery and
-      # a parse: it builds no mutant and runs no test.
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
-        with:
-          tool: cargo-mutants@27.1.0
-      - name: Plan every canonical mutation shard
-        run: |
-          cargo build --manifest-path tools/mutation-plan/Cargo.toml --locked
-          python3 scripts/ci/mutation.py plan \
-            --planner tools/mutation-plan/target/debug/ginary-mutation-plan \
-            --output target/mutation-plan
 
   msrv:
     name: MSRV check (the declared floor)
@@ -143,7 +124,6 @@ jobs:
       # and the one `cross-build`, `macos` and `windows` build.
       - run: cargo check --workspace --all-features --locked
       - run: cargo check --workspace --no-default-features --locked
-      - run: cargo check --manifest-path tools/mutation-plan/Cargo.toml --all-targets --locked
 
   test:
     name: Test (${{ matrix.configuration }}, stable)
@@ -829,10 +809,48 @@ jobs:
           include-hidden-files: true
           retention-days: 30
           if-no-files-found: warn
+  mutants:
+    name: Mutation testing (the diff)
+    runs-on: ubuntu-24.04
+    # The whole crate is 920 candidates and hours of runners. A change is not,
+    # and a change is what a pull request is about: `--in-diff` keeps only the
+    # mutants in lines this branch touched. `mise run mutants` is the full pass
+    # and it belongs on a developer's machine, where it can take as long as it
+    # takes; see docs/dev/testing.md.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The base commit has to be in the clone for `git diff` to reach it.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: The mutants this change introduces
+        env:
+          # A pull request diffs against its merge base; a push against what it
+          # replaced. A first push to a branch has no predecessor, and the empty
+          # tree is what `git` calls that.
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci/mutation-diff.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: mutants-diff
+          path: target/mutants-diff
+          retention-days: 30
+          if-no-files-found: ignore
+
   required:
     name: Required CI
     if: ${{ always() && !cancelled() }}
-    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal]
+    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal, mutants]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

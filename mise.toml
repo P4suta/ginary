@@ -95,9 +95,14 @@ run = [
 
 [tasks.mutants]
 description = "Mutation testing over the whole crate"
+# The whole crate, and this is the only place it runs. CI mutates the lines a
+# change touched — `scripts/ci/mutation-diff.sh`, on every pull request — so its
+# cost is the size of the change; the whole-crate pass is hours and belongs on a
+# machine that can spend them. `--shard i/n` is there if you want to split it
+# across terminals.
+#
 # No `--in-place`: cargo-mutants copies the tree to a temporary directory, so a
-# killed run cannot leave a mutated source behind. Sharding (`--shard i/n`)
-# arrives with the nightly CI job.
+# killed run cannot leave a mutated source behind.
 run = "cargo mutants"
 
 [tasks."fuzz:build"]
