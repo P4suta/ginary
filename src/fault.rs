@@ -10,8 +10,9 @@
 //! *timing*.
 //!
 //! Two more are about the same thing on the launch side: an entry that is
-//! removed while the launcher is on its way to the lock, and a build that
-//! stops half-way. So the launcher carries named points a test can arm from
+//! removed while the launcher is on its way to the lock, and a residue that
+//! stops being the sweep's to remove while the sweep is taking its lock. A
+//! build that stops half-way is the last. So the launcher carries named points a test can arm from
 //! the environment.
 //! `GINARY_FAULT=<point>[:<action>]` is read once, and the points are:
 //!
@@ -21,6 +22,7 @@
 //! | `rename` | `eexist` | the rename onto the cache entry reports `EEXIST`, as a lost race does |
 //! | `unpack` | `corrupt` | a byte of the manifest is flipped in memory, so the digest cannot match |
 //! | `before-lock` | `on` | the cache entry is removed between the preflight and the shared lock, which is what a prune that won the race leaves behind |
+//! | `sweep-locked` | `pause` | the sweep sleeps [`PAUSE`] holding a residue's exclusive lock, after it has decided the tree is sweepable and before it asks again, so a test can change the answer in between |
 //! | `launcher` | `panic` | the launcher panics, so the panic hook `main` installs is the thing under test |
 //! | `pack` | `fail` | `bundle::build` stops between the stub and the payload, so a test can assert that a failed build leaves neither a work directory nor a half-written artifact |
 //! | `output-write` | `fail` / `fail-document` | stop after writing part of a temporary file; `fail-document` reaches a manifest after artifact publication |
@@ -97,11 +99,12 @@ pub const PANIC_MESSAGE: &str = "GINARY_FAULT=launcher:panic";
 /// new [`point`] call site whose name is not here fails
 /// `every_call_site_is_a_listed_point`, and a point missing from either
 /// document fails `both_documents_list_every_point`.
-pub const FAULT_POINTS: [&str; 9] = [
+pub const FAULT_POINTS: [&str; 10] = [
     "after-extract",
     "rename",
     "unpack",
     "before-lock",
+    "sweep-locked",
     "launcher",
     "pack",
     "output-write",
