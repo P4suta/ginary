@@ -231,7 +231,9 @@ generated 31,939 states, found 7,860 distinct ones and reached depth 29.
   the cross-Linux smoke matrix are green in the same run.
 - **Fuzzing** runs in the nightly workflow too, 600 seconds per target over the four libFuzzer
   targets (`trailer_parse`, `appfile_terms`, `beam_chunks`, `payload_read_manifest`), seeded from
-  the committed corpus. `mise run fuzz` runs it locally.
+  the committed corpus. `mise run fuzz` runs it locally, and has: 601 seconds each and
+  30,034,873 / 11,487,024 / 24,241,642 / 11,039,175 runs on an arm64 macOS host, with no crash and
+  nothing in `fuzz/artifacts/`. See [F1-macos-native.md](log/F1-macos-native.md).
 
 ## The full test count
 
