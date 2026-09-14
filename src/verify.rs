@@ -1157,14 +1157,16 @@ fn read_entry(entry: &mut impl std::io::Read, size: u64, bound: u64) -> std::io:
     let mut hasher = sha2::Sha256::new();
     let mut len = 0u64;
 
+    // `take` is the bound, and it is the only one: the loop that stood here
+    // counted the bytes itself and so spelled the same limit twice, once as the
+    // count it stopped at and once as the capacity beside it. A short entry
+    // still yields what it has — `read_to_end` stops at end of file — and
+    // `object_format_of` answers `None` for a head too short to be magic.
     let mut head = Vec::with_capacity(OBJECT_MAGIC_BYTES);
-    let mut byte = [0u8; 1];
-    while head.len() < OBJECT_MAGIC_BYTES {
-        if entry.read(&mut byte)? == 0 {
-            break;
-        }
-        head.push(byte[0]);
-    }
+    entry
+        .by_ref()
+        .take(OBJECT_MAGIC_BYTES as u64)
+        .read_to_end(&mut head)?;
     hasher.update(&head);
     len = len.saturating_add(head.len() as u64);
 
@@ -1529,15 +1531,11 @@ mod tests {
             scan.object
         );
 
-        // The magic read takes `OBJECT_MAGIC_BYTES`, and `replace < with <=`
-        // there is an equivalent mutant rather than a gap. Reading a fifth byte
-        // changes nothing that is decided: `object_format_of` answers the same
-        // for four bytes and five, the extra byte comes out of the same entry
-        // so every partial sum against `bound` is one larger and the *total* is
-        // unchanged, and both the length and the digest are over the same bytes
-        // either way. An entry shorter than five bytes simply reads zero and
-        // breaks. What is asserted instead is the property that would break if
-        // the magic read ever took bytes that were not the entry's.
+        // The magic read takes `OBJECT_MAGIC_BYTES` and no more. It is a
+        // `take`, so there is no comparison here to get wrong any more, but
+        // there is still a property worth holding: that the read consumed the
+        // entry's bytes and only the entry's, which is what would break if it
+        // ever read ahead.
         let scan = read_entry(&mut exact.as_slice(), 64, 64).expect("the entry streams");
         let Some(Ok(held)) = scan.object else {
             panic!("expected the entry to be held, got {:?}", scan.object)

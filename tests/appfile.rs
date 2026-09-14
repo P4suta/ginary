@@ -1137,41 +1137,48 @@ fn a_lone_angle_and_a_lone_minus_are_not_the_constructs_they_begin() {
     assert_eq!(term("-1."), Term::Int(-1));
 }
 
-// `render_float`'s last arm is unreachable, and this is why.
-//
-// It reads `None if text.contains('.') => text, None => format!("{text}.0")`,
-// where `text` is `format!("{value:?}")` of a *finite* `f64` that carries no
-// `e`. The campaign leaves `replace match guard text.contains('.') with true`
-// alive and no test can kill it, because the guard is always true: Rust's
-// `Debug` for a finite float either uses exponent notation — which the arms
-// above this one take — or writes a decimal point. So the fallback exists
-// against a formatter that does not behave that way, and the mutant is
-// equivalent rather than a gap.
-//
-// That is an assumption about the standard library rather than about ginary,
-// so it is pinned here instead of argued in a comment. If a future Rust writes
-// `1` for a float, this fails and the arm stops being unreachable — which is
-// the moment somebody needs to know.
+/// One float, written as Erlang writes them and read back.
+///
+/// Both halves matter. The mantissa has to carry a fraction, which is what
+/// Erlang's reader requires of a float literal, and the literal has to name
+/// the value it was written from.
+///
+/// `render_float` used to ask for that fraction once per spelling — once of
+/// the mantissa when `Debug` chose exponent notation, once of the whole text
+/// when it did not — and the second copy had no input that could answer it
+/// `no`, because `Debug` writes a decimal point for every finite float it
+/// spells without an exponent. So the rendering rested on a promise about the
+/// standard library, and the arm that would have caught the promise being
+/// broken could not be reached. It asks once now, of the mantissa either
+/// spelling produces, and there is no promise left to pin: what is asserted
+/// here is the output, which is the thing that actually has to hold.
+fn a_float_round_trips(value: f64) {
+    let rendered = Term::Float(value).to_string();
+    let mantissa = rendered
+        .split_once(['e', 'E'])
+        .map_or(rendered.as_str(), |(mantissa, _)| mantissa);
+    assert!(mantissa.contains('.'), "`{rendered}` carries no fraction");
+    assert_eq!(
+        parse_terms(&format!("{rendered}.")).expect("a rendered float parses"),
+        vec![Term::Float(value)],
+        "`{rendered}` did not read back"
+    );
+}
+
 proptest! {
     #[test]
-    fn a_finite_float_debugs_with_a_dot_or_an_exponent(value in proptest::num::f64::NORMAL) {
-        let text = format!("{value:?}");
-        prop_assert!(
-            text.contains('.') || text.contains('e') || text.contains('E'),
-            "`{text}` has neither, so `render_float`'s fallback arm is reachable after all"
-        );
+    fn a_finite_float_is_written_as_a_literal_that_reads_back(
+        value in proptest::num::f64::NORMAL,
+    ) {
+        a_float_round_trips(value);
     }
 }
 
 #[test]
-fn the_floats_that_are_not_normal_debug_the_same_way() {
+fn the_floats_that_are_not_normal_are_written_the_same_way() {
     // The generator above draws normal values only; these are the rest of the
     // finite ones, and they are the shapes most likely to lose a decimal point.
     for value in [0.0_f64, -0.0, f64::MIN_POSITIVE, -f64::MIN_POSITIVE, 5e-324] {
-        let text = format!("{value:?}");
-        assert!(
-            text.contains('.') || text.contains('e') || text.contains('E'),
-            "`{text}` has neither"
-        );
+        a_float_round_trips(value);
     }
 }
