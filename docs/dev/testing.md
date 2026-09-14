@@ -1912,11 +1912,11 @@ for shared code, Windows for Windows-only code, and macOS for non-Linux Unix cod
 `--build-timeout-multiplier 2` and `--timeout 420`: a *ratio* for the build, because a number of
 seconds is a fact about one runner and a mutant's build does no more work than the baseline build
 the job itself times; a constant for the test, because what that bounds is a mutant that never
-terminates rather than a machine that is slow. The largest shard holds 13 mutants, which on the
-slowest runner in the record can consume 201 minutes plus that runner's baseline and evidence time
-inside `timeout-minutes: 225`. Before executing, the workflow lists the current shard and refuses
-more than 13 mutants, so growth causes a named precondition failure rather than a cancelled pass.
-The plan, outcomes, diffs and logs are retained for 30 days even when testing fails.
+terminates rather than a machine that is slow. A shard is capped at 13 mutants and the largest
+holds 11; on the slowest runner in the record that is 201 minutes plus its baseline and evidence
+time, inside `timeout-minutes: 225`. Growth past the cap is a named precondition failure rather
+than a cancelled pass, and the `lint` job plans every shard on each pull request so that failure
+lands on the change that caused it. Plan, outcomes, diffs and logs are retained for 30 days.
 
 **The budget is measured, not guessed.** `tests/fixtures/nightly/mutants-measured.json` records
 what one mutant costs and how many each module produces, read off nightly run

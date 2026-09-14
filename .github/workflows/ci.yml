@@ -99,6 +99,22 @@ jobs:
       # it. Seconds, and no nightly toolchain: `cargo metadata` resolves, it does
       # not build.
       - run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+      # And the same shape again for the mutation plan. `mutation-divisions.json`
+      # fixes how many shards each module is cut into, the planner refuses a
+      # shard over `max_mutants_per_shard`, and nothing on a pull request ever
+      # ran it -- so `src/launch.rs` growing past 8 x 13 candidates was a red
+      # nightly rather than a red pull request, and the nightly it broke was the
+      # one that would have proved the campaign green. Planning is discovery and
+      # a parse: it builds no mutant and runs no test.
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Plan every canonical mutation shard
+        run: |
+          cargo build --manifest-path tools/mutation-plan/Cargo.toml --locked
+          python3 scripts/ci/mutation.py plan \
+            --planner tools/mutation-plan/target/debug/ginary-mutation-plan \
+            --output target/mutation-plan
 
   msrv:
     name: MSRV check (the declared floor)
