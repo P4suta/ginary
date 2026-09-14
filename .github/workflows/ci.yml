@@ -89,6 +89,16 @@ jobs:
       # The long native script is linted by file path: actionlint's Windows
       # stdin pipe can block before it starts ShellCheck for a large run block.
       - run: shellcheck scripts/ci/macos-smoke.sh scripts/ci/coverage.sh scripts/ci/coverage-gate.sh scripts/ci/fuzz-evidence.sh scripts/ci/smoke-matrix-evidence.sh scripts/smoke-matrix.sh
+      # `fuzz/` is a workspace of its own with a lockfile of its own, and it
+      # depends on this crate by path: a bump to the root's lockfile can leave
+      # the fuzz one unresolvable. Dependabot watches the two separately and
+      # updates only the one it is looking at, and until now the nightly fuzz
+      # job was the only thing that ever read the fuzz lock -- so a pull request
+      # that broke it was green, and the failure arrived hours later in a
+      # different workflow. Resolving it here fails the pull request that caused
+      # it. Seconds, and no nightly toolchain: `cargo metadata` resolves, it does
+      # not build.
+      - run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
 
   msrv:
     name: MSRV check (the declared floor)
