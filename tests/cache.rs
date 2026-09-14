@@ -1654,3 +1654,59 @@ fn an_application_directory_the_sweep_cannot_stat_is_an_error() {
     }
     outcome.expect_err("a directory nothing can look at is not a directory with nothing in it");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_cache_root_that_cannot_be_listed_is_not_a_cache_that_was_never_created() {
+    // Both `prune` and `clean_detailed` read the root to find the applications
+    // under it, and both treat a root that is not there as nothing to do —
+    // "a cache that was never created has nothing to prune, and saying so is
+    // not the same as failing". A root that *is* there and cannot be listed is
+    // the other thing, and answering "nothing to do" for it tells a user their
+    // cache is clean when nobody has looked.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("cache");
+    std::fs::create_dir_all(root.join(APP)).expect("a cache with an application in it");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+        .expect("close the root");
+    let unreadable = std::fs::read_dir(&root).is_err();
+
+    let pruned = cache::prune(
+        &root,
+        None,
+        PruneOptions { all: true, days: 0 },
+        SystemTime::now(),
+    );
+    let cleaned = cache::clean_detailed(&root, None);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        .expect("restore the mode so the temporary directory can be cleaned up");
+
+    if !unreadable {
+        eprintln!("skipping: this user can read a directory with mode 000");
+        return;
+    }
+    pruned.expect_err("a root that cannot be listed is not an empty prune");
+    cleaned.expect_err("nor an empty clean");
+}
+
+#[test]
+fn a_cache_root_that_was_never_created_is_nothing_to_do() {
+    // The other side of the same edge, so that neither reading passes for the
+    // wrong reason: a root nobody has made is an empty report and not an error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("never-created");
+
+    let pruned = cache::prune(
+        &root,
+        None,
+        PruneOptions { all: true, days: 0 },
+        SystemTime::now(),
+    )
+    .expect("a cache that does not exist has nothing to prune");
+    assert!(pruned.removed.is_empty() && pruned.kept.is_empty());
+
+    let cleaned = cache::clean_detailed(&root, None).expect("nor anything to clean");
+    assert!(cleaned.removed.is_empty() && cleaned.kept.is_empty());
+}

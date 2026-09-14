@@ -1608,6 +1608,13 @@ fn rename_aside(path: &Path, aside: &Path, lock: crate::cache_lock::ExclusiveLoc
     // Unix rename may replace an empty destination directory. That directory
     // can be residue another live operation still owns, so an existing name
     // is a refusal even when this platform would permit replacing it.
+    //
+    // `replace match guard … with true` here is an equivalent mutant. It would
+    // let a stat that failed for some *other* reason fall through to the rename
+    // below, and there is no such pair: the reasons `symlink_metadata` fails on
+    // a path a rename then succeeds at do not exist in practice — a closed
+    // parent directory refuses both. The guard is what makes the intent legible
+    // ("an existing name is a refusal"), so it stays.
     match std::fs::symlink_metadata(aside) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) | Err(_) => return false,
@@ -2277,6 +2284,252 @@ mod tests {
             error.kind(),
             std::io::ErrorKind::NotFound,
             "the directory is there; what failed is reading it"
+        );
+    }
+
+    /// A rename that loses the race and one that fails for another reason are
+    /// two different sentences.
+    ///
+    /// `rename_into_place` treats an occupied destination as "somebody else
+    /// finished first" and carries on to check that they left a manifest. Every
+    /// other failure belongs to the caller, and a guard that admitted all of
+    /// them would hand a missing parent directory or a full disk to that check
+    /// and report it as another process's half-finished work.
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_that_did_not_lose_a_race_is_reported_as_itself() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).expect("something to rename");
+        // A destination whose parent does not exist: `ENOENT`, which is not
+        // one of the three codes `is_occupied` admits.
+        let target = dir.path().join("no-such-parent").join("entry");
+
+        let error = rename_into_place(&tmp, &target, false)
+            .expect_err("a rename into a directory that is not there fails");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains("another process"),
+            "the race is not what happened: {message}"
+        );
+    }
+
+    /// `chmod_tree` changes every regular file under the tree and says how
+    /// many.
+    ///
+    /// Both halves matter and neither was asserted: the count is what
+    /// `ensure_extracted` reports, and the modes are what make `erlexec`
+    /// startable. A version that answered a fixed number, or that counted
+    /// without counting up, agrees with the real one on a tree of one file —
+    /// so this one has three, at two depths.
+    #[cfg(unix)]
+    #[test]
+    fn chmod_tree_changes_every_file_and_counts_them() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let tree = dir.path().join("bin");
+        std::fs::create_dir_all(tree.join("nested")).expect("the tree");
+        let paths = [
+            tree.join("erlexec"),
+            tree.join("beam.smp"),
+            tree.join("nested/inet_gethost"),
+        ];
+        for path in &paths {
+            std::fs::write(path, b"a program").expect("a file");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("a mode that is not the one being set");
+        }
+
+        let changed = chmod_tree(&tree, BIN_MODE).expect("the tree is ours");
+
+        assert_eq!(changed, paths.len(), "every file is counted, once each");
+        for path in &paths {
+            assert_eq!(
+                std::fs::symlink_metadata(path)
+                    .expect("stat")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                BIN_MODE,
+                "{} did not get the mode",
+                path.display()
+            );
+        }
+    }
+
+    /// `sync_tree` either has one `syncfs` do the whole tree or flushes every
+    /// file, and the answer says which.
+    ///
+    /// The claim is written so that it holds on both kinds of host, because
+    /// which branch runs is the platform's decision and not this test's:
+    /// `syncfs` is Linux's, and elsewhere the per-file fallback is the only
+    /// path. A file this process cannot open is what makes the difference
+    /// visible — the fallback has to report it, and a reading that skipped the
+    /// fallback would answer `Ok` for a tree it never flushed.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_is_either_synced_whole_or_flushed_file_by_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("the tree");
+        let closed = tree.join("unopenable");
+        std::fs::write(&closed, b"bytes").expect("a file");
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
+            .expect("close the file");
+        let unopenable = open_for_flush(&closed).is_err();
+
+        let outcome = sync_tree(&tree);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the mode so the temporary directory can be cleaned up");
+
+        if !unopenable {
+            eprintln!("skipping: this user can open a file with mode 000");
+            return;
+        }
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => panic!(
+                "the fallback ran over a file it could not open and answered as if it had \
+                 flushed the tree"
+            ),
+            Err(_) => {}
+        }
+    }
+
+    /// Where there is no `syncfs`, the answer is always the fallback's.
+    ///
+    /// The test above is written to hold on both kinds of host, which is what
+    /// it costs: it has to accept `Ok(true)`, so it cannot tell a real answer
+    /// from one that is always `true`. This can, and only here — `syncfs` is
+    /// Linux's call, and on every other unix the function that stands in for it
+    /// is a `cfg` that returns `false` with no syscall at all. So the branch
+    /// taken is decided at compile time, and a healthy tree must come back
+    /// `Ok(false)`: one `syncfs` did *not* do it, every file was flushed.
+    ///
+    /// Linux is not asserted the other way round, because there the answer
+    /// depends on the filesystem — `syncfs` can be refused — and a test that
+    /// demanded `true` would be asserting something about the machine's
+    /// storage rather than about this function.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn without_syncfs_a_flushed_tree_says_it_was_flushed_file_by_file() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("nested")).expect("the tree");
+        std::fs::write(tree.join("a"), b"bytes").expect("a file");
+        std::fs::write(tree.join("nested/b"), b"bytes").expect("another");
+
+        assert!(
+            !sync_tree(&tree).expect("a tree this process owns flushes"),
+            "this platform has no `syncfs`, so the whole-filesystem path cannot have run"
+        );
+    }
+
+    /// A bounded reader hands out exactly the payload and stops.
+    ///
+    /// `PayloadSource` exists so that an extraction reads the artifact's
+    /// payload region and not a byte of the stub in front of it or the trailer
+    /// behind it, and `remaining` is the whole of that bound. Reading it in
+    /// pieces is what makes the bookkeeping decide something: one read of the
+    /// whole region agrees with almost any arithmetic, and three do not.
+    #[test]
+    fn a_payload_source_hands_out_its_region_and_then_stops() {
+        use std::io::Read as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("artifact");
+        // A stub in front, the payload, and a trailer behind: the reader must
+        // produce the middle and nothing else.
+        std::fs::write(&path, b"STUBSTUB0123456789TRAILER").expect("the artifact");
+        let file = File::open(&path).expect("the artifact opens");
+
+        let mut source = PayloadSource {
+            file: &file,
+            offset: 8,
+            remaining: 10,
+        };
+        let mut read = Vec::new();
+        let mut chunk = [0u8; 4];
+        loop {
+            let count = source.read(&mut chunk).expect("the region reads");
+            if count == 0 {
+                break;
+            }
+            read.extend_from_slice(&chunk[..count]);
+            assert!(
+                read.len() <= 10,
+                "the reader handed out more than the region holds: {read:?}"
+            );
+        }
+        assert_eq!(read, b"0123456789", "the region, whole and alone");
+        assert_eq!(
+            source.read(&mut chunk).expect("a spent region reads zero"),
+            0,
+            "and it stays spent"
+        );
+    }
+
+    /// The corrupting reader changes exactly one byte, and changes it.
+    ///
+    /// It is a fault point rather than a feature, and the temptation is to
+    /// assert only that the payload no longer matches its digest — which any
+    /// number of wrong implementations satisfy. What it promises is narrower:
+    /// the *first* byte that passes through it comes out inverted, every other
+    /// byte is untouched, and nothing happens at all when the point is not
+    /// armed. A reader that set bits instead of flipping them would leave a
+    /// `0xff` byte alone, and a reader that armed on an empty read would spend
+    /// the flip on a byte nobody asked for.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn the_corrupting_reader_inverts_the_first_byte_and_only_that_one() {
+        use std::io::Read as _;
+
+        let source: [u8; 4] = [0x00, 0xff, 0x28, 0x7f];
+        let mut corrupting = Corrupting {
+            inner: source.as_slice(),
+            flip_next: true,
+        };
+        let mut out = [0u8; 4];
+        corrupting.read_exact(&mut out).expect("four bytes");
+        assert_eq!(
+            out,
+            [0xff, 0xff, 0x28, 0x7f],
+            "the first byte is inverted and the rest are the source's"
+        );
+
+        // `0xff` first, because that is the byte an `|` would leave alone.
+        let mut corrupting = Corrupting {
+            inner: [0xffu8, 0x01].as_slice(),
+            flip_next: true,
+        };
+        let mut out = [0u8; 2];
+        corrupting.read_exact(&mut out).expect("two bytes");
+        assert_eq!(out, [0x00, 0x01], "inverting `0xff` gives `0x00`");
+
+        // An empty read must not spend the flip.
+        let mut corrupting = Corrupting {
+            inner: [0x28u8].as_slice(),
+            flip_next: true,
+        };
+        assert_eq!(corrupting.read(&mut []).expect("an empty read"), 0);
+        let mut out = [0u8; 1];
+        corrupting.read_exact(&mut out).expect("one byte");
+        assert_eq!(out, [0xd7], "the flip was still armed for the first byte");
+
+        // And an unarmed reader is a passthrough.
+        let mut corrupting = Corrupting {
+            inner: source.as_slice(),
+            flip_next: false,
+        };
+        let mut out = [0u8; 4];
+        corrupting.read_exact(&mut out).expect("four bytes");
+        assert_eq!(
+            out, source,
+            "nothing is touched when the point is not armed"
         );
     }
 
