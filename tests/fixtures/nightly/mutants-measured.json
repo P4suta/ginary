@@ -11,5 +11,40 @@
     "payload": 91,
     "trailer": 28,
     "verify": 95
+  },
+  "baselines": {
+    "note": "Run 34747498271 (2026-09-13): what one shard's unmutated baseline costs on each runner in the matrix, in seconds, from mutants.out/outcomes.json. The per-mutant build budget is a multiple of these rather than a constant, because a constant above one runner's build is below another's: 120 seconds was above every Linux build and below every Windows and macOS one, so every mutant on those two timed out in its build phase with nothing measured about the tests.",
+    "run": "https://github.com/P4suta/ginary/actions/runs/34747498271",
+    "measured_on": "2026-09-13",
+    "linux": {
+      "build_seconds": 83,
+      "test_seconds": 235,
+      "shards": [
+        "cache-9",
+        "launch-5",
+        "appfile-5",
+        "verify-8"
+      ]
+    },
+    "windows": {
+      "build_seconds": 205,
+      "test_seconds": 237,
+      "shards": [
+        "cache-9",
+        "launch-1",
+        "payload-10",
+        "trailer-1"
+      ]
+    },
+    "macos": {
+      "build_seconds": 253,
+      "test_seconds": null,
+      "shards": [
+        "cache-12"
+      ],
+      "test_note": "the baseline failed before it finished, so no test figure is claimed"
+    },
+    "slowest_build_seconds": 253,
+    "slowest_baseline_minutes": 8
   }
 }
