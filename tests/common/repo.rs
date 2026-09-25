@@ -57,11 +57,8 @@ pub fn read_or_missing(relative: &str) -> String {
 
 /// Parses one YAML document, or returns the parser's own message.
 ///
-/// GitHub reads several of this repository's records as YAML — the issue
-/// forms, `dependabot.yml`, every workflow — and none of them is executed by
-/// the suite. A substring assertion is happy with a file YAML cannot load at
-/// all, which is how a plain scalar carrying `": "` reached the tree once
-/// already; see `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs`.
+/// GitHub reads several of this repository's records as YAML — the issue forms, every workflow — and none of them is executed by the suite.
+/// A substring assertion is happy with a file YAML cannot load at all, which is how a plain scalar carrying `": "` reached the tree once already; see `tests/regressions/e3_an_issue_form_was_not_valid_yaml.rs`.
 /// Parsing first makes that failure a test failure.
 ///
 /// An empty document parses to [`YamlOwned::BadValue`] rather than to an
@@ -108,9 +105,7 @@ pub fn yaml_files_under(relative: &str) -> Vec<String> {
 /// as `.yml` — GitHub accepts both spellings, and a rule that reads only one
 /// of them is a rule a rename switches off.
 ///
-/// `.github/actionlint.yaml`, the issue forms and `dependabot.yml` are
-/// deliberately outside it: they configure GitHub rather than being run by it,
-/// and each has rules of its own.
+/// `.github/actionlint.yaml` and the issue forms are deliberately outside it: they configure GitHub rather than being run by it, and each has rules of its own.
 pub fn executed_yaml_files() -> Vec<String> {
     let mut out = yaml_files_under(".github/workflows");
     out.extend(yaml_files_under(".github/actions"));

@@ -17,9 +17,8 @@
 //! `dependabot.yml` and the workflows was a `str::contains` substring check,
 //! which is just as happy with a file no parser will accept.
 //!
-//! **The input.** The committed `.github` records GitHub itself loads as
-//! YAML: the issue forms and their config, `dependabot.yml`, every workflow,
-//! and any composite action.
+//! **The input.** The committed `.github` records GitHub itself loads as YAML: the issue forms and their config, every workflow, and any composite action.
+//! `dependabot.yml` was one of them until dependency updates moved to Renovate, whose `renovate.json` is JSON and is parsed by the tests in `tests/ci_matrix.rs` that hold it.
 //!
 //! **The correct behaviour.** Every one of them parses as a YAML document,
 //! and a file that does not fails here naming the path and the parser's own
@@ -28,16 +27,10 @@
 
 use crate::common::repo::{parse_yaml, read, yaml_files_under};
 
-/// The records GitHub loads as YAML, beyond the `.yml` files under `.github/`.
+/// The records GitHub loads as YAML that must be present rather than merely valid.
 ///
-/// `yaml_files_under(".github")` already reaches the workflows, the issue
-/// forms and any composite action; `dependabot.yml` sits at the top of that
-/// directory and is picked up by the same walk, so this list exists only to
-/// state the two records that must be present rather than merely valid.
-const REQUIRED: &[&str] = &[
-    ".github/dependabot.yml",
-    ".github/ISSUE_TEMPLATE/feature_request.yml",
-];
+/// `yaml_files_under(".github")` already reaches the workflows, the issue forms and any composite action, so this list exists only to state the record the bug was in.
+const REQUIRED: &[&str] = &[".github/ISSUE_TEMPLATE/feature_request.yml"];
 
 #[test]
 fn every_github_record_parses_as_yaml() {

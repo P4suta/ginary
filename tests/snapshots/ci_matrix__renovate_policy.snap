@@ -1,0 +1,16 @@
+---
+source: tests/ci_matrix.rs
+expression: rendered
+---
+extends: github>P4suta/renovate-config
+
+packageRules[0]
+  enabled: false
+  matchDatasources: rust-version
+  matchFileNames: .github/workflows/ci.yml
+
+packageRules[1]
+  automerge: false
+  dependencyDashboardApproval: true
+  groupName: Erlang/OTP and Gleam
+  matchPackageNames: erlang/otp, gleam-lang/gleam

@@ -156,13 +156,9 @@ fn the_lint_job_runs_all_three_clippy_flavors_and_the_deny_check() {
     // the job at all.
     assert_toolchain_of("lint", STABLE);
 
-    // `--locked` on the root manifest says nothing about `fuzz/Cargo.toml`,
-    // which is a workspace of its own that depends on this crate by path. A
-    // bump to the root lockfile can leave the fuzz one unresolvable, dependabot
-    // updates only the ecosystem it is looking at, and the nightly fuzz job
-    // used to be the only thing that ever read it -- so the pull request that
-    // broke it was green and the failure arrived in a different workflow hours
-    // later. That is what happened to `zstd 0.13.3 -> 0.14.0`.
+    // `--locked` on the root manifest says nothing about `fuzz/Cargo.toml`, which is a workspace of its own that depends on this crate by path.
+    // A bump to the root lockfile can leave the fuzz one unresolvable, the dependency updater re-resolves only the lockfile beside the manifest it changed, and the nightly fuzz job used to be the only thing that ever read it -- so the pull request that broke it was green and the failure arrived in a different workflow hours later.
+    // That is what happened to `zstd 0.13.3 -> 0.14.0`.
     assert!(
         lint.contains("--manifest-path fuzz/Cargo.toml --locked"),
         "the lint job has to resolve the fuzz workspace's own lockfile:\n{lint}"
@@ -972,58 +968,6 @@ fn an_option_value_is_read_in_both_spellings_and_not_off_a_longer_option() {
     );
 }
 
-// ------------------------------------------ the freshness exception --
-
-#[test]
-fn the_renovate_exception_covers_the_floor_and_nothing_else() {
-    // The development machine's pre-push hook runs a dependency-freshness
-    // check, and that check reads `toolchain: 1.88.0` as a `rust` dependency
-    // three minors behind stable. It is not: it is the declared floor, and
-    // taking the offer would leave the `msrv` job proving nothing. The
-    // exception is therefore config, not a skip — but a config file that
-    // silences a gate is worth exactly as much as its scope, so the scope is
-    // asserted here.
-    let text = read("renovate.local.json5");
-    let config: Value = serde_json::from_str(&text).expect(
-        "renovate.local.json5 is written as plain JSON so this test can read it; a comment or a \
-         trailing comma makes it json5 that `serde_json` will not parse",
-    );
-
-    assert!(
-        config.get("enabled").is_none() && config.get("ignoreDeps").is_none(),
-        "renovate.local.json5 states one exception; a top-level `enabled` or `ignoreDeps` turns \
-         off more than the floor:\n{text}"
-    );
-
-    let rules = config
-        .get("packageRules")
-        .and_then(Value::as_array)
-        .expect("renovate.local.json5 states its exception as a packageRules list");
-    assert_eq!(
-        rules.len(),
-        1,
-        "one exception, and it is the MSRV pin; {} rules are in the file:\n{text}",
-        rules.len()
-    );
-    let rule = &rules[0];
-    assert_eq!(
-        rule.get("matchFileNames"),
-        Some(&serde_json::json!([".github/workflows/ci.yml"])),
-        "the exception is scoped to ci.yml, the only file that carries the floor: {rule}"
-    );
-    assert_eq!(
-        rule.get("matchDatasources"),
-        Some(&serde_json::json!(["rust-version"])),
-        "the exception is scoped to the Rust toolchain datasource, so a stale action SHA or a \
-         stale crate in the same file still blocks a push: {rule}"
-    );
-    assert_eq!(
-        rule.get("enabled"),
-        Some(&Value::Bool(false)),
-        "the rule disables the lookup; anything else is a rule that does nothing: {rule}"
-    );
-}
-
 // --------------------------------------------------- the local scripts --
 
 #[test]
@@ -1302,216 +1246,245 @@ fn dependency_review_gates_pull_requests_and_defers_to_cargo_deny() {
     );
 }
 
-// ----------------------------------------------------------- dependabot --
+// ------------------------------------------------------------- renovate --
 
-/// One `updates:` entry of `.github/dependabot.yml`, as the fields E3 pins.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Update {
-    ecosystem: String,
-    directory: String,
-    interval: String,
-    day: String,
-    timezone: String,
-    cooldown_days: String,
-    limit: String,
-    labels: Vec<String>,
-    groups: Vec<String>,
-}
+/// The file the dependency-update bot and the pre-push freshness check both read.
+const RENOVATE_CONFIG: &str = "renovate.json";
 
-/// A YAML scalar as the text a snapshot can hold.
+/// The shared policy `renovate.json` layers its rules on.
+const SHARED_POLICY: &str = "github>P4suta/renovate-config";
+
+/// The keys `renovate.json` may carry at the top level.
 ///
-/// `open-pull-requests-limit: 5` is an integer and `directory: "/"` is a
-/// string, and both are one line of the rendered table, so the three scalar
-/// shapes dependabot uses come back as their own spelling.
-fn scalar(node: Option<&YamlOwned>) -> String {
-    let Some(node) = node else {
-        return String::new();
-    };
-    node.as_str()
-        .map(str::to_owned)
-        .or_else(|| node.as_integer().map(|value| value.to_string()))
-        .or_else(|| node.as_bool().map(|value| value.to_string()))
-        .unwrap_or_default()
-}
+/// Everything a repository-level key could do beyond these narrows or widens what the shared policy decides: `enabledManagers`, `ignorePaths`, `includePaths` and `ignoreDeps` take manifests or dependencies out of Renovate's sight, and a top-level `enabled` switches the whole of it off.
+/// A rule that is really needed goes in `packageRules`, where its scope can be read and asserted.
+const RENOVATE_KEYS: &[&str] = &["$schema", "description", "extends", "packageRules"];
 
-/// A YAML sequence of strings, or an empty list for anything else.
-fn string_sequence(node: Option<&YamlOwned>) -> Vec<String> {
-    node.and_then(YamlOwned::as_vec)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The names of the `groups:` one entry declares, in the order it declares them.
-fn group_names(entry: &YamlOwned) -> Vec<String> {
-    entry
-        .as_mapping_get("groups")
-        .and_then(YamlOwned::as_mapping)
-        .map(|groups| {
-            groups
-                .keys()
-                .filter_map(|name| name.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Every `updates:` entry of a `dependabot.yml`, sorted.
+/// `renovate.json`, as its text and as the value it parses to.
 ///
-/// Parsed rather than scanned line by line: dependabot's own reader is a YAML
-/// reader, so a file it cannot load is a policy that never runs, and a
-/// hand-rolled scan is happy with one.
-fn dependabot_updates(text: &str) -> Vec<Update> {
-    let parsed = parse_yaml(text)
-        .unwrap_or_else(|error| panic!(".github/dependabot.yml is not valid YAML: {error}"));
-    let Some(entries) = parsed.as_mapping_get("updates").and_then(YamlOwned::as_vec) else {
-        return Vec::new();
-    };
-    let mut out: Vec<Update> = entries
-        .iter()
-        .map(|entry| {
-            let schedule = entry.as_mapping_get("schedule");
-            let at = |node: Option<&YamlOwned>, key: &str| {
-                scalar(node.and_then(|node| node.as_mapping_get(key)))
-            };
-            Update {
-                ecosystem: at(Some(entry), "package-ecosystem"),
-                directory: at(Some(entry), "directory"),
-                interval: at(schedule, "interval"),
-                day: at(schedule, "day"),
-                timezone: at(schedule, "timezone"),
-                cooldown_days: at(entry.as_mapping_get("cooldown"), "default-days"),
-                limit: at(Some(entry), "open-pull-requests-limit"),
-                labels: string_sequence(entry.as_mapping_get("labels")),
-                groups: group_names(entry),
+/// Renovate reads the file as JSON, so a file `serde_json` cannot parse is a policy that never runs.
+fn renovate_config() -> (String, Value) {
+    let text = read(RENOVATE_CONFIG);
+    let config = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{RENOVATE_CONFIG} is not valid JSON: {error}"));
+    (text, config)
+}
+
+/// The `packageRules` of a Renovate config, in file order.
+fn renovate_rules(config: &Value) -> Vec<&Value> {
+    config
+        .get("packageRules")
+        .and_then(Value::as_array)
+        .map(|rules| rules.iter().collect())
+        .unwrap_or_default()
+}
+
+/// One value of a Renovate config as one line of the snapshot: a list as its items, a string as itself.
+fn render_renovate_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(render_renovate_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
+}
+
+/// `renovate.json` as the table the snapshot pins: what it extends, then every rule's matchers and effects.
+///
+/// The `description`s are left out.
+/// They are the reasons, and a reason reworded is not a change of policy; every other key is.
+fn render_renovate(config: &Value) -> String {
+    let mut sections = vec![format!(
+        "extends: {}",
+        config
+            .get("extends")
+            .map(render_renovate_value)
+            .unwrap_or_default()
+    )];
+    for (index, rule) in renovate_rules(config).into_iter().enumerate() {
+        let mut lines = vec![format!("packageRules[{index}]")];
+        if let Some(fields) = rule.as_object() {
+            for (key, value) in fields {
+                if key != "description" {
+                    lines.push(format!("  {key}: {}", render_renovate_value(value)));
+                }
             }
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// The dependabot entries as the table the snapshot pins.
-fn render_updates(updates: &[Update]) -> String {
-    updates
-        .iter()
-        .map(|update| {
-            format!(
-                "{} {}\n  schedule: {} {} {}\n  cooldown-days: {}\n  \
-                 open-pull-requests-limit: {}\n  labels: {}\n  groups: {}",
-                update.ecosystem,
-                update.directory,
-                update.interval,
-                update.day,
-                update.timezone,
-                update.cooldown_days,
-                update.limit,
-                update.labels.join(", "),
-                update.groups.join(", "),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        }
+        sections.push(lines.join("\n"));
+    }
+    sections.join("\n\n")
 }
 
 #[test]
-fn dependabot_watches_every_manifest_this_repository_actually_has() {
-    let text = read(".github/dependabot.yml");
-    let updates = dependabot_updates(&text);
-    let watched: Vec<(&str, &str)> = updates
-        .iter()
-        .map(|u| (u.ecosystem.as_str(), u.directory.as_str()))
-        .collect();
-    // `fuzz/` is a standalone workspace: the root Cargo update cannot maintain
-    // its independent lockfile. The `docker` entry is the other half of a digest
-    // pin: `scripts/ci/wincheck.Dockerfile` names an image by digest, and a
-    // digest nothing updates is an image that never gets a patch.
-    assert_eq!(
-        watched,
-        vec![
-            ("cargo", "/"),
-            ("cargo", "/fuzz"),
-            ("docker", "/scripts/ci"),
-            ("github-actions", "/"),
-        ],
-        "dependabot covers the crate, the standalone fuzz workspace, the pinned image and the \
-         actions, and nothing this repository does not have; it covers: {watched:?}"
-    );
+fn renovate_reaches_every_manifest_this_repository_actually_has() {
+    // Renovate finds manifests itself, by file name, with every manager it has.
+    // There is no list of directories to keep in step with the tree, which is what the Dependabot entries were, and a lookup of this tree finds the two Cargo workspaces, the pinned image, the workflows and `mise.toml` with nothing listed.
+    // What can still take a manifest out of its sight is a key that narrows the search, or a file renamed out of the pattern that finds it.
+    let (text, config) = renovate_config();
+    let keys: Vec<&str> = config
+        .as_object()
+        .map(|fields| fields.keys().map(String::as_str).collect())
+        .unwrap_or_default();
     assert!(
-        read("scripts/ci/wincheck.Dockerfile")
-            .lines()
-            .map(shell_code)
-            .any(|line| line.trim_start().starts_with("FROM ") && line.contains("@sha256:")),
-        "the `docker` entry exists to watch a digest, so there has to be one to watch"
+        !keys.is_empty() && keys.iter().all(|key| RENOVATE_KEYS.contains(key)),
+        "{RENOVATE_CONFIG} carries only {RENOVATE_KEYS:?} at the top level; any other key \
+         changes what the shared policy reads or decides, and a rule belongs in `packageRules`. \
+         It carries {keys:?}:\n{text}"
     );
+    assert_eq!(
+        config.get("extends"),
+        Some(&serde_json::json!([SHARED_POLICY])),
+        "{RENOVATE_CONFIG} extends the shared policy and nothing else, so the pre-push check, \
+         which inherits nothing from the app, reads the policy the app applies:\n{text}"
+    );
+
+    // `fuzz/` is a standalone workspace with a lockfile of its own, and Renovate updates the lockfile beside each `Cargo.toml` it finds.
+    // The workspace needs no entry of its own any more, but the lockfile has to be there for Renovate to keep it current.
     assert!(
         read("fuzz/Cargo.toml")
             .lines()
             .map(shell_code)
             .any(|line| line.trim() == "[workspace]"),
-        "the separate update entry must belong to a real standalone workspace"
+        "fuzz/ has to stay a real standalone workspace"
     );
     assert!(
         exists("fuzz/Cargo.lock"),
         "the fuzz workspace must retain its reproducible dependency selection"
     );
-    for update in &updates {
-        assert_eq!(
-            (
-                update.interval.as_str(),
-                update.day.as_str(),
-                update.timezone.as_str()
-            ),
-            ("weekly", "monday", "Asia/Tokyo"),
-            "{} {} does not update weekly on a Monday morning in the author's timezone",
-            update.ecosystem,
-            update.directory
-        );
-        assert_eq!(
-            update.limit, "5",
-            "{} {} does not cap its open pull requests at 5",
-            update.ecosystem, update.directory
-        );
-        assert!(
-            !update.cooldown_days.is_empty(),
-            "{} {} has no `cooldown`, so a release yanked hours later still opens a pull request",
-            update.ecosystem,
-            update.directory
-        );
-        assert!(
-            update.labels.contains(&"type: dependencies".to_owned()),
-            "{} {} is not labelled `type: dependencies`: {:?}",
-            update.ecosystem,
-            update.directory,
-            update.labels
-        );
-        // Per entry rather than once for the file: a single `groups:` anywhere
-        // in the document says nothing about the entry beside it, and an
-        // ungrouped `github-actions` entry opens one pull request per pinned
-        // SHA every Monday.
-        assert!(
-            !update.groups.is_empty(),
-            "{} {} declares no `groups:`, so one Monday is one pull request per dependency \
-             rather than one for the ecosystem",
-            update.ecosystem,
-            update.directory
-        );
-    }
+
+    // The image `mise run check:windows` builds from is pinned by digest, and a digest nothing updates is an image that never gets a patch.
+    // Renovate's `dockerfile` manager finds the file by its name: `Dockerfile`, or a name ending in `.Dockerfile`.
+    let dockerfile = "scripts/ci/wincheck.Dockerfile";
+    let name = dockerfile.rsplit('/').next().unwrap_or(dockerfile);
+    assert!(
+        name == "Dockerfile" || name.ends_with(".Dockerfile"),
+        "{dockerfile} has to keep a name Renovate's `dockerfile` manager looks for, or the \
+         digest it pins is never updated"
+    );
+    assert!(
+        read(dockerfile)
+            .lines()
+            .map(shell_code)
+            .any(|line| line.trim_start().starts_with("FROM ") && line.contains("@sha256:")),
+        "the image is watched for its digest, so there has to be one to watch"
+    );
 }
 
 #[test]
-fn the_dependabot_schedule_is_the_committed_record() {
-    let text = read_or_missing(".github/dependabot.yml");
+fn the_renovate_policy_is_the_committed_record() {
+    // The schedule, the grouping, the release age and what merges on its own are the shared policy's, and live in P4suta/renovate-config.
+    // What this repository adds is this file, and a rule silently dropped from it is a diff here.
+    let text = read_or_missing(RENOVATE_CONFIG);
     let rendered = if text.starts_with("(missing") {
         text
     } else {
-        render_updates(&dependabot_updates(&text))
+        render_renovate(&renovate_config().1)
     };
-    insta::assert_snapshot!("dependabot_updates", rendered);
+    insta::assert_snapshot!("renovate_policy", rendered);
+}
+
+#[test]
+fn the_renovate_exception_covers_the_floor_and_nothing_else() {
+    // Renovate reads `toolchain: 1.88.0` in the `msrv` job as a `rust` dependency several minors behind stable.
+    // It is not: it is the declared floor, and taking the offer would leave the `msrv` job proving nothing.
+    // The hosted app would otherwise put it in the week's group of non-major updates, and the pre-push freshness check would count it as stale.
+    // The exception is therefore config, not a skip, but a config that switches a lookup off is worth exactly as much as its scope, so the scope is asserted here.
+    let (text, config) = renovate_config();
+    assert!(
+        config.get("enabled").is_none() && config.get("ignoreDeps").is_none(),
+        "{RENOVATE_CONFIG} states one exception; a top-level `enabled` or `ignoreDeps` turns \
+         off more than the floor:\n{text}"
+    );
+
+    let switches: Vec<&Value> = renovate_rules(&config)
+        .into_iter()
+        .filter(|rule| rule.get("enabled").is_some())
+        .collect();
+    assert_eq!(
+        switches.len(),
+        1,
+        "one exception, and it is the MSRV pin; {} rules of {RENOVATE_CONFIG} switch a lookup \
+         on or off:\n{text}",
+        switches.len()
+    );
+    let rule = switches[0];
+    assert_eq!(
+        rule.get("matchFileNames"),
+        Some(&serde_json::json!([".github/workflows/ci.yml"])),
+        "the exception is scoped to ci.yml, the only file that carries the floor: {rule}"
+    );
+    assert_eq!(
+        rule.get("matchDatasources"),
+        Some(&serde_json::json!(["rust-version"])),
+        "the exception is scoped to the Rust toolchain datasource, so a stale action SHA or a \
+         stale crate in the same file is still offered: {rule}"
+    );
+    assert_eq!(
+        rule.get("enabled"),
+        Some(&Value::Bool(false)),
+        "the rule disables the lookup; anything else is a rule that does nothing: {rule}"
+    );
+}
+
+#[test]
+fn the_otp_and_gleam_pins_wait_for_a_maintainer_outside_the_shared_group() {
+    // Renovate reads the `otp-version:` and `gleam-version:` of every `erlef/setup-beam` step and the two lines of `mise.toml`, and would move them in the week's group of non-major updates, which merges itself on green CI.
+    // It cannot move the rest of the pin: the `--upstream-tag OTP-…` each repack names, and the two versions `the_test_job_runs_both_flavors_on_stable` holds the `test` job to.
+    // So the update is red on its own, and inside the group it holds back every other update with it.
+    // The rule keeps the update visible and out of that group, and it leaves the merge to a maintainer.
+    let (text, config) = renovate_config();
+    let pins = serde_json::json!(["erlang/otp", "gleam-lang/gleam"]);
+    let rules: Vec<&Value> = renovate_rules(&config)
+        .into_iter()
+        .filter(|rule| rule.get("matchPackageNames") == Some(&pins))
+        .collect();
+    assert_eq!(
+        rules.len(),
+        1,
+        "{RENOVATE_CONFIG} needs exactly one rule over {pins}; it has {}:\n{text}",
+        rules.len()
+    );
+    let rule = rules[0];
+    assert!(
+        rule.get("groupName")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty()),
+        "the pins need a group of their own, or they join the shared group of non-major \
+         updates: {rule}"
+    );
+    assert_eq!(
+        rule.get("automerge"),
+        Some(&Value::Bool(false)),
+        "a pull request that moves only part of a pin must not merge itself: {rule}"
+    );
+    assert_eq!(
+        rule.get("dependencyDashboardApproval"),
+        Some(&Value::Bool(true)),
+        "the update waits on the Dependency Dashboard, so a release is offered without a pull \
+         request that CI is bound to reject: {rule}"
+    );
+
+    // The rule exists because the OTP release is written a second time where no manager reads it, so there has to be one.
+    let ci = read(".github/workflows/ci.yml");
+    let installed: Vec<&str> = ci
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("otp-version:"))
+        .map(|version| version.trim().trim_matches('"'))
+        .collect();
+    assert!(
+        !installed.is_empty(),
+        "ci.yml installs no OTP through `otp-version:`"
+    );
+    for version in installed {
+        assert!(
+            ci.contains(&format!("--upstream-tag OTP-{version}")),
+            "ci.yml installs OTP {version} but repacks no `OTP-{version}`, so the release is no \
+             longer written where Renovate cannot move it, and the rule over it wants revisiting"
+        );
+    }
 }
 
 // ---------------------------------------------- top-level hardening --
@@ -1557,6 +1530,20 @@ fn grants_only_reads(permissions: &YamlOwned) -> bool {
     permissions
         .as_mapping()
         .is_some_and(|scopes| scopes.values().all(|value| value.as_str() == Some("read")))
+}
+
+/// A YAML scalar as the text a message can show.
+///
+/// A string comes back as itself, and an integer or a boolean in its own spelling, so a value nobody expected is shown rather than dropped.
+fn scalar(node: Option<&YamlOwned>) -> String {
+    let Some(node) = node else {
+        return String::new();
+    };
+    node.as_str()
+        .map(str::to_owned)
+        .or_else(|| node.as_integer().map(|value| value.to_string()))
+        .or_else(|| node.as_bool().map(|value| value.to_string()))
+        .unwrap_or_default()
 }
 
 /// A `permissions:` node as the one-line `scope: level` list a message shows.

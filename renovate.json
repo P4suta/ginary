@@ -1,0 +1,35 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "The dependency-update policy of this repository is the one every P4suta repository shares, in P4suta/renovate-config: when updates arrive, how they are grouped, how old a release has to be and what merges on its own are all decided there.",
+    "The Mend Renovate app applies that policy here whether or not this file exists, and `extends` names it anyway, so that a run which inherits nothing, such as the development machine's pre-push freshness check, reads the same policy the app does.",
+    "This file adds the two rules below and nothing else; `tests/ci_matrix.rs` holds each of them to its scope and pins the whole file as a snapshot.",
+    "It is plain JSON so that those tests can parse it with `serde_json`."
+  ],
+  "extends": ["github>P4suta/renovate-config"],
+  "packageRules": [
+    {
+      "description": [
+        "`toolchain: 1.88.0` in ci.yml's `msrv` job is not a dependency that wants to be current: it is the crate's declared floor, `rust-version` in Cargo.toml, written a second time where a CI runner can install it.",
+        "Renovate reads it as a `rust-version` dependency and offers the newest stable as a minor update, which is exactly the change that would stop the job proving anything.",
+        "The number moves when `rust-version` moves and not before.",
+        "The rule is scoped to that one datasource in that one file, and it is not what keeps the exception narrow: `every_job_but_the_msrv_and_fuzz_ones_builds_on_stable` in tests/ci_matrix.rs fails if any other job pins a numbered release, and `the_msrv_job_installs_exactly_the_rust_version_cargo_toml_declares` fails if this one drifts from Cargo.toml."
+      ],
+      "matchFileNames": [".github/workflows/ci.yml"],
+      "matchDatasources": ["rust-version"],
+      "enabled": false
+    },
+    {
+      "description": [
+        "Erlang/OTP and Gleam are pinned in the `otp-version:` and `gleam-version:` of every `erlef/setup-beam` step and in `mise.toml`, and Renovate reads every one of those sites.",
+        "It does not read the other places the same releases are written: the `--upstream-tag OTP-…` each repack names, and the versions `the_test_job_runs_both_flavors_on_stable` in tests/ci_matrix.rs holds the `test` job to.",
+        "An update that moves the first set and not the second fails CI, and inside the shared group of non-major updates it would hold back every other update of the week with it.",
+        "So these wait on the Dependency Dashboard until a maintainer approves one, and then arrive as a pull request of their own that does not merge itself, for the rest of the move to be made by hand."
+      ],
+      "matchPackageNames": ["erlang/otp", "gleam-lang/gleam"],
+      "groupName": "Erlang/OTP and Gleam",
+      "automerge": false,
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
