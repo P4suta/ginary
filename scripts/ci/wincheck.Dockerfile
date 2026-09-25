@@ -10,13 +10,10 @@
 # C sources need a Windows C compiler, which is why the msvc triple cannot do
 # this and the gnu one can.
 #
-# Built and run by `mise run check:windows`; the recipe is also in
-# docs/dev/testing.md.
-# Pinned by digest, and watched: Scorecard's `PinnedDependencies` is right that
-# a floating tag is an unreviewed input, and a digest with nothing updating it
-# only trades that for an image that never gets a patch. `.github/dependabot.yml`
-# carries a `docker` entry for this directory, so the pair holds together — the
-# tag beside the digest is what tells the updater which tag to follow.
+# Built and run by `mise run check:windows`; the recipe is also in docs/dev/testing.md.
+# Pinned by digest, and watched: Scorecard's `PinnedDependencies` is right that a floating tag is an unreviewed input, and a digest with nothing updating it only trades that for an image that never gets a patch.
+# Renovate's `dockerfile` manager finds this file by its name and moves the digest when the tag moves, so the pair holds together — the tag beside the digest is what tells the updater which tag to follow.
+# `tests/ci_matrix.rs` asserts both the name and the digest.
 FROM rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa
 RUN apt-get update \
  && apt-get install -y --no-install-recommends mingw-w64 \
