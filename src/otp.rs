@@ -24,6 +24,9 @@ use std::time::Duration;
 
 use crate::process::{NULL_DEVICE, ProcessOutput, find_in_path, run_with_timeout};
 
+#[cfg(unix)]
+const UNIX_EXECUTE_PERMISSION_BITS: u32 = 0o111;
+
 /// The oldest OTP release ginary will package.
 ///
 /// OTP 26 is where `no_dot_erlang.boot` and the modern `erlexec` layout can be
@@ -404,7 +407,7 @@ fn check_erts_binaries(erts_bin: &Path) -> Result<(), OtpError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            if metadata.permissions().mode() & 0o111 == 0 {
+            if metadata.permissions().mode() & UNIX_EXECUTE_PERMISSION_BITS == 0 {
                 return Err(OtpError::ErtsBinaryNotExecutable { path });
             }
         }
