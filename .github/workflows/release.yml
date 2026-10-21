@@ -40,37 +40,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
+      id-token: write
       # Read, and only for the checkout. Every write release-please makes — the
       # version bump, the changelog, the pull request, the tag and the draft
       # release — travels on the App installation token minted below, so the
       # workflow's own GITHUB_TOKEN needs nothing it did not already have.
       contents: read
     steps:
-      # The whole decision, in one place and before anything else runs. Both
-      # values arrive through the step's `env:`, because `secrets` is not a
-      # context a shell can reach on its own and interpolating one straight
-      # into a `run:` block would write a private key into a script.
-      #
-      # Three states, two of which are survivable:
-      #
-      #   both present  -> `state=configured`, and release-please runs.
-      #   both absent   -> `state=absent`, the notice below prints what a
-      #                    maintainer has to add, and the run is green. A
-      #                    repository with no release automation configured
-      #                    gets a green Release workflow rather than a red one
-      #                    nobody in the tree can fix.
-      #   one of the two -> a failure naming the missing credential. Somebody
-      #                    added half the pair on purpose, and the automation
-      #                    they asked for is not running. Reaching
-      #                    create-github-app-token with an empty `client-id:`
-      #                    or `private-key:` would fail somewhere inside JWT
-      #                    signing instead, which is harder to read than the
-      #                    name of the credential nobody added.
+      - name: Fetch automation credentials
+        id: doppler_automation_0
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
+          doppler-project: ginary
+          doppler-config: automation
+          inject-env-vars: false
+      - name: Reject missing or unresolved automation credentials
+        if: >-
+          ${{ steps.doppler_automation_0.outcome == 'success' && (
+          steps.doppler_automation_0.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.doppler_automation_0.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.doppler_automation_0.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.doppler_automation_0.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+          ) }}
+        shell: bash
+        run: exit 1
+
       - name: Check what the release environment holds
         id: credentials
         env:
-          CLIENT_ID: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
-          PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          CLIENT_ID: ${{ steps.doppler_automation_0.outputs.GITHUB_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ steps.doppler_automation_0.outputs.GITHUB_APP_PRIVATE_KEY }}
         run: |
           if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
             echo "state=configured" >> "$GITHUB_OUTPUT"
@@ -129,12 +130,33 @@ jobs:
       # same pattern the strict siblings (release-glz, beamtrace) use. An App
       # is not GitHub Actions, so the "Actions may not create pull requests"
       # rule does not apply to it, and the hardening stays as it is.
+      - name: Fetch automation credentials
+        id: doppler_automation_3
+        if: "${{ steps.credentials.outputs.state == 'configured' }}"
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.DOPPLER_AUTOMATION_IDENTITY_ID }}
+          doppler-project: ginary
+          doppler-config: automation
+          inject-env-vars: false
+      - name: Reject missing or unresolved automation credentials
+        if: >-
+          ${{ steps.doppler_automation_3.outcome == 'success' && (
+          steps.doppler_automation_3.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.doppler_automation_3.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.doppler_automation_3.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.doppler_automation_3.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+          ) }}
+        shell: bash
+        run: exit 1
+
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         if: ${{ steps.credentials.outputs.state == 'configured' }}
         with:
-          client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          client-id: ${{ steps.doppler_automation_3.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.doppler_automation_3.outputs.GITHUB_APP_PRIVATE_KEY }}
           # Exactly what release-please does and nothing more: it writes the
           # version bump and the changelog, opens and updates the pull request,
           # and labels it (a label is an issues-scope write on a PR).
