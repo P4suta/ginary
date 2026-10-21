@@ -45,7 +45,8 @@
 //! [`jobs_declaring_the_environment`]: crate::common::release::jobs_declaring_the_environment
 
 use crate::common::release::{
-    ENVIRONMENT, RELEASE_WORKFLOW, committed_workflows, jobs_declaring_the_environment,
+    ENVIRONMENT, RELEASE_WORKFLOW, VERIFY_WORKFLOW, committed_workflows,
+    jobs_declaring_the_environment,
 };
 
 /// The workflow with a second declaring job.
@@ -83,10 +84,13 @@ fn a_second_job_that_declares_the_release_environment_is_visible_to_the_rule() {
 }
 
 #[test]
-fn the_committed_workflows_declare_the_environment_from_exactly_one_job() {
+fn the_committed_workflows_declare_the_environment_from_the_reviewed_jobs() {
     assert_eq!(
         declared(&committed_workflows()),
-        vec![format!("{RELEASE_WORKFLOW}: release-please")],
+        vec![
+            format!("{RELEASE_WORKFLOW}: release-please"),
+            format!("{VERIFY_WORKFLOW}: automation_0"),
+        ],
         "the `{ENVIRONMENT}` environment holds both release credentials, and every job that \
          declares it is handed both. `docs/RELEASE.md` says one job does; this is the tree it \
          says it about, and the milestone rule \

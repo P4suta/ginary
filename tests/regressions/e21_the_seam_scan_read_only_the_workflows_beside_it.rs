@@ -58,7 +58,7 @@ fn the_scan_covers_the_composite_actions_a_workflow_calls() {
 /// the way the scan computes it agrees with the scan about anything, including
 /// about a directory neither of them reads. Adding a workflow means adding a
 /// line here, which is the review this list exists to force.
-const EXECUTED: [&str; 8] = [
+const EXECUTED: [&str; 9] = [
     ".github/actions/install-actionlint/action.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/codeql.yml",
@@ -67,6 +67,7 @@ const EXECUTED: [&str; 8] = [
     ".github/workflows/nightly.yml",
     ".github/workflows/release.yml",
     ".github/workflows/scorecard.yml",
+    ".github/workflows/verify-doppler.yml",
 ];
 
 /// A committed `.yaml` file, so the half of the rule about the *other*

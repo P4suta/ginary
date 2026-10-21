@@ -32,6 +32,19 @@ use crate::common::repo::{
 /// The workflow the release credentials are read in.
 pub const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
+pub const VERIFY_WORKFLOW: &str = ".github/workflows/verify-doppler.yml";
+pub const LEGACY_RELEASE_WORKFLOW: &str =
+    "tests/fixtures/release/legacy_environment_credentials.yml";
+pub const CURRENT_CLIENT_ID: &str = "GITHUB_APP_CLIENT_ID";
+pub const CURRENT_PRIVATE_KEY: &str = "GITHUB_APP_PRIVATE_KEY";
+
+const CREDENTIAL_NAMES: [&str; 4] = [
+    CLIENT_ID_VAR,
+    PRIVATE_KEY_SECRET,
+    CURRENT_CLIENT_ID,
+    CURRENT_PRIVATE_KEY,
+];
+
 /// The variable holding the App's client id.
 pub const CLIENT_ID_VAR: &str = "RELEASE_PLEASE_APP_CLIENT_ID";
 
@@ -130,7 +143,7 @@ pub fn job_environment(workflow: &str, id: &str) -> String {
 pub fn credential_sites(workflows: &[String]) -> Vec<NameSite> {
     let mut out = Vec::new();
     for workflow in workflows {
-        for credential in [CLIENT_ID_VAR, PRIVATE_KEY_SECRET] {
+        for credential in CREDENTIAL_NAMES {
             out.extend(name_sites(workflow, credential));
         }
     }
@@ -156,7 +169,7 @@ pub struct CredentialOccurrences {
 /// Both credentials' occurrence counts for one workflow.
 pub fn credential_occurrences(workflow: &str) -> Vec<CredentialOccurrences> {
     let text = read(workflow);
-    [CLIENT_ID_VAR, PRIVATE_KEY_SECRET]
+    CREDENTIAL_NAMES
         .into_iter()
         .map(|credential| CredentialOccurrences {
             credential,
@@ -207,7 +220,7 @@ fn names_a_credential(step: &WorkflowStep) -> bool {
         .into_iter()
         .chain(step.env.values())
         .chain(step.with.values())
-        .any(|text| text.contains(CLIENT_ID_VAR) || text.contains(PRIVATE_KEY_SECRET))
+        .any(|text| CREDENTIAL_NAMES.iter().any(|name| text.contains(name)))
 }
 
 /// Whether one step needs the credentials to be there.
@@ -272,6 +285,7 @@ fn steps_that_are_the_guard(workflow: &str) -> Vec<(String, usize)> {
         .map(|step| (step.job, step.position))
         .into_iter()
         .chain(notice_step(workflow).map(|step| (step.job, step.position)))
+        .chain(oidc_guard_positions(workflow))
         .collect()
 }
 
@@ -290,8 +304,54 @@ pub fn steps_that_need_the_credentials(workflow: &str) -> Vec<WorkflowStep> {
 
 /// Those of them whose `if:` is not the guard.
 pub fn steps_that_need_the_credentials_and_are_not_gated(workflow: &str) -> Vec<WorkflowStep> {
+    let oidc_guards = oidc_guard_positions(workflow);
     steps_that_need_the_credentials(workflow)
         .into_iter()
-        .filter(|step| !step.cond.contains(CONFIGURED))
+        .filter(|step| {
+            if let Some((_, position)) = oidc_guards.iter().find(|(job, _)| job == &step.job) {
+                step.position <= *position
+                    || !matches!(
+                        normalized(&step.cond).as_str(),
+                        "" | "success()" | "${{success()}}"
+                    )
+            } else {
+                !step.cond.contains(CONFIGURED)
+            }
+        })
+        .collect()
+}
+pub fn normalized(expression: &str) -> String {
+    expression
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+pub fn required_outputs_guard(id: &str) -> String {
+    format!(
+        "${{{{ steps.{id}.outcome == 'success' && ( \
+         steps.{id}.outputs.GITHUB_APP_CLIENT_ID == '' || \
+         startsWith(steps.{id}.outputs.GITHUB_APP_CLIENT_ID, '${{') || \
+         steps.{id}.outputs.GITHUB_APP_PRIVATE_KEY == '' || \
+         startsWith(steps.{id}.outputs.GITHUB_APP_PRIVATE_KEY, '${{') ) }}}}"
+    )
+}
+
+fn oidc_guard_positions(workflow: &str) -> Vec<(String, usize)> {
+    workflow_steps(workflow)
+        .windows(2)
+        .filter_map(|pair| {
+            let [fetch, guard] = pair else { return None };
+            (fetch.position == 1
+                && fetch.id == CHECK_STEP_ID
+                && fetch.uses.starts_with("dopplerhq/secrets-fetch-action@")
+                && fetch.cond.is_empty()
+                && guard.job == fetch.job
+                && guard.position == 2
+                && guard.run.trim() == "exit 1"
+                && guard.uses.is_empty()
+                && normalized(&guard.cond) == normalized(&required_outputs_guard(&fetch.id)))
+            .then(|| (guard.job.clone(), guard.position))
+        })
         .collect()
 }

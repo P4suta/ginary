@@ -1584,10 +1584,18 @@ fn every_workflow_defaults_to_a_read_only_token_and_never_persists_credentials()
              instead",
             render_permissions(permissions)
         );
-        assert!(
-            text.contains("persist-credentials: false"),
-            "{path} must check out with `persist-credentials: false`"
-        );
+        for checkout in workflow_steps(path)
+            .into_iter()
+            .filter(|step| step.uses.starts_with("actions/checkout@"))
+        {
+            let value = &parsed["jobs"][checkout.job.as_str()]["steps"][checkout.position - 1]["with"]
+                ["persist-credentials"];
+            assert!(
+                value.as_bool() == Some(false) || value.as_str() == Some("false"),
+                "{path}: {} persists checkout credentials",
+                checkout.name
+            );
+        }
     }
 }
 
