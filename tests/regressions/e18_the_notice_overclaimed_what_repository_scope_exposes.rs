@@ -36,7 +36,7 @@
 //! reports the bug; and the scan is of the four places the claim was actually
 //! written, which is a list a reviewer can check by reading it.
 
-use crate::common::release::{ENVIRONMENT, RELEASE_WORKFLOW, notice_step};
+use crate::common::release::{ENVIRONMENT, LEGACY_RELEASE_WORKFLOW, RELEASE_WORKFLOW, notice_step};
 use crate::common::repo::read;
 
 /// Every committed record that explains why the credentials live in the
@@ -90,8 +90,8 @@ fn no_record_says_a_repository_scoped_value_is_readable_by_every_run() {
 
 #[test]
 fn the_notice_gives_the_two_restrictions_the_environment_actually_applies() {
-    let step = notice_step(RELEASE_WORKFLOW).unwrap_or_else(|| {
-        panic!("no step of {RELEASE_WORKFLOW} prints the missing-credentials notice")
+    let step = notice_step(LEGACY_RELEASE_WORKFLOW).unwrap_or_else(|| {
+        panic!("no step of {LEGACY_RELEASE_WORKFLOW} prints the historical notice")
     });
     // `declares` is the word `release.yml`'s own header comment,
     // `docs/RELEASE.md` and `docs/dev/testing.md` all already use for the

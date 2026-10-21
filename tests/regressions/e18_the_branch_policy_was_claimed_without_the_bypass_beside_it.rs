@@ -44,11 +44,11 @@ fn the_document_names_the_bypass_its_guarantee_depends_on() {
 }
 
 #[test]
-fn the_unreachability_claim_stands_next_to_its_precondition() {
+fn environment_protection_and_workload_claims_stay_together() {
     let document = read(DOCUMENT);
     let claim = document
-        .find("unreachable from a pull request")
-        .unwrap_or_else(|| panic!("{DOCUMENT} no longer claims the key is unreachable"));
+        .find("exact repository, workflow, event, environment, and ref claims")
+        .unwrap_or_else(|| panic!("{DOCUMENT} no longer records the workload claims"));
     let precondition = document
         .find("can_admins_bypass: false")
         .unwrap_or_else(|| panic!("{DOCUMENT} states no bypass precondition"));
@@ -63,8 +63,6 @@ fn the_unreachability_claim_stands_next_to_its_precondition() {
     let between = &document[first..second];
     assert!(
         !between.contains("\n\n"),
-        "{DOCUMENT} separates the unreachability claim from the `can_admins_bypass: false` that \
-         makes it true by a paragraph break. A qualifier a reader has to go looking for is one \
-         the next editor deletes"
+        "{DOCUMENT} separates the workload claims from the environment protection"
     );
 }

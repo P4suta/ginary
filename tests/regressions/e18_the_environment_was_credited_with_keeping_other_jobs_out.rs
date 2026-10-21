@@ -83,7 +83,7 @@ const CONTROLS: &[(&str, &str)] = &[
         "tests/regressions/e17_the_release_credentials_were_read_outside_their_environment.rs",
     ),
     (
-        "exactly_one_job_of_this_repository_declares_the_release_environment",
+        "only_release_and_manual_verification_jobs_declare_the_release_environment",
         "tests/regressions/e18_nothing_bounded_the_number_of_jobs_that_may_read_the_credentials.rs",
     ),
 ];

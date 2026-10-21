@@ -36,7 +36,7 @@
 //! assertion could not see.
 
 use crate::common::release::{
-    CLIENT_ID_VAR, ENVIRONMENT, PRIVATE_KEY_SECRET, RELEASE_WORKFLOW as RELEASE, notice_step,
+    CLIENT_ID_VAR, ENVIRONMENT, LEGACY_RELEASE_WORKFLOW as RELEASE, PRIVATE_KEY_SECRET, notice_step,
 };
 use crate::common::repo::WorkflowStep;
 

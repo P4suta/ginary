@@ -16,6 +16,7 @@ targets = [
 ]
 
 [advisories]
+db-path = "target/advisory-dbs"
 ignore = []
 
 [licenses]

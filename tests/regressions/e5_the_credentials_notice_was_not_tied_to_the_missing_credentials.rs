@@ -54,7 +54,7 @@
 //! hands it a workflow it has to fire on. The assertions below are unchanged.
 
 use crate::common::release::{
-    ABSENT, CLIENT_ID_VAR, CONFIGURED, PRIVATE_KEY_SECRET, RELEASE_WORKFLOW as RELEASE,
+    ABSENT, CLIENT_ID_VAR, CONFIGURED, LEGACY_RELEASE_WORKFLOW as RELEASE, PRIVATE_KEY_SECRET,
     credentials_job, notice_step, steps_that_need_the_credentials,
 };
 
