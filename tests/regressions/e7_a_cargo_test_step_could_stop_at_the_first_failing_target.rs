@@ -26,6 +26,40 @@ use crate::common::repo::{read, shell_code, shell_scripts_under, workflow_jobs, 
 /// The flag that makes one run produce the whole failure set.
 const FLAG: &str = "--no-fail-fast";
 
+#[test]
+fn filtered_regressions_build_the_native_helpers_before_running() {
+    fn check(commands: &[String]) {
+        let suite = commands
+            .iter()
+            .position(|command| {
+                command.contains("cargo test")
+                    && command.contains("--lib")
+                    && command.contains("--test regressions")
+            })
+            .expect("the filtered regression suite");
+        let helpers = commands
+            .iter()
+            .position(|command| command.contains("cargo build") && command.contains("--examples"))
+            .expect("the Windows shim and runtime helpers must be built explicitly");
+        assert!(
+            helpers < suite,
+            "filtered cargo test selections do not build examples"
+        );
+    }
+
+    let jobs = workflow_jobs(".github/workflows/ci.yml");
+    let lint = jobs
+        .iter()
+        .find(|job| job.id == "lint")
+        .expect("the fast CI job");
+    check(&lint.commands);
+    check(
+        &crate::common::mise::task("test:fast")
+            .expect("the native fast task")
+            .run,
+    );
+}
+
 /// Whether `command` runs `cargo test` without [`FLAG`].
 ///
 /// Pure, and deliberately syntactic: the question is about the text of a

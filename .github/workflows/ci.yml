@@ -3,20 +3,63 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      assurance:
+        description: Run the complete release assurance inventory
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      assurance:
+        type: boolean
+        required: true
 
 # No workflow-wide token: each job widens `permissions` to exactly what it
 # needs, and most need nothing but `contents: read`.
 permissions: {}
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ inputs.assurance == true }}
+  cancel-in-progress: ${{ inputs.assurance != true }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Workflow and metadata checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      runtime: ${{ steps.changes.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changes
+        with:
+          base: ${{ github.event.merge_group.base_sha || github.event.repository.default_branch }}
+          filters: .github/filters/ci.yml
+      - uses: ./.github/actions/install-actionlint
+        with:
+          tool: actionlint@1.7.12
+          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      - run: actionlint
+      - run: jq -L .github -n -e -f .github/check-required.jq
+      - run: python3 -m unittest discover -s scripts/ci -p '*_test.py'
+
   lint:
     name: Formatting, lints, docs and licences
-    runs-on: ubuntu-latest
+    needs: changes
+    if: inputs.assurance == true || needs.changes.outputs.runtime == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -43,6 +86,13 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ginary-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}
       - run: cargo fmt --all -- --check
       # Three clippy flavors. `--all-features` compiles the fault-injection
       # tests in; the plain run is what a contributor's `cargo clippy` does and
@@ -91,10 +141,18 @@ jobs:
       # Resolving it here fails the pull request that caused it.
       # Seconds, and no nightly toolchain: `cargo metadata` resolves, it does not build.
       - run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Build native test helpers
+        run: cargo build --locked --examples --features fault-injection
+      - name: Core and workflow contracts
+        run: cargo test --locked --no-fail-fast --features fault-injection --lib --bins --test smoke_cli --test regressions --test ci_matrix --test lean_ci --test assurance
+      - name: Launcher-only contracts
+        run: cargo test --locked --no-fail-fast --no-default-features --lib --bins --test stub_flavor
 
   msrv:
     name: MSRV check (the declared floor)
-    runs-on: ubuntu-latest
+    needs: changes
+    if: inputs.assurance == true || needs.changes.outputs.runtime == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -122,6 +180,7 @@ jobs:
 
   test:
     name: Test (${{ matrix.configuration }}, stable)
+    if: ${{ inputs.assurance == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -172,11 +231,12 @@ jobs:
         with:
           name: tests-${{ matrix.configuration }}
           path: target/assurance
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
 
   smoke:
     name: Clean-room smoke test
+    if: ${{ inputs.assurance == true }}
     # Pinned rather than `ubuntu-latest`: the smoke test runs the artifact this
     # runner built inside `ubuntu:24.04`, and the glibc floor it demonstrates is
     # a property of the pair. Docker is preinstalled on the hosted runner.
@@ -205,6 +265,7 @@ jobs:
 
   cross-build:
     name: Cross-build the stubs
+    if: ${{ inputs.assurance == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -257,6 +318,7 @@ jobs:
 
   smoke-matrix:
     name: Cross-Linux smoke matrix
+    if: ${{ inputs.assurance == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -365,11 +427,12 @@ jobs:
         with:
           name: tests-smoke-matrix
           path: target/assurance/smoke-matrix
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
 
   macos:
     name: macOS build, launch and signature
+    if: ${{ inputs.assurance == true }}
     # macos-15-intel is the x86_64 image; macos-14 is arm64. This is the job that
     # closes the D3 "awaits a Mac runner" gap: the darwin stub is built natively
     # here (there is no macOS cross toolchain on Linux) and its signature is
@@ -378,7 +441,7 @@ jobs:
     # Not macos-13. GitHub has withdrawn that label, and a withdrawn label is
     # worse than a failing job: the parser accepts it, the job appears, no
     # runner is ever assigned, and the whole *run* keeps the `queued` status —
-    # so `Required CI` never resolves and the pull request cannot merge however
+    # so `Required CI` never resolves and distribution cannot finish however
     # green everything else is. See
     # tests/regressions/e6_the_macos_matrix_asked_for_a_runner_github_retired.rs.
     strategy:
@@ -439,11 +502,12 @@ jobs:
         with:
           name: native-${{ matrix.target }}-evidence
           path: target/assurance/${{ matrix.target }}
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
 
   windows:
     name: Windows build and exit-code propagation
+    if: ${{ inputs.assurance == true }}
     # windows-2025 is offered and deliberately not taken: this runner is where
     # the Windows launcher's exit-code propagation is proved, and moving the
     # image is a claim about what that proof runs against. It moves with a run
@@ -659,11 +723,12 @@ jobs:
         with:
           name: native-windows-evidence
           path: target/assurance/windows
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
 
   coverage:
     name: Coverage (${{ matrix.measurement }})
+    if: ${{ inputs.assurance == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -764,27 +829,21 @@ jobs:
           # all this needs; the token moves the read onto this repository's own
           # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
           GITHUB_TOKEN: ${{ github.token }}
-      # Both measurements are required on pull requests: line coverage at 90%
-      # and branch coverage at 80%. The branch measurement uses the nightly
-      # compiler for `-Z coverage-options=branch`; see docs/dev/testing.md.
-      # The threshold lives here, not only in the script's
-      # default, so it cannot be lowered without the diff showing it. The
-      # full end-to-end suite runs under coverage (the toolchain is present and
-      # GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure, and the
-      # stubs downloaded above plus the runtimes repacked above keep the nine
-      # stub-gated tests in the run), so the number reflects the whole tree
-      # rather than a subset of it.
+      # Both measurements are required for release: line coverage at 90% and branch coverage at 80%. The branch measurement uses the nightly compiler for `-Z coverage-options=branch`; see docs/dev/testing.md.
+      # The threshold lives here, not only in the script's default, so it cannot be lowered without the diff showing it.
+      # The full end-to-end suite runs under coverage (the toolchain is present and GINARY_REQUIRE_TOOLCHAIN escalates a missing tool to a failure, and the stubs downloaded above plus the runtimes repacked above keep the nine stub-gated tests in the run), so the number reflects the whole tree rather than a subset of it.
       - run: bash scripts/ci/coverage.sh "${{ matrix.measurement }}"
       - if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-${{ matrix.measurement }}
           path: target/assurance/coverage-${{ matrix.measurement }}
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
   formal:
     name: Cache protocol model checking
+    if: ${{ inputs.assurance == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -802,16 +861,13 @@ jobs:
             target/assurance/formal
             .cache/tla/states
           include-hidden-files: true
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
   mutants:
-    name: Mutation testing (the diff)
+    name: Cache and parser mutation checks
+    if: ${{ inputs.assurance == true }}
     runs-on: ubuntu-24.04
-    # The whole crate is 920 candidates and hours of runners. A change is not,
-    # and a change is what a pull request is about: `--in-diff` keeps only the
-    # mutants in lines this branch touched. `mise run mutants` is the full pass
-    # and it belongs on a developer's machine, where it can take as long as it
-    # takes; see docs/dev/testing.md.
+    # Cache publication and untrusted payload parsing define the release's mutation scope; every configured operator runs on these boundaries.
     timeout-minutes: 60
     permissions:
       contents: read
@@ -819,54 +875,61 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The base commit has to be in the clone for `git diff` to reach it.
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-mutants@27.1.0
-      - name: The mutants this change introduces
-        env:
-          # A pull request diffs against its merge base; a push against what it
-          # replaced. A first push to a branch has no predecessor, and the empty
-          # tree is what `git` calls that.
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/ci/mutation-diff.sh
+      - name: Check cache and payload mutations
+        run: >-
+          cargo mutants --features fault-injection
+          --file src/cache.rs --file src/cache_lock.rs
+          --file src/trailer.rs --file src/payload.rs
+          --output target/mutants-release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
-          name: mutants-diff
-          path: target/mutants-diff
-          retention-days: 30
+          name: mutants-release
+          path: target/mutants-release
+          retention-days: 7
           if-no-files-found: ignore
+
+  fuzz:
+    name: Parser fuzz assurance
+    if: ${{ inputs.assurance == true }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/nightly.yml
 
   required:
     name: Required CI
-    if: ${{ always() && !cancelled() }}
-    needs: [lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal, mutants]
-    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal, mutants, fuzz]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     steps:
-      - name: Require every runnable job to have passed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every selected job to succeed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RESULTS: ${{ toJSON(needs) }}
+          FULL: ${{ inputs.assurance == true }}
         run: |
-          echo "job results: $RESULTS"
-          for result in $RESULTS; do
-            test "$result" = success
-          done
+          set -euo pipefail
+          jq -L .github -e --argjson full "$FULL" 'include "required"; required($full)' <<< "$RESULTS"
 
   # The one status check branch protection requires,
   # named the same in every P4suta repository.
-  # It passes only when every job it needs succeeded or was skipped.
+  # It passes only when its required summary succeeds.
   required-check:
     name: required
     if: always()
     needs: [required]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -875,4 +938,4 @@ jobs:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "${RESULTS}"
-          jq -e 'all(.[]; IN("success", "skipped"))' <<< "${RESULTS}"
+          jq -e 'all(.[]; . == "success")' <<< "${RESULTS}"

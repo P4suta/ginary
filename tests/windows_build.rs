@@ -265,7 +265,7 @@ fn the_windows_build_task_builds_both_flavors_for_the_windows_triple() {
 
 #[test]
 fn the_readme_records_windows_runtime_contract_and_remaining_qualification() {
-    let readme = read("README.md");
+    let readme = read("docs/README.md");
     let start = readme
         .find("\n## Windows")
         .expect("README.md needs a `## Windows` section stating where support stands");

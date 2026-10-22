@@ -34,7 +34,7 @@ use crate::common::repo::{WorkflowStep, read, workflow_steps};
 const CI: &str = ".github/workflows/ci.yml";
 
 /// The documents that describe where each platform's support stands.
-const DOCUMENTS: [&str; 2] = ["README.md", "docs/dev/v1-readiness.md"];
+const DOCUMENTS: [&str; 2] = ["docs/README.md", "docs/dev/v1-readiness.md"];
 
 /// Every step of one job of the CI workflow, in file order.
 fn steps_of(job: &str) -> Vec<WorkflowStep> {

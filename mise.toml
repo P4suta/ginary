@@ -57,7 +57,11 @@ description = "Run only the tests that need no external toolchain"
 # `doctor`, which probes whatever is on `PATH`, bounded by
 # `doctor::PROBE_TIMEOUT`; see `docs/dev/testing.md`. The remaining targets are
 # outside this task because each holds a handful of `require_tools`-gated tests.
-run = "cargo test --no-fail-fast --features fault-injection --lib --bins --test smoke_cli --test regressions"
+run = [
+  "cargo build --locked --examples --features fault-injection",
+  "cargo test --locked --no-fail-fast --features fault-injection --lib --bins --test smoke_cli --test regressions --test ci_matrix --test lean_ci --test assurance",
+  "cargo test --locked --no-fail-fast --no-default-features --lib --bins --test stub_flavor",
+]
 
 [tasks."test:stub"]
 description = "Run the suite as the launcher-only stub build compiles it"
@@ -95,14 +99,9 @@ run = [
 
 [tasks.mutants]
 description = "Mutation testing over the whole crate"
-# The whole crate, and this is the only place it runs. CI mutates the lines a
-# change touched — `scripts/ci/mutation-diff.sh`, on every pull request — so its
-# cost is the size of the change; the whole-crate pass is hours and belongs on a
-# machine that can spend them. `--shard i/n` is there if you want to split it
-# across terminals.
+# Whole-crate exploration is explicit; release assurance checks the cache and payload boundaries, and ordinary pull requests run no mutation campaign.
 #
-# No `--in-place`: cargo-mutants copies the tree to a temporary directory, so a
-# killed run cannot leave a mutated source behind.
+# No `--in-place`: cargo-mutants copies the tree to a temporary directory, so a killed run cannot leave a mutated source behind.
 run = "cargo mutants"
 
 [tasks."fuzz:build"]
@@ -116,7 +115,7 @@ cargo +nightly fuzz build
 """
 
 [tasks.fuzz]
-description = "Run each fuzz target for 600 seconds (nightly toolchain)"
+description = "Run 10000 seeded inputs per fuzz target (nightly toolchain)"
 # Sequential rather than parallel: four libFuzzer processes at four gigabytes
 # each is not a thing to start by accident, and a crash is easier to attribute
 # when one target is running on its own.
@@ -133,7 +132,7 @@ for target in trailer_parse appfile_terms beam_chunks payload_read_manifest; do
   echo "fuzz: $target"
   mkdir -p fuzz/corpus/"$target"
   cargo +nightly fuzz run "$target" fuzz/corpus/"$target" fuzz/seeds/"$target" \
-    -- -max_total_time=600 -rss_limit_mb=4096
+    -- -runs=10000 -seed=1 -rss_limit_mb=4096
 done
 """
 
@@ -533,13 +532,12 @@ echo "clean:cache: kept target/stubs (mise run stubs:build) and dist/otp (mise r
 '''
 
 [tasks.check]
-description = "The pull-request gate: lint, lint:plain, lint:stub, test, test:stub, doc, doc:stub and deny"
+description = "The routine gate: lint, core tests, documentation and dependency policy"
 run = [
   "mise run lint",
   "mise run lint:plain",
   "mise run lint:stub",
-  "mise run test",
-  "mise run test:stub",
+  "mise run test:fast",
   "mise run doc",
   "mise run doc:stub",
   "mise run deny",

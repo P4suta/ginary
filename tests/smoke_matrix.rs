@@ -291,7 +291,7 @@ fn the_format_document_specifies_the_catalog_schema() {
 
 #[test]
 fn the_readme_carries_the_cross_build_quickstart_and_the_two_caveats() {
-    let readme = read("README.md");
+    let readme = read("docs/README.md");
 
     for needle in ["stubs:build", "otp repack", "--target", "--catalog"] {
         assert!(readme.contains(needle), "the quickstart names {needle}");
