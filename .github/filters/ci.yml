@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+runtime:
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - '.cargo/**'
+  - '.github/**'
+  - 'scripts/**'
+  - 'tests/**'
+  - 'formal/**'
+  - 'mise.toml'
+  - 'renovate.json'
+  - 'deny.toml'
+  - '.gitattributes'

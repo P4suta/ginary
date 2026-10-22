@@ -12,14 +12,14 @@ name: CodeQL
 # place. See docs/dev/log/E3.md for the decision and the evidence behind it.
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  schedule:
-    # Weekly. The slot is this repository's own: the sibling repositories hold
-    # `31 20 * * 3` and `11 20 * * 3`, and three scans starting at once would
-    # queue behind each other for no reason.
-    - cron: "41 20 * * 3"
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/**'
+      - 'scripts/**'
+  merge_group:
   workflow_dispatch:
 
 # The scan reads the repository and writes alerts; the job below widens to
@@ -34,7 +34,7 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       # `actions: read` lets the workflow extractor read the workflow runs it

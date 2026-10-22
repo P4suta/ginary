@@ -135,7 +135,7 @@ fn the_release_document_says_what_a_maintainer_runs_to_cut_v0_1_0() {
 
 #[test]
 fn the_readme_carries_a_target_status_matrix() {
-    let readme = read("README.md");
+    let readme = read("docs/README.md");
     for target in [
         "linux-x86_64-gnu",
         "linux-aarch64-musl",
@@ -182,7 +182,7 @@ fn uncommented(markdown: &str) -> String {
 
 #[test]
 fn the_readme_badges_point_at_the_published_repository() {
-    let readme = read("README.md");
+    let readme = read("docs/README.md");
     // E1 left the badges commented out because the repository did not exist and
     // a live badge would have 404ed. E3 decides the slug, so they go live: a
     // commented badge is a status nobody sees.
@@ -232,7 +232,7 @@ fn the_readme_badges_point_at_the_published_repository() {
 
 #[test]
 fn the_readme_reports_the_development_version_without_claiming_a_release() {
-    let readme = read("README.md");
+    let readme = read("docs/README.md");
     assert!(readme.contains(&format!(
         "**Development version {}.**",
         env!("CARGO_PKG_VERSION")

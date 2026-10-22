@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 ginary contributors
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+name = "ginary"
+summary = "Package a Gleam application and a trimmed BEAM runtime into one executable"
+install = "cargo install --git https://github.com/P4suta/ginary --locked ginary"
+usage_language = "sh"
+usage = "cd my_gleam_app\nginary build"
+
+documentation_index = true
+copyright = "2026 ginary contributors"
+license = "MIT OR Apache-2.0"
+
+[[consent]]
+contributor = "Yasunobu"
+evidence = "https://github.com/P4suta/ginary/commit/9dfc5cef149e7569a76cc235ff7b4bd9bf134d41"

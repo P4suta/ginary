@@ -13,5 +13,6 @@ passes to cargo fuzz run
   fuzz/corpus/<target>
   fuzz/seeds/<target>
 libFuzzer arguments
-  -max_total_time=600
+  -runs=10000
+  -seed=1
   -rss_limit_mb=4096

@@ -4,9 +4,7 @@
 
 #[test]
 fn formal_upload_retains_the_scoped_hidden_model_states() {
-    for workflow in [".github/workflows/ci.yml", ".github/workflows/nightly.yml"] {
-        assert_formal_upload(workflow);
-    }
+    assert_formal_upload(".github/workflows/ci.yml");
 }
 
 fn assert_formal_upload(workflow_path: &str) {

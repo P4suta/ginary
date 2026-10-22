@@ -16,11 +16,11 @@ fn every_native_and_cross_test_job_preserves_its_own_failure_evidence() {
                     .as_mapping_get("if")
                     .and_then(saphyr::YamlOwned::as_str)
                     .is_some_and(|value| value.contains("always()"))
-                && step["with"]["retention-days"].as_integer() == Some(30)
+                && step["with"]["retention-days"].as_integer() == Some(7)
                 && step["with"]["path"]
                     .as_str()
                     .is_some_and(|value| value.starts_with("target/assurance"))),
-            "{job} must retain its own evidence for thirty days even after failure"
+            "{job} must retain its own evidence for seven days even after failure"
         );
         if job == "coverage" {
             assert!(steps.iter().any(|step| {
@@ -139,53 +139,56 @@ fn macos_exit_probe_runs_the_workflow_assertion_and_keeps_failed_evidence() {
 }
 
 #[test]
-fn every_expensive_nightly_pass_preserves_thirty_days_of_evidence() {
-    // The mutation pass is on the pull-request path now, not here: it mutates
-    // the lines a change touched rather than the whole crate, and retains its
-    // own evidence under `mutants-diff`. `ci.yml`'s own retention is asserted
-    // beside it there.
+fn parser_assurance_preserves_seven_days_of_failure_evidence() {
     let workflow = common::repo::yaml(".github/workflows/nightly.yml");
-    for name in ["fuzz", "formal", "smoke-matrix"] {
-        let steps = workflow["jobs"][name]["steps"]
-            .as_sequence()
-            .expect("assurance job steps");
-        assert!(
-            steps.iter().any(|step| step
-                .as_mapping_get("uses")
+    let name = "fuzz";
+    let steps = workflow["jobs"][name]["steps"]
+        .as_sequence()
+        .expect("assurance job steps");
+    assert!(
+        steps.iter().any(|step| step
+            .as_mapping_get("uses")
+            .and_then(saphyr::YamlOwned::as_str)
+            .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+            && step
+                .as_mapping_get("if")
                 .and_then(saphyr::YamlOwned::as_str)
-                .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
-                && step
-                    .as_mapping_get("if")
-                    .and_then(saphyr::YamlOwned::as_str)
-                    .is_some_and(|condition| condition.contains("always()"))
-                && step["with"]["retention-days"].as_integer() == Some(30)),
-            "{name} must preserve evidence even when its check fails"
-        );
-    }
+                .is_some_and(|condition| condition.contains("always()"))
+            && step["with"]["retention-days"].as_integer() == Some(7)),
+        "{name} must preserve evidence even when its check fails"
+    );
     let helper = common::repo::read("scripts/ci/smoke-matrix-evidence.sh");
     assert!(helper.contains("bash scripts/smoke-matrix.sh"));
     assert!(helper.contains("GINARY_SMOKE_EVIDENCE_DIR") && helper.contains("GINARY_TRACE"));
 }
 
-/// The mutation pass is a pull-request check over the diff, and keeps evidence.
-///
-/// The whole crate was 920 candidates over 106 native shards and hours of
-/// runners every night. A change is not the whole crate, and a pull request is
-/// about a change: `cargo mutants --in-diff` keeps only the mutants in lines
-/// the branch touched. The full pass is `mise run mutants` on a developer's
-/// machine, where it can take as long as it takes.
 #[test]
-fn the_mutation_pass_runs_over_the_diff_and_retains_what_it_found() {
+fn release_mutation_checks_cover_cache_and_parser_boundaries() {
     let workflow = common::repo::yaml(".github/workflows/ci.yml");
     let steps = workflow["jobs"]["mutants"]["steps"]
         .as_sequence()
         .expect("the mutants job has steps");
+    let command = steps
+        .iter()
+        .find_map(|step| {
+            step.as_mapping_get("run")
+                .and_then(saphyr::YamlOwned::as_str)
+                .filter(|run| run.contains("cargo mutants"))
+        })
+        .expect("a release mutation command");
+    for boundary in ["cache.rs", "cache_lock.rs", "trailer.rs", "payload.rs"] {
+        assert!(
+            command.contains(&format!("--file src/{boundary}")),
+            "missing {boundary}"
+        );
+    }
     assert!(
-        steps.iter().any(|step| step
-            .as_mapping_get("run")
-            .and_then(saphyr::YamlOwned::as_str)
-            .is_some_and(|run| run.contains("scripts/ci/mutation-diff.sh"))),
-        "the job runs the committed script rather than an inline copy of it"
+        !command.contains("--in-diff"),
+        "the candidate checks complete boundary modules"
+    );
+    assert!(
+        !command.contains("||"),
+        "a missing, surviving or timed-out result must fail the command"
     );
     assert!(
         steps.iter().any(|step| step
@@ -196,7 +199,7 @@ fn the_mutation_pass_runs_over_the_diff_and_retains_what_it_found() {
                 .as_mapping_get("if")
                 .and_then(saphyr::YamlOwned::as_str)
                 .is_some_and(|condition| condition.contains("always()"))
-            && step["with"]["retention-days"].as_integer() == Some(30)),
+            && step["with"]["retention-days"].as_integer() == Some(7)),
         "a mutant that survived is evidence, and evidence a failing job drops is evidence nobody \
          reads"
     );
@@ -212,19 +215,19 @@ fn the_mutation_pass_runs_over_the_diff_and_retains_what_it_found() {
 }
 
 #[test]
-fn nightly_fuzzing_has_a_real_budget_and_the_corpus_survives_the_runner() {
+fn parser_exploration_has_fixed_inputs_and_preserves_new_crashes() {
     let text = common::repo::read(".github/workflows/nightly.yml");
     assert!(
-        text.contains("-max_total_time=600"),
-        "each parser gets ten minutes of exploration"
+        text.contains("-runs=10000") && text.contains("-seed=1"),
+        "each parser has a fixed exploration bound and seed"
     );
     assert!(
-        text.contains("gh run download"),
-        "generated corpus must survive between runs"
+        text.contains("fuzz/seeds/") && text.contains("target/fuzz-evidence/crashes"),
+        "committed seeds are replayed and new crashes survive the runner"
     );
     assert!(
-        text.contains("gh api --paginate"),
-        "mutation artifacts must not hide the corpus on a later API page"
+        !text.contains("gh run download") && !text.contains("-max_total_time="),
+        "the verdict must not depend on prior runs or machine speed"
     );
     assert!(text.contains("source scripts/ci/fuzz-evidence.sh"));
     assert!(text.contains("\"status\":\"not_run\""));

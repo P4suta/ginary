@@ -1,6 +1,11 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # Cutting a release
 
+Distribution runs the reusable CI inventory with `assurance: true` on the same source commit.
+Assembly and publication wait for its native packaging, cross-runtime, coverage, cache-model, mutation, and parser checks.
+An unsuccessful or incomplete campaign blocks distribution.
+An explicit manual CI run can inspect the same inventory before creating a distribution candidate.
+
 This document is what a maintainer runs to cut a ginary release. It is written for `v0.1.0`, the
 first one, but every later release is the same three moves: let release-please prepare the
 version, rehearse distribution against its tag, then explicitly authorize verified publication.

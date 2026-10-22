@@ -104,32 +104,23 @@ fn ci_defines_every_job_the_milestone_named() {
 #[test]
 fn the_required_fan_in_waits_on_every_runnable_job() {
     let ci = read(".github/workflows/ci.yml");
-    let needs = ci
-        .split("required:")
-        .nth(1)
-        .and_then(|tail| tail.split("needs:").nth(1))
-        .and_then(|tail| tail.lines().next())
-        .expect("the required job declares a needs: list")
-        .to_owned();
-    // Every CI job feeds the fan-in, including macos and windows: they are not
-    // locally runnable, but they are real jobs, and unhooking either from
-    // `required` would let a red Mac or Windows run stop blocking the merge.
-    for job in [
-        "lint",
-        "msrv",
-        "test",
-        "smoke",
-        "cross-build",
-        "smoke-matrix",
-        "macos",
-        "windows",
-        "coverage",
-    ] {
-        assert!(
-            needs.contains(job),
-            "`required` has to gate on `{job}`, or a red {job} would not block the merge: {needs}"
-        );
-    }
+    let parsed = workflow(".github/workflows/ci.yml", &ci);
+    let declared = parsed["jobs"].as_mapping().expect("CI jobs");
+    let expected: std::collections::BTreeSet<_> = declared
+        .keys()
+        .filter_map(YamlOwned::as_str)
+        .filter(|job| !matches!(*job, "required" | "required-check"))
+        .collect();
+    let needs: std::collections::BTreeSet<_> = parsed["jobs"]["required"]["needs"]
+        .as_sequence()
+        .expect("required job prerequisites")
+        .iter()
+        .map(|job| job.as_str().expect("job identifier"))
+        .collect();
+    assert_eq!(
+        needs, expected,
+        "every selected job must reach the required summary"
+    );
 }
 
 #[test]
@@ -1150,20 +1141,20 @@ fn codeql_gives_every_language_an_explicit_build_mode_and_never_autobuilds() {
 }
 
 #[test]
-fn codeql_runs_weekly_on_a_slot_of_its_own_plus_push_pull_request_and_dispatch() {
+fn codeql_scans_changes_without_duplicate_pushes_or_schedules() {
     let codeql = read(".github/workflows/codeql.yml");
     assert_eq!(
         crons(&codeql),
-        vec!["41 20 * * 3".to_owned()],
-        "CodeQL runs weekly on one slot of its own. The sibling repositories hold `31 20 * * 3` \
-         and `11 20 * * 3`; a third repository joining either would queue three scans at once"
+        Vec::<String>::new(),
+        "CodeQL scans current changes without scheduled duplicates"
     );
-    for trigger in ["pull_request:", "workflow_dispatch:", "push:"] {
+    for trigger in ["pull_request:", "workflow_dispatch:", "merge_group:"] {
         assert!(
             codeql.contains(trigger),
             "the CodeQL workflow does not run on `{trigger}`"
         );
     }
+    assert!(!codeql.contains("\n  push:"));
     assert!(
         codeql.contains("concurrency:") && codeql.contains("cancel-in-progress: true"),
         "a superseded scan is cancelled rather than queued, as in the sibling repositories"
@@ -1177,12 +1168,7 @@ fn codeql_runs_weekly_on_a_slot_of_its_own_plus_push_pull_request_and_dispatch()
 #[test]
 fn scorecard_publishes_its_results_and_uploads_them_to_code_scanning() {
     let scorecard = read(".github/workflows/scorecard.yml");
-    for trigger in [
-        "branch_protection_rule:",
-        "push:",
-        "schedule:",
-        "workflow_dispatch:",
-    ] {
+    for trigger in ["branch_protection_rule:", "workflow_dispatch:"] {
         assert!(
             scorecard.contains(trigger),
             "the Scorecard workflow does not run on `{trigger}`"
@@ -1202,20 +1188,11 @@ fn scorecard_publishes_its_results_and_uploads_them_to_code_scanning() {
              the badge and the public record real, and it needs the OIDC token to do it"
         );
     }
-    let crons = crons(&scorecard);
-    assert_eq!(
-        crons.len(),
-        1,
-        "Scorecard runs on exactly one weekly slot: {crons:?}"
+    assert!(
+        crons(&scorecard).is_empty(),
+        "Scorecard runs only on demand or a protection change"
     );
-    let slot = &crons[0];
-    for taken in ["31 20 * * 3", "11 20 * * 3", "41 20 * * 3"] {
-        assert_ne!(
-            slot, taken,
-            "`{taken}` is already taken by a sibling repository or by our own CodeQL scan; \
-             Scorecard needs a slot of its own"
-        );
-    }
+    assert!(!scorecard.contains("\n  push:"));
 }
 
 #[test]

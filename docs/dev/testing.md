@@ -1,10 +1,24 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # Testing
 
+## Routine checks and release assurance
+
+Ordinary pull requests run workflow and metadata checks, then selected Linux lints, core tests, and the Rust 1.88 compatibility check.
+`mise run test:fast` builds the native test helpers before running the filtered suite.
+It needs no packaged runtime or cross-built stub.
+Superseded pull-request runs are cancelled.
+
+An explicit assurance run adds full feature-flavor tests, native macOS and Windows packaging, cross-runtime tests, coverage, cache-model checking, parser fuzzing, and cache and payload mutation checks.
+Distribution calls that inventory on the same source commit and waits for it before assembly or publication.
+These campaigns have no scheduled or ordinary pull-request trigger.
+Failure evidence is retained for seven days.
+CodeQL scans relevant pull requests and merge groups; Scorecard runs on protection changes or an explicit request.
+
 ## What exists now
 
 | file | scope |
 |---|---|
+| `tests/lean_ci.rs` | routine triggers, explicit release campaigns, same-source distribution, and schedule constraints |
 | `src/target.rs` unit tests | target names, parsing, round trips, the seven supported targets |
 | `src/cache_dir.rs` unit tests | precedence, empty values, relative `XDG_CACHE_HOME`, no variable set |
 | `src/doctor.rs` unit tests | version parsers, the probe list, tool reports, report rendering |
@@ -1510,7 +1524,7 @@ property, the fuzzer looks for the input that breaks it.
 
 ```console
 mise run fuzz:build      # cargo +nightly fuzz build
-mise run fuzz            # each target for 600 seconds, in turn
+mise run fuzz            # 10000 runs per target with seed 1
 ```
 
 Both tasks and the nightly workflow first resolve `fuzz/Cargo.toml` with Cargo's
@@ -1763,16 +1777,15 @@ Planned test categories:
     write, publication or signature check preserves the previous artifact and leaves no partial
     replacement. Retained staging is reported when requested. `FAULT_POINTS` in `src/fault.rs` is the list both this
   document and `debugging.md` are held against by unit test, so the three cannot drift apart.
-- **Mutation testing** — `cargo-mutants`, over the diff on every pull request; see
-  [what the mutation pass covers](#what-the-mutation-pass-covers).
+- **Mutation testing** — release checks cover the cache and payload boundaries; see [what the mutation pass covers](#what-the-mutation-pass-covers).
 - **Coverage** — `cargo llvm-cov`, gated at 90% lines and 80% branches.
 - **Regressions** — `tests/regressions/` exists and is wired up; see the "what exists now" table
   above and `tests/regressions/README.md`.
 
 ## Assurance tooling
 
-`cargo-deny`, `cargo-llvm-cov`, `cargo-mutants`, `cargo-insta`, `cargo-nextest` and `cargo-fuzz`
-are all installed on the current development machine, and each has a mise task:
+Project tasks provide entry points for dependency, coverage, mutation, snapshot, test, and fuzz tools.
+Their installation depends on the host.
 
 | task | command | notes |
 |---|---|---|
@@ -1781,13 +1794,13 @@ are all installed on the current development machine, and each has a mise task:
 | `mise run mutants` | `cargo mutants` | the whole crate, and the only place it runs; copies the tree, not `--in-place` |
 | `mise run test:nextest` | `cargo nextest run` | nextest does not run doc tests, so it is not a replacement for `mise run test` |
 | `mise run fuzz:build` | `cargo +nightly fuzz build` | builds the four targets; nightly, and outside the gate |
-| `mise run fuzz` | each target for 600 s, in turn | nightly; see the fuzzing section |
+| `mise run fuzz` | 10,000 runs per target with seed 1 | nightly compiler; explicit exploration |
 
 The local line gate is `--fail-under-lines 90`. CI runs independent stable line and nightly
 branch measurements over the same complete runtime/stub prerequisites. Both enforce 90% lines;
 the nightly measurement also enforces 80% branches through `coverage-gate.sh ... 80 branches`.
 Missing branch records are an error, not an empty measurement counted as success. Coverage
-reports are uploaded for 30 days even when the floor fails.
+reports are uploaded for seven days even when the floor fails.
 
 The coverage gate rejects malformed, duplicate, unpaired or negative counters, hits greater
 than the total, and unfinished source records. Its Bash fixtures also run through Git Bash
@@ -1797,7 +1810,7 @@ never changes the comparison against the unrounded ratio.
 CI calls `scripts/ci/coverage.sh` with `lines` or `branches`. The helper prepares a fresh
 instrumented build, runs the same per-test outcome adapter as the main test matrix, and
 produces LCOV even after test failures. Its `run.json` preserves the test, report and individual
-gate exits; a later successful report cannot erase a failed test. The thirty-day artifact
+gate exits; a later successful report cannot erase a failed test. The seven-day artifact
 contains raw profiles, LCOV, logs and subprocess evidence. The branch job instruments doctests
 and enforces both floors; the stable line job uses stable-compatible instrumentation.
 
@@ -1877,34 +1890,17 @@ a mismatch, and only reviewing them wants the subcommand.
 
 ### What the mutation pass covers
 
-The `mutants` job in `.github/workflows/ci.yml` mutates **the lines this change touched**, and
-nothing else. That is a narrower claim than "every mutant of this crate is caught", and it is the
-claim a pull request can afford: the crate is 920 candidates and hours of runners, a change is not,
-and `scripts/ci/mutation-diff.sh` asks cargo-mutants for `--in-diff` over `git diff <base>...HEAD`.
+The release-only `mutants` job checks `cache.rs`, `cache_lock.rs`, `trailer.rs`, and `payload.rs` with fault injection enabled.
+These modules guard concurrent cache publication and untrusted archive input.
+Every configured operator runs over the selected modules, independent of the latest commit's diff.
+The command propagates missed mutants, timeouts, and tool errors as unsuccessful results.
+A safety timeout leaves assurance incomplete and blocks distribution.
+Logs and outcomes remain available for seven days.
 
-**It covers** every mutant cargo-mutants generates inside the diff, with the `fault-injection`
-feature on, on Linux. **It does not cover** anything the change did not touch, any `#[cfg]` body
-Linux does not compile, or a build the feature is off in. The whole-crate pass is
-`mise run mutants` on a developer's machine, and there is nowhere else it runs.
-
-**A change too large for the job is a named refusal.** The candidates are counted before anything
-is built, and a diff over `BUDGET` (40) of them fails with the count and the cap rather than
-running out of the hour with nothing to show — run the whole-crate pass locally and record what it
-found. A diff that touches no source, or no mutable line, is a pass that says so.
-
-**The budgets.** `--build-timeout-multiplier 2` and `--timeout 420`: a *ratio* for the build,
-because a number of seconds is a fact about one runner and a mutant's build does no more work than
-the baseline build the job itself times; a constant for the test, because what that bounds is a
-mutant that never terminates rather than a machine that is slow.
-
-**Two readings of a timeout, and only one of them fails.**
-`scripts/ci/mutation-verdict.py` reads `mutants.out/outcomes.json` and tells them apart by the
-phase that ran out of time. A **test** phase that did is a mutant the suite did not pass — the only
-detection available for one that stops a loop advancing, where nothing reaches an assertion for one
-to fail — and it is a kill, counted as `hang` rather than folded into `caught` so a reader can see
-how many there were. A **build** phase that did measured nothing at all, and stays a failure. A run
-whose unmutated baseline failed is not a pass either, because nothing it reports is about the
-mutations. The outcomes, diffs and logs are retained for 30 days even when the job fails.
+This Linux check covers the code that Linux compiles.
+It makes no mutation claim for other modules, native Windows or macOS bodies, or builds with fault injection disabled.
+`mise run mutants` remains the explicit whole-crate exploration command.
+The old diff helper remains available for manual investigation and supplies no release verdict.
 
 ### What replaced the nightly campaign, and why
 
@@ -2032,11 +2028,12 @@ adapter first lists planned tests, then runs with `--show-output --test-threads=
 `planned.log`, `tests.log` and versioned `outcomes.json`. Reported tool skips remain visible as
 skips even when libtest itself labels an early-return test successful. Unstarted tests remain
 `not_run`; an observed unfinished test is `interrupted`. A forcibly killed runner retains its
-last `running` record instead of claiming success. Nightly fuzzing retains its
-corpus and crash artifacts for 30 days and restores the previous completed run's corpus. Each
-parser receives 600 seconds. CI and Nightly run TLC and retain its output; repository shape
-checks remain distinct from running the checker itself. `tests/assurance.rs` verifies the
-retention and worst-case mutation budget contracts.
+last `running` record instead of claiming success.
+Release parser checks replay committed seeds and explore 10,000 inputs per target with seed 1.
+They retain new corpus and crash evidence for seven days without restoring state from another run.
+The release inventory runs TLC once and retains its model-checking evidence.
+Repository shape checks remain distinct from executing the checker.
+`tests/assurance.rs` checks the declared scopes, exploration bounds, and evidence retention.
 
 Tool installation is a property of a host, not of this document. The F1 record names the tools
 actually available on its Windows host and records each locally executed check, including the

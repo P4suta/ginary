@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
-name: Nightly
+name: Parser fuzz assurance
 
-# Sustained exploration supplements the required pull-request checks.
-# Every pass retains its evidence and reports incomplete execution explicitly.
 on:
-  schedule:
-    # 03:17 UTC daily; an odd minute so it does not land on the hour with every
-    # other project's nightly.
-    - cron: "17 3 * * *"
   workflow_dispatch:
+  workflow_call:
 
 permissions: {}
 
@@ -22,7 +17,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -37,64 +31,18 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-fuzz@0.13.2
-      # 600 seconds per target, seeded from the committed and retained corpus; a crash is a
-      # failed job with the reproducer in the log.
-      #
-      # --target is named rather than defaulted. cargo-fuzz with no --target
-      # builds for the triple its own binary was compiled for, and the install
-      # step above downloads a prebuilt archive built for
-      # x86_64-unknown-linux-musl; musl links libc statically, and rustc
-      # refuses a sanitizer against a statically linked libc:
-      #   error: sanitizer is incompatible with statically linked libc,
-      #   disable it using `-C target-feature=-crt-static`
-      # Every run of this job failed on that until 2026-09-05. Adding the musl
-      # target would silence only the second, consequential error ("can't find
-      # crate for `core`") and leave the first standing; this runner's own
-      # triple is a gnu one and links libc dynamically, so naming it is the
-      # fix. Pinned by tests/ci_matrix.rs and tests/regressions/
-      # e19_the_fuzz_smoke_built_for_the_triple_cargo_fuzz_was_installed_for.rs.
-      #
-      # The `mkdir` is the precondition, not a convenience. `fuzz/corpus/` is
-      # where libFuzzer writes *new* inputs, so it is empty at checkout and git
-      # tracks no empty directory; libFuzzer refuses to start without it:
-      #   ERROR: The required directory "fuzz/corpus/trailer_parse" does not exist
-      # All four shards of run 33969332537 exited 1 on that line. `mise.toml`'s
-      # `fuzz` task has always created it and this job did not, which is why
-      # tests/ci_matrix.rs now reduces both callers to one plan and compares
-      # them; see tests/regressions/
-      # e21_the_fuzz_smoke_never_created_the_corpus_it_passed.rs.
-      - name: Restore the previous completed run's generated corpus
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FUZZ_TARGET: ${{ matrix.target }}
+      # The gnu triple avoids the musl binary's crt-static sanitizer error.
+      - name: Explore the committed parser corpus
         run: |
           mkdir -p fuzz/corpus/"${{ matrix.target }}"
-          previous=$(gh run list --workflow nightly.yml --status completed --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          if [ -n "$previous" ]; then
-            present=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$previous/artifacts" --jq ".artifacts[] | select(.name == \"fuzz-$FUZZ_TARGET\" and .expired == false) | .id")
-            if [ -n "$present" ]; then
-              gh run download "$previous" --name "fuzz-$FUZZ_TARGET" --dir fuzz/previous
-              if [ -d "fuzz/previous/corpus" ]; then
-                cp -a "fuzz/previous/corpus/." "fuzz/corpus/$FUZZ_TARGET/"
-              fi
-            else
-              echo "No retained corpus for $FUZZ_TARGET in run $previous; starting from committed seeds"
-            fi
-          else
-            echo "No completed nightly run; starting from committed seeds"
-          fi
-      - run: |
           source scripts/ci/fuzz-evidence.sh
-          # cargo-fuzz does not forward --locked. Resolve first so a stale
-          # dedicated lockfile fails instead of silently selecting new inputs.
           cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
           cargo fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" \
             fuzz/corpus/"${{ matrix.target }}" fuzz/seeds/"${{ matrix.target }}" \
-            -- -max_total_time=600 -rss_limit_mb=4096
+            -- -runs=10000 -seed=1 -rss_limit_mb=4096
         env:
           FUZZ_TARGET: ${{ matrix.target }}
-
-      - name: Stage a stable corpus evidence layout
+      - name: Preserve corpus and crash evidence
         if: ${{ always() }}
         env:
           FUZZ_TARGET: ${{ matrix.target }}
@@ -114,103 +62,5 @@ jobs:
         with:
           name: fuzz-${{ matrix.target }}
           path: target/fuzz-evidence
-          retention-days: 30
-          if-no-files-found: warn
-  formal:
-    name: Cache protocol model checking
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: bash scripts/ci/formal.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ always() }}
-        with:
-          name: formal-evidence
-          path: |
-            target/assurance/formal
-            .cache/tla/states
-          include-hidden-files: true
-          retention-days: 30
-          if-no-files-found: warn
-  smoke-matrix:
-    name: Full cross-Linux smoke matrix
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    env:
-      GINARY_REQUIRE_TOOLCHAIN: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
-        with:
-          otp-version: "29.0.5"
-          gleam-version: "1.18.1"
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: cross@0.2.5
-      # Pinned to a manifest digest, as in ci.yml's `smoke-matrix` job and for
-      # the same reason: `--privileged` gives the container this runner's own
-      # kernel capabilities, and a tag can be moved upstream with no commit
-      # here. The digest names the multi-platform index, which is
-      # `tonistiigi/binfmt:qemu-v10.2.3` as of 2026-09-04.
-      - name: Bootstrap binfmt for arm64
-        run: docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
-      # One target directory per triple: a `cross` target directory belongs to
-      # one container image, and a host build script cached in the musl image
-      # does not start in the deliberately ancient gnu one. The same fix as
-      # ci.yml's `smoke-matrix`, which is where the failure was read; see
-      # tests/regressions/e5_one_cross_target_directory_was_shared_between_images.rs.
-      - name: Build the cross stubs and repack the catalog
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          mkdir -p target/stubs
-          for entry in \
-            linux-x86_64-musl:x86_64-unknown-linux-musl \
-            linux-x86_64-gnu:x86_64-unknown-linux-gnu \
-            linux-aarch64-musl:aarch64-unknown-linux-musl; do
-            name=${entry%%:*}; triple=${entry##*:}
-            ( export CARGO_TARGET_DIR="target/cross/$triple"
-              cross build --release --locked --no-default-features --target "$triple"
-              cp "$CARGO_TARGET_DIR/$triple/release/ginary" \
-                 "target/stubs/ginary-stub-$version-$name" )
-          done
-          cargo run --quiet --locked -- otp repack \
-            --upstream-tag OTP-29.0.5 \
-            --targets linux-x86_64-musl:static,linux-x86_64-gnu,linux-aarch64-musl:static \
-            --out dist/otp
-        env:
-          # `ginary otp repack` reads the upstream release through the GitHub
-          # API. An unauthenticated read is limited to 60 an hour by source
-          # address, which every hosted runner in a pool shares, and the answer
-          # over it is a 403 nothing retries its way out of. `contents: read` is
-          # all this needs; the token moves the read onto this repository's own
-          # budget. See tests/regressions/e22_an_unauthenticated_api_read_was_refused_without_saying_why.rs.
-          GITHUB_TOKEN: ${{ github.token }}
-      - run: bash scripts/ci/smoke-matrix-evidence.sh
-        env:
-          GINARY_STUB_DIR: ${{ github.workspace }}/target/stubs
-      - name: Record a matrix that never started
-        if: ${{ always() }}
-        run: |
-          mkdir -p target/assurance/smoke-matrix
-          if [ ! -f target/assurance/smoke-matrix/run.json ]; then
-            printf '{"schema_version":1,"status":"not_run","complete":false}\n' > target/assurance/smoke-matrix/run.json
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ always() }}
-        with:
-          name: nightly-smoke-matrix-evidence
-          path: target/assurance/smoke-matrix
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: warn
