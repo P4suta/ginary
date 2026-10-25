@@ -90,3 +90,8 @@ its open questions to `docs/dev/log/<milestone>.md`.
 
 Every source file carries `SPDX-License-Identifier: MIT OR Apache-2.0`; `REUSE.toml` covers the
 rest of the tree.
+
+## License
+
+The two licenses are [`MIT`](LICENSE-MIT) and [`Apache-2.0`](LICENSE-APACHE).
+You license each contribution you submit under the same two licenses, without other terms, unless you state otherwise.
