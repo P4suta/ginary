@@ -12,6 +12,10 @@ documentation_index = true
 copyright = "2026 ginary contributors"
 license = "MIT OR Apache-2.0"
 
+[preserved_licenses]
+mit_sha256 = "ce7044eac55c883b04e28b315bca33945de0e9dfa196e3cbcc0e10290afd9122"
+apache_sha256 = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+
 [[consent]]
 contributor = "Yasunobu"
 evidence = "https://github.com/P4suta/ginary/commit/9dfc5cef149e7569a76cc235ff7b4bd9bf134d41"
