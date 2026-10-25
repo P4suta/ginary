@@ -14,7 +14,7 @@
 # Pinned by digest, and watched: Scorecard's `PinnedDependencies` is right that a floating tag is an unreviewed input, and a digest with nothing updating it only trades that for an image that never gets a patch.
 # Renovate's `dockerfile` manager finds this file by its name and moves the digest when the tag moves, so the pair holds together — the tag beside the digest is what tells the updater which tag to follow.
 # `tests/ci_matrix.rs` asserts both the name and the digest.
-FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+FROM rust:1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends mingw-w64 \
  && rm -rf /var/lib/apt/lists/*
