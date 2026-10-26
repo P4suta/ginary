@@ -30,7 +30,7 @@ env:
 jobs:
   changes:
     name: Workflow and metadata checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -59,7 +59,7 @@ jobs:
     name: Formatting, lints, docs and licences
     needs: changes
     if: inputs.assurance == true || needs.changes.outputs.runtime == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -152,7 +152,7 @@ jobs:
     name: MSRV check (the declared floor)
     needs: changes
     if: inputs.assurance == true || needs.changes.outputs.runtime == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -191,7 +191,7 @@ jobs:
             features: ''
           - configuration: stub
             features: --no-default-features
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
       contents: read
@@ -240,7 +240,7 @@ jobs:
     # Pinned rather than `ubuntu-latest`: the smoke test runs the artifact this
     # runner built inside `ubuntu:24.04`, and the glibc floor it demonstrates is
     # a property of the pair. Docker is preinstalled on the hosted runner.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -266,7 +266,7 @@ jobs:
   cross-build:
     name: Cross-build the stubs
     if: ${{ inputs.assurance == true }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -319,7 +319,7 @@ jobs:
   smoke-matrix:
     name: Cross-Linux smoke matrix
     if: ${{ inputs.assurance == true }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -739,7 +739,7 @@ jobs:
           - measurement: branches
             toolchain: nightly
             flags: --branch
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Forty minutes was the budget before this job also repacked the runtimes
     # and stopped skipping nine end-to-end tests; the download, the repack and
     # seven instrumented cross builds are all new work since.
@@ -844,7 +844,7 @@ jobs:
   formal:
     name: Cache protocol model checking
     if: ${{ inputs.assurance == true }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -866,7 +866,7 @@ jobs:
   mutants:
     name: Cache and parser mutation checks
     if: ${{ inputs.assurance == true }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Cache publication and untrusted payload parsing define the release's mutation scope; every configured operator runs on these boundaries.
     timeout-minutes: 60
     permissions:
@@ -906,7 +906,7 @@ jobs:
     name: Required CI
     if: always()
     needs: [changes, lint, msrv, test, smoke, cross-build, smoke-matrix, macos, windows, coverage, formal, mutants, fuzz]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -929,7 +929,7 @@ jobs:
     name: required
     if: always()
     needs: [required]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
