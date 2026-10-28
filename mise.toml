@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 [tools]
+"github:kjanat/actionlint" = "1.17.0"
 gleam = "1.18.1"
 erlang = "29.0.5"
 # Only `mise run formal` needs it: TLC is a Java program, and the alternative

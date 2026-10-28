@@ -1372,8 +1372,7 @@ fn the_renovate_exception_covers_the_floor_and_nothing_else() {
     let (text, config) = renovate_config();
     assert!(
         config.get("enabled").is_none() && config.get("ignoreDeps").is_none(),
-        "{RENOVATE_CONFIG} states one exception; a top-level `enabled` or `ignoreDeps` turns \
-         off more than the floor:\n{text}"
+        "{RENOVATE_CONFIG} scopes both floor exceptions inside package rules:\n{text}"
     );
 
     let switches: Vec<&Value> = renovate_rules(&config)
@@ -1382,12 +1381,15 @@ fn the_renovate_exception_covers_the_floor_and_nothing_else() {
         .collect();
     assert_eq!(
         switches.len(),
-        1,
-        "one exception, and it is the MSRV pin; {} rules of {RENOVATE_CONFIG} switch a lookup \
+        2,
+        "only the Rust and smoke floors are exceptions; {} rules of {RENOVATE_CONFIG} switch a lookup \
          on or off:\n{text}",
         switches.len()
     );
-    let rule = switches[0];
+    let rule = switches
+        .iter()
+        .find(|rule| rule.get("matchDatasources") == Some(&serde_json::json!(["rust-version"])))
+        .expect("the original MSRV exception");
     assert_eq!(
         rule.get("matchFileNames"),
         Some(&serde_json::json!([".github/workflows/ci.yml"])),
@@ -1403,6 +1405,26 @@ fn the_renovate_exception_covers_the_floor_and_nothing_else() {
         rule.get("enabled"),
         Some(&Value::Bool(false)),
         "the rule disables the lookup; anything else is a rule that does nothing: {rule}"
+    );
+
+    let runner = switches
+        .iter()
+        .find(|rule| rule.get("matchDatasources") == Some(&serde_json::json!(["github-runners"])))
+        .expect("the smoke runner floor exception");
+    let mut fields = runner.as_object().expect("a runner package rule").clone();
+    fields.remove("description");
+    assert_eq!(
+        Value::Object(fields),
+        serde_json::json!({
+            "matchManagers": ["github-actions"],
+            "matchDatasources": ["github-runners"],
+            "matchDepTypes": ["github-runner"],
+            "matchPackageNames": ["ubuntu"],
+            "matchFileNames": [".github/workflows/ci.yml"],
+            "matchCurrentValue": "/^24\\.04$/",
+            "enabled": false,
+        }),
+        "the exception must leave newer Ubuntu, other files, and unrelated dependencies eligible"
     );
 }
 

@@ -237,7 +237,7 @@ jobs:
     # Pinned rather than `ubuntu-latest`: the smoke test runs the artifact this
     # runner built inside `ubuntu:24.04`, and the glibc floor it demonstrates is
     # a property of the pair. Docker is preinstalled on the hosted runner.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
