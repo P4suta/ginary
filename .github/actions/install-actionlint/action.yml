@@ -48,7 +48,7 @@ runs:
         mkdir -p "$dir"
         curl --silent --show-error --fail --location --retry 3 \
           --output "${dir}/${archive}" \
-          "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          "https://github.com/kjanat/actionlint/releases/download/v${version}/${archive}"
         echo "${SHA256}  ${dir}/${archive}" | sha256sum --check --strict -
         tar -xzf "${dir}/${archive}" -C "$dir" actionlint
         chmod +x "${dir}/actionlint"
