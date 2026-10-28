@@ -42,7 +42,7 @@
 //! second error and leave the real one standing.
 //!
 //! **The correct behaviour.** The job names the triple it means. It runs on
-//! `ubuntu-24.04`, its sanitizer needs a dynamically linked libc, and
+//! an x86-64 Ubuntu runner, its sanitizer needs a dynamically linked libc, and
 //! `x86_64-unknown-linux-gnu` is both — so `--target` says so on the command
 //! line rather than being inherited from how somebody's release archive was
 //! built. The pin is here and in `tests/ci_matrix.rs`, so a `--target` deleted
@@ -119,8 +119,26 @@ fn the_job_still_installs_the_prebuilt_that_made_the_default_wrong() {
     );
 }
 
-/// The runner whose own triple is [`GNU`].
+/// The historical runner label used by the parser fixture.
 const RUNNER: &str = "ubuntu-24.04";
+
+fn x86_64_ubuntu_runner(label: &str) -> bool {
+    let Some(version) = label.strip_prefix("ubuntu-") else {
+        return false;
+    };
+    if version == "latest" {
+        return true;
+    }
+    let Some((year, month)) = version.split_once('.') else {
+        return false;
+    };
+    year.len() == 2
+        && month.len() == 2
+        && year
+            .bytes()
+            .chain(month.bytes())
+            .all(|byte| byte.is_ascii_digit())
+}
 
 #[test]
 fn the_fuzz_job_asks_for_the_runner_whose_own_triple_is_the_one_it_pins() {
@@ -130,16 +148,36 @@ fn the_fuzz_job_asks_for_the_runner_whose_own_triple_is_the_one_it_pins() {
         .map(|job| job.runs_on)
         .collect();
 
-    assert_eq!(
-        labels,
-        vec![vec![RUNNER.to_owned()]],
-        "`{GNU}` is the right triple only because the job is assigned an x86-64 Linux runner, \
-         whose own triple it is. Read off the `fuzz` job rather than searched for in the file: \
-         two other jobs of this workflow ask for `{RUNNER}` too, so a search passes however this \
-         job is scheduled, and `ubuntu-24.04-arm` even contains the needle while making the \
-         pinned triple a cross build with no `rustup target add` behind it — which is the \
-         original failure again by another route"
+    assert_eq!(labels.len(), 1, "the fuzz job must exist exactly once");
+    assert!(
+        matches!(labels[0].as_slice(), [label] if x86_64_ubuntu_runner(label)),
+        "`{GNU}` requires the fuzz job's own x86-64 Linux runner; runner versions may advance, \
+         but an arm label would make the pinned target a cross build: {labels:?}"
     );
+}
+
+#[test]
+fn ubuntu_release_updates_preserve_the_architecture_check() {
+    for label in [
+        "ubuntu-latest",
+        "ubuntu-22.04",
+        "ubuntu-24.04",
+        "ubuntu-26.04",
+    ] {
+        assert!(x86_64_ubuntu_runner(label), "{label}");
+    }
+    for label in [
+        "ubuntu-24.04-arm",
+        "ubuntu-26.04-arm",
+        "ubuntu-latest-arm",
+        "windows-2022",
+        "macos-15",
+        "self-hosted",
+        "ubuntu-24x04",
+        "ubuntu-24.04-extra",
+    ] {
+        assert!(!x86_64_ubuntu_runner(label), "{label}");
+    }
 }
 
 /// Two jobs, one of them the `fuzz` job, asking for different runners.

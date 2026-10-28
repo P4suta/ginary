@@ -94,7 +94,7 @@ jobs:
     needs: version-check
     env:
       SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       contents: read

@@ -573,3 +573,6 @@ mod f1_trace_could_not_be_shared_or_correlated;
 #[cfg(feature = "cli")]
 #[path = "regressions/f1_verify_accepted_inconsistent_destinations.rs"]
 mod f1_verify_accepted_inconsistent_destinations;
+
+#[path = "regressions/issue_60_runner_floor.rs"]
+mod issue_60_runner_floor;

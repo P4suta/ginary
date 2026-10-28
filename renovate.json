@@ -3,7 +3,7 @@
   "description": [
     "The dependency-update policy of this repository is the one every P4suta repository shares, in P4suta/renovate-config: when updates arrive, how they are grouped, how old a release has to be and what merges on its own are all decided there.",
     "The Mend Renovate app applies that policy here whether or not this file exists, and `extends` names it anyway, so that a run which inherits nothing, such as the development machine's pre-push freshness check, reads the same policy the app does.",
-    "This file adds the two rules below and nothing else; `tests/ci_matrix.rs` holds each of them to its scope and pins the whole file as a snapshot.",
+    "The project rules below have scope checks and a configuration snapshot in `tests/ci_matrix.rs`.",
     "It is plain JSON so that those tests can parse it with `serde_json`."
   ],
   "extends": ["github>P4suta/renovate-config"],
@@ -30,6 +30,19 @@
       "groupName": "Erlang/OTP and Gleam",
       "automerge": false,
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": [
+        "The smoke job builds on Ubuntu 24.04 and runs its artifact in ubuntu:24.04 to check the runtime floor.",
+        "The runner exception covers only Ubuntu 24.04 in ci.yml; the other runner versions remain eligible for updates."
+      ],
+      "matchManagers": ["github-actions"],
+      "matchDatasources": ["github-runners"],
+      "matchDepTypes": ["github-runner"],
+      "matchPackageNames": ["ubuntu"],
+      "matchFileNames": [".github/workflows/ci.yml"],
+      "matchCurrentValue": "/^24\\.04$/",
+      "enabled": false
     }
   ]
 }

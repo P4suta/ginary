@@ -21,7 +21,7 @@ jobs:
     name: Scorecard analysis
     # The scan is only meaningful against the default branch.
     if: github.event.repository.default_branch == github.ref_name || github.event_name == 'branch_protection_rule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       # The SARIF upload writes code-scanning alerts.
