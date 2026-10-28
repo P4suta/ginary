@@ -49,8 +49,8 @@ jobs:
           filters: .github/filters/ci.yml
       - uses: ./.github/actions/install-actionlint
         with:
-          tool: actionlint@1.7.12
-          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          tool: actionlint@1.17.0
+          sha256: 620abd485a12b6ab1125b844a876414e1d5bd2af8a3125b27f82b01d0d9d6e5a
       - run: actionlint
       - run: jq -L .github -n -e -f .github/check-required.jq
       - run: python3 -m unittest discover -s scripts/ci -p '*_test.py'
@@ -116,14 +116,11 @@ jobs:
         with:
           tool: cargo-deny@0.19.7
       - run: cargo deny check
-      # actionlint is a lint over these files and belongs to the job that
-      # lints. It is installed from its own release rather than through
-      # taiki-e/install-action, whose manifests do not carry it; the digest is
-      # the one `docs/dev/log/E7.md` records checking.
+      # actionlint uses its own pinned release because taiki-e/install-action doesn't list the tool.
       - uses: ./.github/actions/install-actionlint
         with:
-          tool: actionlint@1.7.12
-          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          tool: actionlint@1.17.0
+          sha256: 620abd485a12b6ab1125b844a876414e1d5bd2af8a3125b27f82b01d0d9d6e5a
       # And the job that installs it runs the test that needs it. A check
       # moved out of three jobs and into none is a check that was deleted, so
       # the selection is by name, and the name is asserted against the tree as
