@@ -509,7 +509,7 @@ jobs:
     # the Windows launcher's exit-code propagation is proved, and moving the
     # image is a claim about what that proof runs against. It moves with a run
     # that can be read, not with an unrelated change. See docs/dev/log/E4.md.
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 40
     permissions:
       contents: read

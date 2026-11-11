@@ -227,7 +227,7 @@ jobs:
     # windows-2022, matching ci.yml's `windows` job: the image a release is
     # built on is the image the launcher was proved on. windows-2025 is
     # offered; the two move together or not at all. See docs/dev/log/E4.md.
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 60
     permissions:
       contents: read
