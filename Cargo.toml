@@ -37,7 +37,7 @@ hex = "0.4.3"
 # Windows stub and an ELF header for every other target, and `native` reads a
 # Mach-O header for a macOS shipment, so all three are load-bearing and a
 # future trim of this line has to say so on purpose.
-object = { version = "0.40.0", default-features = false, features = [
+object = { version = "0.41.0", default-features = false, features = [
   "read",
   "elf",
   "macho",
