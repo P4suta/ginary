@@ -62,6 +62,13 @@ fn a_binary_with_no_trailer_answers_for_its_flavor() {
 }
 
 #[test]
+fn both_binary_flavors_contain_the_complete_zstd_notices() {
+    let notices = include_bytes!("../ZSTD-NOTICES.txt");
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_ginary")).unwrap();
+    assert!(binary.windows(notices.len()).any(|bytes| bytes == notices));
+}
+
+#[test]
 fn the_stub_sentence_names_the_target_the_marker_does() {
     // The two places a build says which machine it is for: the sentence a
     // payloadless stub prints, built from `Target::host()`, and the `t` field

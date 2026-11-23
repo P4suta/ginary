@@ -59,15 +59,12 @@ const RETIRED: [(&str, &str); 4] = [
         "macos-15-intel for x86_64; macos-14 or macos-15 for arm64",
     ),
     ("ubuntu-20.04", "ubuntu-22.04 or ubuntu-24.04"),
-    (
-        "windows-2019",
-        "windows-2022, which this repository already pins",
-    ),
+    ("windows-2019", "windows-2025"),
 ];
 
 /// Images that are current, so a failure proves the scan reads real values
 /// rather than an empty document.
-const CURRENT: [&str; 3] = ["macos-14", "windows-2022", "ubuntu-24.04"];
+const CURRENT: [&str; 3] = ["macos-14", "windows-2025", "ubuntu-24.04"];
 
 #[test]
 fn no_workflow_asks_for_a_runner_image_github_no_longer_schedules() {

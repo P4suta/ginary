@@ -118,7 +118,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cross@0.2.5
       - name: Build the full binary and the stub
@@ -224,9 +224,7 @@ jobs:
     needs: version-check
     env:
       SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
-    # windows-2022, matching ci.yml's `windows` job: the image a release is
-    # built on is the image the launcher was proved on. windows-2025 is
-    # offered; the two move together or not at all. See docs/dev/log/E4.md.
+    # Match the runner that tests Windows launcher exit codes in ci.yml.
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
