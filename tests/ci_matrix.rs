@@ -25,7 +25,7 @@ use crate::common::github::TOKEN_VARS;
 use crate::common::repo::{
     NameSite, ToolchainSite, WorkflowStep, exists, name_sites, names_path, option_value,
     parse_yaml, read, read_opt, read_or_missing, root, runs_and_checks, rust_toolchain_sites,
-    shell_code, shell_scripts_under, workflow_steps,
+    shell_code, shell_scripts_under, workflow_jobs, workflow_steps,
 };
 
 /// The directory `ginary build` writes an artifact into, and therefore the only
@@ -265,24 +265,23 @@ fn the_macos_job_builds_the_darwin_stub_natively_and_verifies_the_signature() {
 
 #[test]
 fn the_windows_job_asserts_exit_code_propagation() {
-    let ci = read(".github/workflows/ci.yml");
-    let job = ci.split("windows:").nth(1).expect("a windows job");
-    assert!(
-        job.contains("windows-2022"),
-        "the windows job runs on windows-2022"
-    );
+    for (workflow, id) in [
+        (".github/workflows/ci.yml", "windows"),
+        (".github/workflows/distribute.yml", "build-windows"),
+    ] {
+        let job = workflow_jobs(workflow)
+            .into_iter()
+            .find(|job| job.id == id)
+            .unwrap_or_else(|| panic!("missing {id} in {workflow}"));
+        assert_eq!(job.runs_on, ["windows-2025"], "{workflow}: {id}");
+    }
     let crossing: Vec<WorkflowStep> = workflow_steps(".github/workflows/ci.yml")
         .into_iter()
         .filter(|step| step.job == "windows" && runs_and_checks(&step.run, ARTIFACT_DIR, HALT_CODE))
         .collect();
     assert!(
         !crossing.is_empty(),
-        "the windows job proves an exit code crosses the launcher, the wine gap from D2 — so one \
-         of its steps has to start a packaged artifact out of `{ARTIFACT_DIR}` and compare the \
-         code *that* program left against {HALT_CODE}. Until E23 this rule was three `contains` \
-         over the job's whole text, and the step it passed over ran `erl.exe` directly. The three \
-         facts have to be about one command: a step that names the directory, runs `erl.exe` and \
-         checks Erlang's own code says nothing about `launch_windows::run`:\n{job}"
+        "the Windows job must launch a packaged artifact in `{ARTIFACT_DIR}` and check its exit code against {HALT_CODE}"
     );
 }
 

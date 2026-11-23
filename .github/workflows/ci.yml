@@ -505,11 +505,8 @@ jobs:
   windows:
     name: Windows build and exit-code propagation
     if: ${{ inputs.assurance == true }}
-    # windows-2025 is offered and deliberately not taken: this runner is where
-    # the Windows launcher's exit-code propagation is proved, and moving the
-    # image is a claim about what that proof runs against. It moves with a run
-    # that can be read, not with an unrelated change. See docs/dev/log/E4.md.
-    runs-on: windows-2022
+    # Test the launcher on the Windows image used for distribution.
+    runs-on: windows-2025
     timeout-minutes: 40
     permissions:
       contents: read
@@ -624,7 +621,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $evidence 'exit-code.json')
           Write-Host "erl -noshell -eval halt(3) left exit code $code"
           if ($code -ne 3) {
-            Write-Host "::error::expected exit code 3 from erl halt(3) on windows-2022, got $code"
+            Write-Host "::error::expected exit code 3 from erl halt(3), got $code"
             exit 1
           }
           } finally {
