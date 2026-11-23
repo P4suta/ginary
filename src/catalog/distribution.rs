@@ -573,6 +573,10 @@ pub fn assemble_distribution(
     }
     write_catalog(&staging.path().join(CATALOG_FILE), &catalog)?;
     files.insert(CATALOG_FILE.into(), staging.path().join(CATALOG_FILE));
+    let notices = staging.path().join("ZSTD-NOTICES.txt");
+    std::fs::write(&notices, include_bytes!("../../ZSTD-NOTICES.txt"))
+        .map_err(|error| failure(&notices, error))?;
+    files.insert("ZSTD-NOTICES.txt".into(), notices);
     let mut assets = Vec::new();
     for name in files.keys() {
         let path = staging.path().join(name);

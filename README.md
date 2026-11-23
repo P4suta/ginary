@@ -22,3 +22,5 @@ ginary build
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE-APACHE) or the [Massachusetts Institute of Technology (MIT) license](LICENSE-MIT), at your option.
+
+Include [the Zstandard notices](ZSTD-NOTICES.txt) when redistributing a Ginary binary or a packaged application.

@@ -55,3 +55,12 @@ path = ["tests/fixtures/elf/inet_gethost-x86_64-linux-gnu"]
 precedence = "override"
 SPDX-FileCopyrightText = "Ericsson AB and the Erlang/OTP contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["ZSTD-NOTICES.txt"]
+SPDX-FileCopyrightText = [
+  "2026 Alexandre Bury",
+  "Meta Platforms, Inc. and affiliates",
+  "2013-2016 Yann Collet",
+]
+SPDX-License-Identifier = "BSD-3-Clause AND BSD-2-Clause"
