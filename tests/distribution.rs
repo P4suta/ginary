@@ -199,8 +199,8 @@ fn distribution_inventory_contains_all_targets_and_verifies_runtime_bytes() {
     let report = catalog::assemble_distribution(&inputs, &out, env!("CARGO_PKG_VERSION")).unwrap();
     assert_eq!(
         report.assets.len(),
-        22,
-        "seven full binaries, seven stubs, seven runtimes, one catalog"
+        23,
+        "seven full binaries, seven stubs, seven runtimes, the catalog and the license notices"
     );
     let merged = Catalog::parse(
         &std::fs::read_to_string(out.join("catalog.json")).unwrap(),
@@ -209,7 +209,16 @@ fn distribution_inventory_contains_all_targets_and_verifies_runtime_bytes() {
     .unwrap();
     assert_eq!(merged.otp["29.0.5"].targets.len(), 7);
     let sums = std::fs::read_to_string(out.join("SHA256SUMS")).unwrap();
-    assert_eq!(sums.lines().count(), 23, "the inventory is checksummed too");
+    assert_eq!(sums.lines().count(), 24, "the inventory is checksummed too");
+    let notices = include_bytes!("../ZSTD-NOTICES.txt");
+    assert_eq!(
+        std::fs::read(out.join("ZSTD-NOTICES.txt")).unwrap(),
+        notices
+    );
+    assert!(
+        sums.lines()
+            .any(|line| line.ends_with("  ZSTD-NOTICES.txt"))
+    );
     let again = work.path().join("again");
     catalog::assemble_distribution(&inputs, &again, env!("CARGO_PKG_VERSION")).unwrap();
     assert_eq!(

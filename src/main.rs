@@ -24,6 +24,7 @@ fn main() -> ExitCode {
     // instruction on a path that then does file I/O, and it is the cheapest
     // place to put it that runs in both modes. See `ginary::stubid`.
     std::hint::black_box(&ginary::stubid::GINARY_STUB_ID);
+    std::hint::black_box(include_bytes!("../ZSTD-NOTICES.txt"));
 
     match ginary::launcher::mode() {
         Ok(Some((exe, exe_path, trailer))) => {
